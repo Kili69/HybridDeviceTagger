@@ -5,7 +5,7 @@
 - [x] Implement the AD-to-Entra device tagging workflow.
 - [x] Add required tests and documentation.
 - [x] Compile and test the project.
-- [ ] Publish the private GitHub repository under `anluca_microsoft`.
+- [x] Publish the private GitHub repository under `anluca_microsoft`.
 
 ## Engineering Guidelines
 
