@@ -17,6 +17,6 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-      - run: dotnet restore HybridDeviceTagger.slnx
-      - run: dotnet build HybridDeviceTagger.slnx --configuration Release --no-restore
-      - run: dotnet test HybridDeviceTagger.slnx --configuration Release --no-build
+      - run: dotnet restore HybridDeviceTagger.sln
+      - run: dotnet build HybridDeviceTagger.sln --configuration Release --no-restore
+      - run: dotnet test HybridDeviceTagger.sln --configuration Release --no-build

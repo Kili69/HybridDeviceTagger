@@ -1,5 +1,4 @@
 using System.DirectoryServices.Protocols;
-using System.Net;
 using HybridDeviceTagger.Models;
 using HybridDeviceTagger.Options;
 using Microsoft.Extensions.Options;
@@ -10,16 +9,23 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
 {
     private const string HybridDeviceFilter = "(&(objectCategory=computer)(msDS-DeviceID=*))";
     private readonly ActiveDirectoryOptions _options;
+    private readonly IActiveDirectoryCredentialStore _credentialStore;
+    private readonly ActiveDirectoryLdapConnectionFactory _connectionFactory;
 
-    public LdapActiveDirectoryDeviceSource(IOptions<ActiveDirectoryOptions> options)
+    public LdapActiveDirectoryDeviceSource(
+        IOptions<ActiveDirectoryOptions> options,
+        IActiveDirectoryCredentialStore credentialStore,
+        ActiveDirectoryLdapConnectionFactory connectionFactory)
     {
         _options = options.Value;
+        _credentialStore = credentialStore;
+        _connectionFactory = connectionFactory;
     }
 
-    public Task<IReadOnlyList<DirectoryDevice>> GetHybridJoinedDevicesAsync(
+    public async Task<IReadOnlyList<DirectoryDevice>> GetHybridJoinedDevicesAsync(
         CancellationToken cancellationToken)
     {
-        using var connection = CreateConnection();
+        using var connection = await CreateConnectionAsync(cancellationToken);
         var devices = new List<DirectoryDevice>();
         var pageRequest = new PageResultRequestControl(_options.PageSize);
 
@@ -52,26 +58,27 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
         }
         while (pageRequest.Cookie.Length > 0);
 
-        return Task.FromResult<IReadOnlyList<DirectoryDevice>>(devices);
+        return devices;
     }
 
-    private LdapConnection CreateConnection()
+    private async Task<LdapConnection> CreateConnectionAsync(
+        CancellationToken cancellationToken)
     {
-        var identifier = new LdapDirectoryIdentifier(_options.Server, _options.Port);
-        var useDefaultCredentials = string.IsNullOrWhiteSpace(_options.BindUsername);
-        var credential = useDefaultCredentials
-            ? CredentialCache.DefaultNetworkCredentials
-            : new NetworkCredential(_options.BindUsername, _options.BindPassword);
-        var authenticationType = useDefaultCredentials ? AuthType.Negotiate : AuthType.Basic;
-        var connection = new LdapConnection(identifier, credential, authenticationType)
+        var current = await _credentialStore.GetCurrentAsync(cancellationToken);
+        try
         {
-            Timeout = TimeSpan.FromSeconds(30)
-        };
+            return _connectionFactory.CreateBoundConnection(current);
+        }
+        catch (LdapException)
+        {
+            var next = await _credentialStore.GetNextAsync(cancellationToken);
+            if (next is null)
+            {
+                throw;
+            }
 
-        connection.SessionOptions.ProtocolVersion = 3;
-        connection.SessionOptions.SecureSocketLayer = _options.UseSsl;
-        connection.Bind();
-        return connection;
+            return _connectionFactory.CreateBoundConnection(next);
+        }
     }
 
     private static bool TryReadDevice(SearchResultEntry entry, out DirectoryDevice device)

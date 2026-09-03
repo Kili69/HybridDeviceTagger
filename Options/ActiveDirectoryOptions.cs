@@ -17,29 +17,21 @@ public sealed class ActiveDirectoryOptions : IValidatableObject
     [Required]
     public string BaseDn { get; init; } = string.Empty;
 
-    public string? BindUsername { get; init; }
+    [Required]
+    public string BindUsername { get; init; } = string.Empty;
 
-    public string? BindPassword { get; init; }
+    [Required]
+    public string BindUserDistinguishedName { get; init; } = string.Empty;
 
     [Range(1, 10000)]
     public int PageSize { get; init; } = 500;
 
     public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
     {
-        var hasUsername = !string.IsNullOrWhiteSpace(BindUsername);
-        var hasPassword = !string.IsNullOrWhiteSpace(BindPassword);
-
-        if (hasUsername != hasPassword)
+        if (!UseSsl)
         {
             yield return new ValidationResult(
-                "BindUsername and BindPassword must either both be set or both be omitted.",
-                [nameof(BindUsername), nameof(BindPassword)]);
-        }
-
-        if (hasUsername && !UseSsl)
-        {
-            yield return new ValidationResult(
-                "UseSsl must be enabled when LDAP bind credentials are configured.",
+                "UseSsl must be enabled for LDAP credential and password operations.",
                 [nameof(UseSsl)]);
         }
     }
