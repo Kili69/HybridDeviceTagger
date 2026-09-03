@@ -1,0 +1,16 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "TaggingSchedule": "0 */15 * * * *",
+    "ActiveDirectory__Server": "dc01.bloedgelaber.de",
+    "ActiveDirectory__Port": "636",
+    "ActiveDirectory__UseSsl": "true",
+    "ActiveDirectory__BaseDn": "OU=Computers,OU=Tier-0,OU=Admin,DC=bloedgelaber,DC=de",
+    "ActiveDirectory__BindUsername": "",
+    "ActiveDirectory__BindPassword": "",
+    "ActiveDirectory__PageSize": "500",
+    "Tagging__ExtensionAttribute1Value": "Tier 0"
+  }
+}
