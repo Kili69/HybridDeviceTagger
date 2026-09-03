@@ -1,0 +1,231 @@
+using System.DirectoryServices.Protocols;
+using HybridDeviceTagger.Models;
+using HybridDeviceTagger.Options;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace HybridDeviceTagger.Services;
+
+/// <summary>Discovers hybrid-joined computers through paged LDAP searches.</summary>
+public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSource
+{
+    private const string ComputerFilter = "(objectCategory=computer)";
+    private readonly ActiveDirectoryOptions _options;
+    private readonly IActiveDirectoryCredentialStore _credentialStore;
+    private readonly ActiveDirectoryLdapConnectionFactory _connectionFactory;
+    private readonly ILogger<LdapActiveDirectoryDeviceSource> _logger;
+
+    /// <summary>Initializes a new instance of the <see cref="LdapActiveDirectoryDeviceSource"/> class.</summary>
+    /// <param name="options">The LDAP search settings.</param>
+    /// <param name="credentialStore">The active and staged credential store.</param>
+    /// <param name="connectionFactory">The authenticated LDAP connection factory.</param>
+    /// <param name="logger">The structured logger.</param>
+    public LdapActiveDirectoryDeviceSource(
+        IOptions<ActiveDirectoryOptions> options,
+        IActiveDirectoryCredentialStore credentialStore,
+        ActiveDirectoryLdapConnectionFactory connectionFactory,
+        ILogger<LdapActiveDirectoryDeviceSource> logger)
+    {
+        _options = options.Value;
+        _credentialStore = credentialStore;
+        _connectionFactory = connectionFactory;
+        _logger = logger;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// OU-only paths are resolved through the forest configuration partition and searched in
+    /// every domain. Queries use server-side paging, accept binary and string GUID values, and
+    /// fall back to the staged credential when the active credential can no longer bind.
+    /// </remarks>
+    public async Task<IReadOnlyList<DirectoryDevice>> GetHybridJoinedDevicesAsync(
+        string baseDn,
+        CancellationToken cancellationToken)
+    {
+        var isForestRelative = ActiveDirectorySearchPath.IsForestRelative(baseDn);
+        var searchTargets = isForestRelative
+            ? await GetForestSearchTargetsAsync(baseDn, cancellationToken)
+            :
+            [
+                new SearchTarget(
+                    ActiveDirectorySearchPath.GetDomainDnsName(baseDn),
+                    baseDn)
+            ];
+        var devices = new Dictionary<Guid, DirectoryDevice>();
+        var resolvedOuCount = 0;
+
+        foreach (var target in searchTargets)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var connection = await CreateConnectionAsync(target.Server, cancellationToken);
+            try
+            {
+                foreach (var device in SearchDevices(connection, target.BaseDn, cancellationToken))
+                {
+                    devices[device.DeviceId] = device;
+                }
+                resolvedOuCount++;
+            }
+            catch (DirectoryOperationException exception) when (
+                isForestRelative && exception.Response?.ResultCode == ResultCode.NoSuchObject)
+            {
+                _logger.LogInformation(
+                    "OU path {OuPath} does not exist in forest domain {Domain}; skipping that domain.",
+                    baseDn,
+                    target.Server);
+            }
+        }
+
+        if (isForestRelative && resolvedOuCount == 0)
+        {
+            throw new InvalidOperationException(
+                $"OU path '{baseDn}' was not found in any domain in the forest.");
+        }
+
+        return devices.Values.ToArray();
+    }
+
+    private IReadOnlyList<DirectoryDevice> SearchDevices(
+        LdapConnection connection,
+        string baseDn,
+        CancellationToken cancellationToken)
+    {
+        var devices = new List<DirectoryDevice>();
+        var pageRequest = new PageResultRequestControl(_options.PageSize);
+
+        do
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var request = new SearchRequest(
+                baseDn,
+                ComputerFilter,
+                SearchScope.Subtree,
+                "msDS-DeviceID",
+                "name",
+                "distinguishedName");
+            request.Controls.Add(pageRequest);
+
+            var response = (SearchResponse)connection.SendRequest(request);
+            foreach (SearchResultEntry entry in response.Entries)
+            {
+                if (TryReadDevice(entry, out var device))
+                {
+                    devices.Add(device);
+                }
+            }
+
+            pageRequest.Cookie = response.Controls
+                .OfType<PageResultResponseControl>()
+                .Single()
+                .Cookie;
+        }
+        while (pageRequest.Cookie.Length > 0);
+
+        return devices;
+    }
+
+    private async Task<IReadOnlyList<SearchTarget>> GetForestSearchTargetsAsync(
+        string ouPath,
+        CancellationToken cancellationToken)
+    {
+        using var connection = await CreateConnectionAsync(_options.Server, cancellationToken);
+        var rootResponse = (SearchResponse)connection.SendRequest(new SearchRequest(
+            string.Empty,
+            "(objectClass=*)",
+            SearchScope.Base,
+            "configurationNamingContext"));
+        var configurationNamingContext = ReadString(
+            rootResponse.Entries[0].Attributes["configurationNamingContext"])
+            ?? throw new InvalidOperationException(
+                "Active Directory did not return a configuration naming context.");
+        var partitionsDn = $"CN=Partitions,{configurationNamingContext}";
+        var domainsResponse = (SearchResponse)connection.SendRequest(new SearchRequest(
+            partitionsDn,
+            "(&(objectClass=crossRef)(systemFlags:1.2.840.113556.1.4.803:=3))",
+            SearchScope.OneLevel,
+            "nCName",
+            "dnsRoot"));
+
+        return domainsResponse.Entries
+            .Cast<SearchResultEntry>()
+            .Select(entry => new
+            {
+                NamingContext = ReadString(entry.Attributes["nCName"]),
+                DnsRoot = ReadString(entry.Attributes["dnsRoot"])
+            })
+            .Where(domain =>
+                !string.IsNullOrWhiteSpace(domain.NamingContext) &&
+                !string.IsNullOrWhiteSpace(domain.DnsRoot))
+            .Select(domain => new SearchTarget(
+                domain.DnsRoot!,
+                ActiveDirectorySearchPath.CombineWithDomain(ouPath, domain.NamingContext!)))
+            .OrderBy(target => target.Server, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private async Task<LdapConnection> CreateConnectionAsync(
+        string server,
+        CancellationToken cancellationToken)
+    {
+        var current = await _credentialStore.GetCurrentAsync(cancellationToken);
+        try
+        {
+            return _connectionFactory.CreateBoundConnection(current, server);
+        }
+        catch (LdapException)
+        {
+            var next = await _credentialStore.GetNextAsync(cancellationToken);
+            if (next is null)
+            {
+                throw;
+            }
+
+            return _connectionFactory.CreateBoundConnection(next, server);
+        }
+    }
+
+    private static bool TryReadDevice(SearchResultEntry entry, out DirectoryDevice device)
+    {
+        device = default!;
+        if (!TryReadGuid(entry.Attributes["msDS-DeviceID"], out var deviceId))
+        {
+            return false;
+        }
+
+        var name = ReadString(entry.Attributes["name"]) ?? deviceId.ToString();
+        var distinguishedName = ReadString(entry.Attributes["distinguishedName"])
+            ?? entry.DistinguishedName;
+        device = new DirectoryDevice(deviceId, name, distinguishedName);
+        return true;
+    }
+
+    private static bool TryReadGuid(DirectoryAttribute? attribute, out Guid value)
+    {
+        value = Guid.Empty;
+        if (attribute is null || attribute.Count == 0)
+        {
+            return false;
+        }
+
+        return attribute[0] switch
+        {
+            byte[] bytes when bytes.Length == 16 => TryCreateGuid(bytes, out value),
+            string text => Guid.TryParse(text.Trim('{', '}'), out value),
+            _ => false
+        };
+    }
+
+    private static bool TryCreateGuid(byte[] bytes, out Guid value)
+    {
+        value = new Guid(bytes);
+        return true;
+    }
+
+    private static string? ReadString(DirectoryAttribute? attribute) =>
+        attribute is null || attribute.Count == 0
+            ? null
+            : attribute[0]?.ToString();
+
+    private sealed record SearchTarget(string Server, string BaseDn);
+}

@@ -21,7 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\HybridDeviceTagger.csproj" />
+    <ProjectReference Include="..\..\src\HybridDeviceTagger\HybridDeviceTagger.csproj" />
   </ItemGroup>
 
 </Project>

@@ -59,6 +59,25 @@ public sealed class PasswordRotationServiceTests
     }
 
     [Fact]
+    public async Task RotateIfDueAsync_DefersWithoutStagingWhenLdapsIsUnavailable()
+    {
+        var store = new StubCredentialStore(CreateCredential("current", Now.AddDays(-25)), Now);
+        var passwordClient = new StubPasswordClient("current")
+        {
+            SecureConnectionAvailable = false
+        };
+        var service = CreateService(store, passwordClient);
+
+        var result = await service.RotateIfDueAsync(CancellationToken.None);
+
+        Assert.Equal(PasswordRotationOutcome.DeferredNoSecureConnection, result.Outcome);
+        Assert.Equal(25, result.CurrentPasswordAgeDays);
+        Assert.Equal(0, store.StageCount);
+        Assert.Equal(0, passwordClient.ChangeCount);
+        Assert.Equal("current", store.Current.Password);
+    }
+
+    [Fact]
     public void Generate_ContainsRequiredCharacterClasses()
     {
         var password = new SecurePasswordGenerator().Generate(40);
@@ -117,12 +136,20 @@ public sealed class PasswordRotationServiceTests
 
         public string ActivePassword { get; private set; }
 
+        public bool SecureConnectionAvailable { get; init; } = true;
+
         public int ChangeCount { get; private set; }
 
         public Task<bool> CanBindAsync(
             StoredDirectoryCredential credential,
             CancellationToken cancellationToken) =>
             Task.FromResult(credential.Password == ActivePassword);
+
+        public Task<bool> CanBindSecurelyAsync(
+            StoredDirectoryCredential credential,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(
+                SecureConnectionAvailable && credential.Password == ActivePassword);
 
         public Task ChangePasswordAsync(
             StoredDirectoryCredential currentCredential,

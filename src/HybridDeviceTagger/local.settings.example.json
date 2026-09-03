@@ -1,0 +1,28 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "TaggingSchedule": "0 */15 * * * *",
+    "PasswordRotationSchedule": "0 30 2 * * *",
+    "ActiveDirectory__Server": "dc01.bloedgelaber.de",
+    "ActiveDirectory__Port": "636",
+    "ActiveDirectory__UseSsl": "true",
+    "ActiveDirectory__AllowLdapFallback": "false",
+    "ActiveDirectory__LdapFallbackPort": "389",
+    "ActiveDirectory__BindUsername": "svc-HybridDeviceTagger@bloedgelaber.de",
+    "ActiveDirectory__BindUserDistinguishedName": "CN=svc-HybridDeviceTagger,OU=Service Accounts,DC=bloedgelaber,DC=de",
+    "ActiveDirectory__PageSize": "500",
+    "KeyVault__VaultUri": "https://replace-me.vault.azure.net/",
+    "KeyVault__CurrentPasswordSecretName": "hybrid-device-tagger-ad-password-current",
+    "KeyVault__NextPasswordSecretName": "hybrid-device-tagger-ad-password-next",
+    "PasswordRotation__RotateAfterDays": "25",
+    "PasswordRotation__PasswordLength": "40",
+    "PasswordRotation__SecretExpiryDays": "35",
+    "Tagging__Rules__0__BaseDn": "OU=Tier0,OU=Admin",
+    "Tagging__Rules__0__ExtensionAttributes__extensionAttribute1": "PAW",
+    "Tagging__Rules__0__ExtensionAttributes__extensionAttribute2": "Tier0",
+    "Tagging__Rules__1__BaseDn": "OU=Server",
+    "Tagging__Rules__1__ExtensionAttributes__extensionAttribute2": "Tier1"
+  }
+}

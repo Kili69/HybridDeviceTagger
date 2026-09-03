@@ -1,0 +1,96 @@
+using System.DirectoryServices.Protocols;
+using System.Net;
+using HybridDeviceTagger.Models;
+using HybridDeviceTagger.Options;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace HybridDeviceTagger.Services;
+
+/// <summary>Creates authenticated LDAP v3 connections using the configured LDAPS endpoint.</summary>
+public sealed class ActiveDirectoryLdapConnectionFactory
+{
+    private readonly ActiveDirectoryOptions _options;
+    private readonly ILogger<ActiveDirectoryLdapConnectionFactory> _logger;
+
+    /// <summary>Initializes a new instance of the <see cref="ActiveDirectoryLdapConnectionFactory"/> class.</summary>
+    /// <param name="options">The validated Active Directory connection settings.</param>
+    /// <param name="logger">The structured logger.</param>
+    public ActiveDirectoryLdapConnectionFactory(
+        IOptions<ActiveDirectoryOptions> options,
+        ILogger<ActiveDirectoryLdapConnectionFactory> logger)
+    {
+        _options = options.Value;
+        _logger = logger;
+    }
+
+    /// <summary>Creates and binds a connection, disposing it if the bind fails.</summary>
+    /// <param name="credential">The directory credential used for the bind.</param>
+    /// <param name="server">The optional domain DNS name; the configured server is used when omitted.</param>
+    /// <returns>An authenticated connection owned by the caller.</returns>
+    public LdapConnection CreateBoundConnection(
+        StoredDirectoryCredential credential,
+        string? server = null)
+    {
+        var targetServer = server ?? _options.Server;
+        try
+        {
+            return CreateBoundConnection(credential, targetServer, _options.Port, useSsl: true);
+        }
+        catch (LdapException exception) when (
+            _options.AllowLdapFallback && IsConnectionUnavailable(exception))
+        {
+            _logger.LogWarning(
+                exception,
+                "LDAPS is unavailable. Falling back to signed and sealed LDAP Negotiate authentication for read and bind operations.");
+            return CreateBoundConnection(
+                credential,
+                targetServer,
+                _options.LdapFallbackPort,
+                useSsl: false);
+        }
+    }
+
+    /// <summary>Creates an LDAPS connection without allowing an LDAP fallback.</summary>
+    /// <param name="credential">The directory credential used for the bind.</param>
+    /// <returns>An authenticated secure connection owned by the caller.</returns>
+    public LdapConnection CreateSecureBoundConnection(StoredDirectoryCredential credential) =>
+        CreateBoundConnection(credential, _options.Server, _options.Port, useSsl: true);
+
+    private LdapConnection CreateBoundConnection(
+        StoredDirectoryCredential credential,
+        string server,
+        int port,
+        bool useSsl)
+    {
+        var identifier = new LdapDirectoryIdentifier(server, port);
+        var networkCredential = new NetworkCredential(credential.Username, credential.Password);
+        var authenticationType = useSsl ? AuthType.Basic : AuthType.Negotiate;
+        var connection = new LdapConnection(identifier, networkCredential, authenticationType)
+        {
+            Timeout = TimeSpan.FromSeconds(30)
+        };
+
+        connection.SessionOptions.ProtocolVersion = 3;
+        connection.SessionOptions.SecureSocketLayer = useSsl;
+        if (!useSsl)
+        {
+            connection.SessionOptions.Signing = true;
+            connection.SessionOptions.Sealing = true;
+        }
+
+        try
+        {
+            connection.Bind();
+            return connection;
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+    }
+
+    private static bool IsConnectionUnavailable(LdapException exception) =>
+        exception.ErrorCode is 51 or 52 or 81 or 85 or 91;
+}
