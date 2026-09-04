@@ -1,4 +1,197 @@
 #Requires -Version 7.2
+#Requires -Modules ActiveDirectory
+# Project-Version: 0.1.20260904.3
+# Author: andreas.lucas@microsoft.com (aka Kili)
+
+<#
+.SYNOPSIS
+Validates and deploys HybridDeviceTagger to an Azure Functions Flex Consumption environment.
+
+.DESCRIPTION
+Validates local prerequisites, the selected Azure account, existing networking and Key Vault
+resources, Active Directory connectivity, tagging rules, and the Bicep deployment. Depending on
+the selected switches, the script can prepare the Active Directory service account, run a
+read-only validation, show Azure What-If output, deploy infrastructure, assign Microsoft Graph
+application roles, and publish the .NET Function App.
+
+The installer references existing virtual networks, subnets, and Key Vaults without creating or
+modifying those shared resources. It uses the supplied Active Directory credentials only in the
+local PowerShell process and never sends the password to Azure Resource Manager. Restricted
+management administrative-unit role assignments require separate explicit approval.
+
+Before any Azure resource, permission, Active Directory account, Key Vault secret, or application
+code is changed, the installer displays a complete action summary and requests standard PowerShell
+confirmation. Use -Confirm to force the prompt or -Confirm:$false for approved unattended runs.
+
+Every invocation replaces HybridDeviceTagger-Install.log in the current user's temporary
+directory. The transcript records the complete console workflow and is closed on success,
+validation failure, cancellation, or an early operational return.
+
+An empty required value or an unsuitable FC1 integration subnet entered interactively is requested
+again. A missing parameter-selected VNet resource group, VNet, or subnet, an unsuitable
+parameter-selected integration subnet, or a VNet region mismatch displays only the actionable
+exception message by default. Use -Verbose to include the full PowerShell error record with source
+location and stack information. Unexpected operational and deployment failures remain terminating
+errors in both modes.
+
+When required values are omitted during an interactive run, the installer asks for the Azure
+subscription first and then collects the remaining values in installation order.
+
+.PARAMETER SubscriptionId
+Optional Azure subscription that owns the Function App deployment. When omitted during an interactive
+run, the installer proposes the active Azure CLI subscription, which can be accepted by pressing Enter.
+
+.PARAMETER ResourceGroupName
+Target resource group for app-owned Azure resources. Interactive runs default to
+rg-HybridDeviceTagger when the parameter is omitted.
+
+.PARAMETER Location
+Azure region for newly created resources. It must support FC1 and match the integration subnet.
+Interactive runs default to westeurope when the parameter is omitted.
+
+.PARAMETER FunctionAppName
+Globally unique Function App name. Interactive runs default to func-devtagger-yyyyMMdd using the
+current UTC date when the parameter is omitted.
+
+.PARAMETER StorageAccountName
+Globally unique storage account name used for Functions storage, deployment packages, and the
+membership ownership ledger. Interactive runs derive the default from FunctionAppName, using an
+st prefix and removing characters that Azure Storage names do not support.
+
+.PARAMETER VirtualNetworkName
+Name of the existing virtual network used by the Function App.
+
+.PARAMETER SubnetName
+Name of the existing subnet delegated for Flex Consumption integration.
+
+.PARAMETER PrivateEndpointSubnetName
+Name of the existing subnet used for the storage private endpoint.
+
+.PARAMETER VirtualNetworkResourceGroupName
+Resource group containing the existing virtual network.
+
+.PARAMETER KeyVaultName
+Name of the existing Key Vault that stores the current and staged AD passwords. Interactive runs
+derive the default from FunctionAppName using a kv prefix and the Function App name suffix.
+
+.PARAMETER KeyVaultResourceGroupName
+Resource group containing the existing Key Vault. Interactive runs default to ResourceGroupName.
+
+.PARAMETER ActiveDirectoryForestDomain
+DNS name of the Active Directory forest. Interactive runs propose the forest of the logged-on
+Active Directory user when it can be detected. Workgroup systems have no default.
+
+.PARAMETER ActiveDirectoryServer
+Optional DNS name of the domain controller used for validation and initial forest discovery.
+Defaults to ActiveDirectoryForestDomain for DNS-based discovery.
+
+.PARAMETER AllowLdapFallback
+Allows signed and sealed LDAP on the fallback port when strict LDAPS is unavailable. Password
+changes still require LDAPS.
+
+.PARAMETER LdapFallbackPort
+LDAP fallback port. The default is 389.
+
+.PARAMETER ActiveDirectoryTrustedCertificatePath
+Optional path to a public root CA or self-signed lab DC certificate used as the LDAPS trust anchor.
+Private keys are rejected and never packaged.
+
+.PARAMETER ADServiceAccount
+UPN used by the Function App to bind to Active Directory. Interactive runs default to
+HybridDeviceTagger@ActiveDirectoryForestDomain.
+
+.PARAMETER ActiveDirectoryBindUserDistinguishedName
+Distinguished name of the AD service account used for password changes.
+
+.PARAMETER ActiveDirectoryCredential
+Credential used locally to validate directory bind and read access. Interactive runs request the
+AD service-account password when the credential is omitted and directory checks are enabled.
+
+.PARAMETER ActiveDirectoryProvisioningCredential
+Separate delegated credential used only when preparing or resetting the AD service account.
+
+.PARAMETER VirtualNetworkSubscriptionId
+Subscription containing the existing virtual network. Interactive runs propose SubscriptionId,
+which can be accepted by pressing Enter.
+
+.PARAMETER KeyVaultSubscriptionId
+Subscription containing the existing Key Vault. Defaults to SubscriptionId.
+
+.PARAMETER CurrentCredentialEntryName
+Name of the Key Vault secret containing the active AD password.
+
+.PARAMETER StagedCredentialEntryName
+Name of the Key Vault secret used while rotating or recovering the AD password.
+
+.PARAMETER TaggingRules
+One or more rules containing Name, Description, BaseDn, and at least one extension-attribute,
+Entra-group, or administrative-unit action.
+
+.PARAMETER TaggingSchedule
+Six-field NCRONTAB schedule for device reconciliation. The default runs every 15 minutes.
+
+.PARAMETER RotationSchedule
+Six-field NCRONTAB schedule for password-rotation checks. The default runs daily at 02:30 UTC.
+
+.PARAMETER MaximumInstanceCount
+Maximum Flex Consumption scale-out instance count.
+
+.PARAMETER InstanceMemoryMB
+Memory allocated to each FC1 instance. Valid values are 512, 2048, and 4096 MB.
+
+.PARAMETER InitialPasswordLength
+Length of a generated password when preparing or resetting the AD service account.
+
+.PARAMETER InitialSecretExpiryDays
+Lifetime in days assigned to the initial Key Vault password secret.
+
+.PARAMETER Tags
+Azure resource tags applied to app-owned resources.
+
+.PARAMETER CreateResourceGroup
+Creates the target resource group when it does not already exist.
+
+.PARAMETER RegisterProviders
+Registers missing Azure resource providers required by the deployment.
+
+.PARAMETER PrepareActiveDirectoryAccountOnly
+Creates or resets the AD service account, writes the current password secret, validates access,
+and exits before Azure infrastructure or code deployment.
+
+.PARAMETER SkipActiveDirectoryDirectoryChecks
+Skips repeated forest, OU, and service-account directory checks for an existing installation.
+Strict endpoint and certificate validation still runs.
+
+.PARAMETER ValidateOnly
+Runs all supported prerequisite and configuration validation without changing resources.
+
+.PARAMETER SkipCodeDeployment
+Deploys or validates infrastructure and permissions without publishing Function App code.
+
+.PARAMETER GrantRestrictedAdministrativeUnitRole
+Explicitly approves creation and assignment of the least-privilege custom role at every configured
+restricted management administrative-unit scope.
+
+.EXAMPLE
+$credential = Get-Credential 'svc-HybridDeviceTagger@contoso.com'
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters `
+    -ActiveDirectoryCredential $credential `
+    -ValidateOnly
+
+Runs the complete read-only preflight using values collected in the parameters splat.
+
+.EXAMPLE
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters -Confirm:$false
+
+Deploys the validated infrastructure and Function package. Run ValidateOnly and WhatIf first.
+
+.NOTES
+Author: Andreas Lucas (aka Kili) <andreas.lucas@microsoft.com>
+
+Installer log: $env:TEMP\HybridDeviceTagger-Install.log
+
+DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+#>
 
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
     'PSAvoidUsingWriteHost',
@@ -18,71 +211,53 @@
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
     'PSUseShouldProcessForStateChangingFunctions',
     '',
-    Justification = 'Internal AD mutation helpers are guarded by an explicit default-No account confirmation and skipped for ValidateOnly and WhatIf.'
+    Justification = 'Internal mutations are guarded by the script-level ShouldProcess approval and skipped for ValidateOnly and WhatIf.'
 )]
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
-    [Parameter(Mandatory)]
-    [ValidateNotNullOrEmpty()]
-    [ValidateLength(1, 320)]
-    [string]$ExpectedAzureAccount,
-
-    [Parameter(Mandatory)]
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$SubscriptionId,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 90)]
     [string]$ResourceGroupName,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 64)]
     [string]$Location,
 
-    [Parameter(Mandatory)]
     [ValidatePattern('^[a-zA-Z0-9-]{2,60}$')]
     [string]$FunctionAppName,
 
-    [Parameter(Mandatory)]
     [ValidatePattern('^[a-z0-9]{3,24}$')]
     [string]$StorageAccountName,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 64)]
     [string]$VirtualNetworkName,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 80)]
     [string]$SubnetName,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 80)]
     [string]$PrivateEndpointSubnetName,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 90)]
     [string]$VirtualNetworkResourceGroupName,
 
-    [Parameter(Mandatory)]
     [ValidatePattern('^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$')]
     [string]$KeyVaultName,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 90)]
     [string]$KeyVaultResourceGroupName,
 
-    [Parameter(Mandatory)]
     [ValidatePattern('^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$')]
     [string]$ActiveDirectoryForestDomain,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 253)]
     [string]$ActiveDirectoryServer,
@@ -96,12 +271,10 @@ param(
     [ValidateLength(1, 4096)]
     [string]$ActiveDirectoryTrustedCertificatePath,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 256)]
-    [string]$ActiveDirectoryBindUsername,
+    [string]$ADServiceAccount,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 2048)]
     [string]$ActiveDirectoryBindUserDistinguishedName,
@@ -113,7 +286,7 @@ param(
     [pscredential]$ActiveDirectoryProvisioningCredential,
 
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
-    [string]$VirtualNetworkSubscriptionId = $SubscriptionId,
+    [string]$VirtualNetworkSubscriptionId,
 
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$KeyVaultSubscriptionId = $SubscriptionId,
@@ -126,7 +299,6 @@ param(
     [ValidateLength(1, 127)]
     [string]$StagedCredentialEntryName = 'hybrid-device-tagger-ad-password-next',
 
-    [Parameter(Mandatory)]
     [ValidateNotNull()]
     [ValidateCount(1, 100)]
     [object[]]$TaggingRules,
@@ -167,12 +339,25 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $script:TrustedCertificate = $null
+$script:CompactInstallerError = $false
+$virtualNetworkResourceGroupWasSupplied = $PSBoundParameters.ContainsKey(
+    'VirtualNetworkResourceGroupName'
+)
+$virtualNetworkSubscriptionWasSupplied = $PSBoundParameters.ContainsKey(
+    'VirtualNetworkSubscriptionId'
+)
+$virtualNetworkNameWasSupplied = $PSBoundParameters.ContainsKey('VirtualNetworkName')
+$subnetNameWasSupplied = $PSBoundParameters.ContainsKey('SubnetName')
+$privateEndpointSubnetNameWasSupplied = $PSBoundParameters.ContainsKey(
+    'PrivateEndpointSubnetName'
+)
 
 $scriptRoot = $PSScriptRoot
 $repositoryRoot = Split-Path -Parent $scriptRoot
 $templatePath = Join-Path $scriptRoot 'main.bicep'
 $projectPath = Join-Path $repositoryRoot 'src/HybridDeviceTagger/HybridDeviceTagger.csproj'
 $trustedCertificatePackagePath = 'certificates/active-directory-trust-anchor.pem'
+$activeDirectoryServiceAccountDescription = 'Service account used by HybridDeviceTagger for Active Directory device discovery and password rotation.'
 $requiredProviders = @(
     'Microsoft.App',
     'Microsoft.Authorization',
@@ -250,6 +435,78 @@ function Write-Step {
     Write-Host "`n==> $Message" -ForegroundColor Cyan
 }
 
+function Get-AppResourceNameSuffix {
+    $normalizedFunctionAppName = $FunctionAppName.ToLowerInvariant()
+    if ($normalizedFunctionAppName.StartsWith('func-', [StringComparison]::Ordinal)) {
+        return $normalizedFunctionAppName.Substring(5)
+    }
+    $normalizedFunctionAppName
+}
+
+function Write-InstallationSummary {
+    param([Parameter()][object[]]$RestrictedAdministrativeUnits = @())
+
+    Write-Step 'Installation summary'
+    $mode = if ($ValidateOnly) {
+        'Validation only (no changes)'
+    }
+    elseif ($WhatIfPreference) {
+        'ARM What-If (no changes)'
+    }
+    elseif ($PrepareActiveDirectoryAccountOnly) {
+        'Active Directory service-account preparation'
+    }
+    else {
+        'Azure infrastructure and Function App deployment'
+    }
+
+    Write-Host "Mode: $mode"
+    Write-Host "Azure subscription: $SubscriptionId"
+    Write-Host "Target resource group: $ResourceGroupName"
+    Write-Host "Azure location: $Location"
+
+    if ($PrepareActiveDirectoryAccountOnly) {
+        Write-Host 'Planned changes:'
+        Write-Host "  - Create or reset AD account: $ActiveDirectoryBindUserDistinguishedName"
+        Write-Host "  - Update Key Vault secret: $KeyVaultName/$CurrentCredentialEntryName"
+        Write-Host '  - Azure infrastructure and Function App code will not be deployed.'
+        return
+    }
+
+    $resourceNameSuffix = Get-AppResourceNameSuffix
+    Write-Host 'Planned Azure resources to create or update:'
+    Write-Host "  - Function App: $FunctionAppName (.NET 8 isolated, Flex Consumption FC1)"
+    Write-Host "  - Storage account: $StorageAccountName with deployment, membership-ledger, and run-traces containers"
+    Write-Host "  - Flex Consumption plan: asp-$resourceNameSuffix"
+    Write-Host "  - Log Analytics workspace: log-$resourceNameSuffix"
+    Write-Host "  - Application Insights: appi-$resourceNameSuffix"
+    Write-Host "  - Storage private endpoint: pep-$resourceNameSuffix-blob"
+    Write-Host '  - Managed-identity role assignments for Storage and the existing Key Vault'
+    Write-Host '  - Microsoft Graph application permissions for device, group, and administrative-unit management'
+    if ($RestrictedAdministrativeUnits.Count -gt 0) {
+        Write-Host "  - Restricted administrative-unit role assignments: $($RestrictedAdministrativeUnits.Count)"
+    }
+    if ($RegisterProviders) {
+        Write-Host '  - Register required Azure resource providers when missing'
+    }
+    if ($CreateResourceGroup) {
+        Write-Host "  - Create resource group '$ResourceGroupName' when missing"
+    }
+    if ($SkipCodeDeployment) {
+        Write-Host '  - Function App code deployment is skipped.'
+    }
+    else {
+        Write-Host '  - Build and deploy the Function App code package'
+    }
+
+    Write-Host 'Existing shared resources referenced without creation:'
+    Write-Host "  - Virtual network: $VirtualNetworkSubscriptionId/$VirtualNetworkResourceGroupName/$VirtualNetworkName"
+    Write-Host "  - Integration subnet: $SubnetName"
+    Write-Host "  - Private endpoint subnet: $PrivateEndpointSubnetName"
+    Write-Host "  - Key Vault: $KeyVaultResourceGroupName/$KeyVaultName"
+    Write-Host '  - The Active Directory service account is not changed during normal deployment.'
+}
+
 function Invoke-AzureCli {
     param(
         [Parameter(Mandatory)][string[]]$Arguments,
@@ -296,6 +553,120 @@ function Assert-Command {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         throw "Required command '$Name' was not found. $InstallHint"
     }
+}
+
+function Read-RequiredInstallerValue {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Prompt
+    )
+
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw "$Name must be supplied explicitly for noninteractive execution."
+    }
+    do {
+        $value = Read-Host $Prompt
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value.Trim()
+        }
+
+        Write-Host "$Name cannot be empty. Please enter a value." -ForegroundColor Yellow
+    } while ($true)
+}
+
+function Read-InstallerValueWithDefault {
+    param(
+        [Parameter(Mandatory)][string]$Prompt,
+        [Parameter(Mandatory)][string]$DefaultValue
+    )
+
+    $enteredValue = Read-Host "$Prompt [$DefaultValue]"
+    if ([string]::IsNullOrWhiteSpace($enteredValue)) {
+        return $DefaultValue
+    }
+
+    $enteredValue.Trim()
+}
+
+function Read-InteractiveTaggingRule {
+    $ruleName = Read-InstallerValueWithDefault `
+        -Prompt 'Rule name' `
+        -DefaultValue 'Rule1'
+    $ruleDescription = Read-InstallerValueWithDefault `
+        -Prompt 'Rule description' `
+        -DefaultValue '1st Tagging Rule'
+    $baseDn = Read-InstallerValueWithDefault `
+        -Prompt 'Base DN' `
+        -DefaultValue 'OU=Computers,OU=Admin'
+    $extensionAttribute1Value = Read-InstallerValueWithDefault `
+        -Prompt 'ExtensionAttribute1 value' `
+        -DefaultValue 'Tier 0'
+
+    @{
+        Name = $ruleName
+        Description = $ruleDescription
+        BaseDn = $baseDn
+        ExtensionAttributes = @{
+            extensionAttribute1 = $extensionAttribute1Value
+        }
+    }
+}
+
+function Get-LoggedOnUserForestDomain {
+    try {
+        $forest = Get-ADForest -Current LoggedOnUser -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace([string]$forest.Name)) {
+            return ([string]$forest.Name).Trim()
+        }
+    }
+    catch {
+        Write-Verbose "No Active Directory forest default was detected for the logged-on user: $($_.Exception.Message)"
+    }
+
+    $null
+}
+
+function ConvertTo-LdapFilterValue {
+    param([Parameter(Mandatory)][string]$Value)
+
+    $Value.Replace('\', '\5c').
+        Replace('*', '\2a').
+        Replace('(', '\28').
+        Replace(')', '\29').
+        Replace([string][char]0, '\00')
+}
+
+function Resolve-ADServiceAccountDistinguishedName {
+    $escapedServiceAccount = ConvertTo-LdapFilterValue -Value $ADServiceAccount
+    $parameters = @{
+        LDAPFilter = "(userPrincipalName=$escapedServiceAccount)"
+        Server = $ActiveDirectoryServer
+        Properties = 'DistinguishedName'
+        ErrorAction = 'Stop'
+    }
+    if ($null -ne $ActiveDirectoryProvisioningCredential) {
+        $parameters.Credential = $ActiveDirectoryProvisioningCredential
+    }
+    elseif ($null -ne $ActiveDirectoryCredential) {
+        $parameters.Credential = $ActiveDirectoryCredential
+    }
+
+    try {
+        $accounts = @(Get-ADUser @parameters)
+    }
+    catch {
+        Write-Verbose "The distinguished name for AD service account '$ADServiceAccount' could not be resolved automatically: $($_.Exception.Message)"
+        return $null
+    }
+
+    if ($accounts.Count -gt 1) {
+        throw "More than one Active Directory user has the UPN '$ADServiceAccount'."
+    }
+    if ($accounts.Count -eq 1) {
+        return [string]$accounts[0].DistinguishedName
+    }
+
+    $null
 }
 
 function Convert-DnsNameToDistinguishedName {
@@ -614,41 +985,18 @@ function Get-LdapServerForDomain {
     $DomainDnsName
 }
 
-function Confirm-ActiveDirectoryAccountChange {
-    param([Parameter(Mandatory)][ValidateSet('Create', 'Reset')][string]$Action)
-
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
-        throw "Active Directory account $($Action.ToLowerInvariant()) requires interactive confirmation."
-    }
-
-    $verb = if ($Action -eq 'Create') { 'create' } else { 'reset the password for' }
-    $choices = @(
-        [System.Management.Automation.Host.ChoiceDescription]::new('&Yes', "$Action the configured service account."),
-        [System.Management.Automation.Host.ChoiceDescription]::new('&No', 'Cancel without changing Active Directory.')
-    )
-    $choice = $Host.UI.PromptForChoice(
-        "$Action Active Directory service account?",
-        "Do you want to $verb '$ActiveDirectoryBindUserDistinguishedName'?",
-        $choices,
-        1
-    )
-    if ($choice -ne 0) {
-        throw 'Installation canceled without changing the Active Directory service account.'
-    }
-}
-
 function Get-ActiveDirectoryAccountName {
-    $accountName = if ($ActiveDirectoryBindUsername.Contains('@')) {
-        $ActiveDirectoryBindUsername.Split('@', 2)[0]
+    $accountName = if ($ADServiceAccount.Contains('@')) {
+        $ADServiceAccount.Split('@', 2)[0]
     }
-    elseif ($ActiveDirectoryBindUsername.Contains('\')) {
-        $ActiveDirectoryBindUsername.Split('\', 2)[1]
+    elseif ($ADServiceAccount.Contains('\')) {
+        $ADServiceAccount.Split('\', 2)[1]
     }
     else {
-        $ActiveDirectoryBindUsername
+        $ADServiceAccount
     }
     if ($accountName.Length -gt 20) {
-        throw "The sAMAccountName derived from '$ActiveDirectoryBindUsername' exceeds 20 characters."
+        throw "The sAMAccountName derived from '$ADServiceAccount' exceeds 20 characters."
     }
     $accountName
 }
@@ -693,7 +1041,7 @@ function Set-RandomActiveDirectoryCredential {
         }
         $securePassword.MakeReadOnly()
         $script:ActiveDirectoryCredential = [pscredential]::new(
-            $ActiveDirectoryBindUsername,
+            $ADServiceAccount,
             $securePassword
         )
     }
@@ -728,7 +1076,7 @@ function Select-ActiveDirectoryResetCredential {
         0 { Set-RandomActiveDirectoryCredential }
         1 {
             $script:ActiveDirectoryCredential = Get-Credential `
-                -UserName $ActiveDirectoryBindUsername `
+                -UserName $ADServiceAccount `
                 -Message 'Enter the new Active Directory service-account password'
             if ($null -eq $script:ActiveDirectoryCredential) {
                 throw 'Password entry was canceled without changing Active Directory.'
@@ -828,7 +1176,6 @@ function Initialize-ActiveDirectoryServiceAccountWithAdModule {
         return
     }
 
-    Confirm-ActiveDirectoryAccountChange -Action Create
     Set-RandomActiveDirectoryCredential
     $dnMatch = [regex]::Match($ActiveDirectoryBindUserDistinguishedName, '(?i)^CN=([^,]+),(.+)$')
     if (-not $dnMatch.Success) {
@@ -837,6 +1184,7 @@ function Initialize-ActiveDirectoryServiceAccountWithAdModule {
 
     $parameters = @{
         Name = $dnMatch.Groups[1].Value
+        Description = $activeDirectoryServiceAccountDescription
         SamAccountName = Get-ActiveDirectoryAccountName
         Path = $dnMatch.Groups[2].Value
         Server = $ActiveDirectoryServer
@@ -845,8 +1193,8 @@ function Initialize-ActiveDirectoryServiceAccountWithAdModule {
         Enabled = $true
         ChangePasswordAtLogon = $false
     }
-    if ($ActiveDirectoryBindUsername.Contains('@')) {
-        $parameters.UserPrincipalName = $ActiveDirectoryBindUsername
+    if ($ADServiceAccount.Contains('@')) {
+        $parameters.UserPrincipalName = $ADServiceAccount
     }
     New-ADUser @parameters
     $script:ActiveDirectoryPasswordChanged = $true
@@ -910,7 +1258,6 @@ function Initialize-ActiveDirectoryServiceAccount {
             return
         }
 
-        Confirm-ActiveDirectoryAccountChange -Action Create
         Set-RandomActiveDirectoryCredential
         $dnMatch = [regex]::Match($ActiveDirectoryBindUserDistinguishedName, '(?i)^CN=([^,]+),(.+)$')
         if (-not $dnMatch.Success) {
@@ -929,6 +1276,12 @@ function Initialize-ActiveDirectoryServiceAccount {
         )
         $null = $addRequest.Attributes.Add(
             [System.DirectoryServices.Protocols.DirectoryAttribute]::new(
+                'description',
+                $activeDirectoryServiceAccountDescription
+            )
+        )
+        $null = $addRequest.Attributes.Add(
+            [System.DirectoryServices.Protocols.DirectoryAttribute]::new(
                 'sAMAccountName',
                 (Get-ActiveDirectoryAccountName)
             )
@@ -936,11 +1289,11 @@ function Initialize-ActiveDirectoryServiceAccount {
         $null = $addRequest.Attributes.Add(
             [System.DirectoryServices.Protocols.DirectoryAttribute]::new('userAccountControl', '514')
         )
-        if ($ActiveDirectoryBindUsername.Contains('@')) {
+        if ($ADServiceAccount.Contains('@')) {
             $null = $addRequest.Attributes.Add(
                 [System.DirectoryServices.Protocols.DirectoryAttribute]::new(
                     'userPrincipalName',
-                    $ActiveDirectoryBindUsername
+                    $ADServiceAccount
                 )
             )
         }
@@ -959,8 +1312,8 @@ function Initialize-ActiveDirectoryServiceAccount {
 function Test-LdapConfiguration {
     Add-Type -AssemblyName System.DirectoryServices.Protocols
 
-    if ($ActiveDirectoryCredential.UserName -ine $ActiveDirectoryBindUsername) {
-        throw "ActiveDirectoryCredential.UserName must match ActiveDirectoryBindUsername."
+    if ($ActiveDirectoryCredential.UserName -ine $ADServiceAccount) {
+        throw "ActiveDirectoryCredential.UserName must match ADServiceAccount."
     }
 
     $connection = $null
@@ -1132,13 +1485,34 @@ function Assert-Subnet {
 
     $delegations = @($Subnet.delegations | ForEach-Object { $_.serviceName })
     if ($delegations -notcontains 'Microsoft.App/environments') {
-        throw "Subnet '$SubnetName' must be delegated to Microsoft.App/environments."
+        throw "FC1 integration subnet '$SubnetName' is not delegated to 'Microsoft.App/environments'. Select a subnet whose Subnet delegation is set exclusively to 'Microsoft.App/environments'."
     }
     if (@($delegations | Where-Object { $_ -ne 'Microsoft.App/environments' }).Count -gt 0) {
         throw "Subnet '$SubnetName' has unsupported additional delegations: $($delegations -join ', ')."
     }
     if (@($Subnet.serviceEndpoints).Count -gt 0) {
         throw "FC1 integration subnet '$SubnetName' must not contain service endpoints."
+    }
+}
+
+function Assert-PrivateEndpointSubnet {
+    param([Parameter(Mandatory)]$Subnet)
+
+    if ($PrivateEndpointSubnetName -ieq $SubnetName) {
+        throw 'The private endpoint subnet must differ from the FC1 integration subnet.'
+    }
+    $prefixes = @()
+    if ($null -ne $Subnet.PSObject.Properties['addressPrefix'] -and $Subnet.addressPrefix) {
+        $prefixes += $Subnet.addressPrefix
+    }
+    if ($null -ne $Subnet.PSObject.Properties['addressPrefixes'] -and $Subnet.addressPrefixes) {
+        $prefixes += @($Subnet.addressPrefixes)
+    }
+    if (@($prefixes | Where-Object { $_ -match '/\d+$' -and $_ -notmatch ':' }).Count -eq 0) {
+        throw "Private endpoint subnet '$PrivateEndpointSubnetName' must have an IPv4 address prefix."
+    }
+    if (@($Subnet.delegations).Count -gt 0) {
+        throw "Private endpoint subnet '$PrivateEndpointSubnetName' must not be delegated."
     }
 }
 
@@ -1318,7 +1692,7 @@ function Get-DeploymentParameter {
         } else {
             ''
         }
-        activeDirectoryBindUsername = $ActiveDirectoryBindUsername
+        activeDirectoryBindUsername = $ADServiceAccount
         activeDirectoryBindUserDistinguishedName = $ActiveDirectoryBindUserDistinguishedName
         taggingRules = $script:NormalizedTaggingRules
         currentPasswordSecretName = $CurrentCredentialEntryName
@@ -1513,11 +1887,442 @@ function Publish-FunctionApp {
     }
 }
 
-Write-Step 'Validating input parameters'
+$installerLogPath = Join-Path ([System.IO.Path]::GetTempPath()) 'HybridDeviceTagger-Install.log'
+$transcriptStarted = $false
+$compactFailure = $false
+try {
+    Start-Transcript -Path $installerLogPath -Force | Out-Null
+    $transcriptStarted = $true
+    Write-Host "Installer log: $installerLogPath"
+
+Write-Step 'Validating Azure subscription'
+Assert-Command -Name az -InstallHint 'Install Azure CLI 2.60.0 or newer.'
+$account = Get-AzureJson -Arguments @('account', 'show')
+if ([string]::IsNullOrWhiteSpace($SubscriptionId)) {
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'SubscriptionId must be supplied explicitly for noninteractive execution.'
+    }
+    $enteredSubscriptionId = Read-Host (
+        "Azure subscription ID [$($account.name): $($account.id)]"
+    )
+    $SubscriptionId = if ([string]::IsNullOrWhiteSpace($enteredSubscriptionId)) {
+        [string]$account.id
+    }
+    else {
+        $enteredSubscriptionId.Trim()
+    }
+    if ($SubscriptionId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' -or
+        [guid]$SubscriptionId -eq [guid]::Empty) {
+        throw 'The entered Azure subscription ID must be a nonempty GUID.'
+    }
+}
+
+if ($account.id -ine $SubscriptionId) {
+    $null = Invoke-AzureCli -Arguments @(
+        'account', 'set', '--subscription', $SubscriptionId, '--only-show-errors'
+    )
+    $account = Get-AzureJson -Arguments @('account', 'show')
+}
+if ($account.id -ine $SubscriptionId) {
+    throw "Unable to select subscription '$SubscriptionId'."
+}
+Write-Host "Azure subscription '$($account.name)' ($SubscriptionId) validated." -ForegroundColor Green
+
+if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) {
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'ResourceGroupName must be supplied explicitly for noninteractive execution.'
+    }
+    $enteredResourceGroupName = Read-Host 'Resource group name [rg-HybridDeviceTagger]'
+    $ResourceGroupName = if ([string]::IsNullOrWhiteSpace($enteredResourceGroupName)) {
+        'rg-HybridDeviceTagger'
+    }
+    else {
+        $enteredResourceGroupName.Trim()
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($Location)) {
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'Location must be supplied explicitly for noninteractive execution.'
+    }
+    $enteredLocation = Read-Host 'Azure location [westeurope]'
+    $Location = if ([string]::IsNullOrWhiteSpace($enteredLocation)) {
+        'westeurope'
+    }
+    else {
+        $enteredLocation.Trim()
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($FunctionAppName)) {
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'FunctionAppName must be supplied explicitly for noninteractive execution.'
+    }
+    $defaultFunctionAppName = "func-devtagger-$([DateTime]::UtcNow.ToString('yyyyMMdd'))"
+    $enteredFunctionAppName = Read-Host "Function App name [$defaultFunctionAppName]"
+    $FunctionAppName = if ([string]::IsNullOrWhiteSpace($enteredFunctionAppName)) {
+        $defaultFunctionAppName
+    }
+    else {
+        $enteredFunctionAppName.Trim()
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($StorageAccountName)) {
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'StorageAccountName must be supplied explicitly for noninteractive execution.'
+    }
+    $storageNameSuffix = (Get-AppResourceNameSuffix) -replace '[^a-z0-9]', ''
+    $maximumStorageSuffixLength = 22
+    if ($storageNameSuffix.Length -gt $maximumStorageSuffixLength) {
+        $storageNameSuffix = $storageNameSuffix.Substring(0, $maximumStorageSuffixLength)
+    }
+    $defaultStorageAccountName = "st$storageNameSuffix"
+    $enteredStorageAccountName = Read-Host "Storage account name [$defaultStorageAccountName]"
+    $StorageAccountName = if ([string]::IsNullOrWhiteSpace($enteredStorageAccountName)) {
+        $defaultStorageAccountName
+    }
+    else {
+        $enteredStorageAccountName.Trim()
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($VirtualNetworkSubscriptionId)) {
+    if (-not $virtualNetworkSubscriptionWasSupplied -and
+        -not $virtualNetworkResourceGroupWasSupplied -and
+        $env:TF_BUILD -ne 'True' -and $env:CI -ne 'true') {
+        $enteredVirtualNetworkSubscriptionId = Read-Host (
+            "Virtual network subscription ID [$SubscriptionId]"
+        )
+        $VirtualNetworkSubscriptionId = if (
+            [string]::IsNullOrWhiteSpace($enteredVirtualNetworkSubscriptionId)
+        ) {
+            $SubscriptionId
+        }
+        else {
+            $enteredVirtualNetworkSubscriptionId.Trim()
+        }
+        if ($VirtualNetworkSubscriptionId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' -or
+            [guid]$VirtualNetworkSubscriptionId -eq [guid]::Empty) {
+            throw 'The entered virtual network subscription ID must be a nonempty GUID.'
+        }
+    }
+    else {
+        $VirtualNetworkSubscriptionId = $SubscriptionId
+    }
+}
+
+do {
+    if ([string]::IsNullOrWhiteSpace($VirtualNetworkResourceGroupName)) {
+        $VirtualNetworkResourceGroupName = Read-RequiredInstallerValue `
+            -Name 'VirtualNetworkResourceGroupName' `
+            -Prompt 'Virtual network resource group name'
+    }
+
+    Write-Step 'Validating virtual network resource group'
+    $virtualNetworkResourceGroup = Invoke-AzureCli -Arguments @(
+        'group', 'show', '--subscription', $VirtualNetworkSubscriptionId,
+        '--name', $VirtualNetworkResourceGroupName,
+        '--only-show-errors', '--output', 'json'
+    ) -AllowFailure
+    if ($virtualNetworkResourceGroup.ExitCode -eq 0) {
+        Write-Host "Virtual network resource group '$VirtualNetworkResourceGroupName' validated." -ForegroundColor Green
+        break
+    }
+
+    $notFoundMessage = "Virtual network resource group '$VirtualNetworkResourceGroupName' was not found in subscription '$VirtualNetworkSubscriptionId'."
+    if ($virtualNetworkResourceGroupWasSupplied) {
+        $script:CompactInstallerError = $true
+        throw $notFoundMessage
+    }
+
+    Write-Host $notFoundMessage -ForegroundColor Red
+    $VirtualNetworkResourceGroupName = Read-RequiredInstallerValue `
+        -Name 'VirtualNetworkResourceGroupName' `
+        -Prompt 'Virtual network resource group name'
+} while ($true)
+
+do {
+    if ([string]::IsNullOrWhiteSpace($VirtualNetworkName)) {
+        $VirtualNetworkName = Read-RequiredInstallerValue `
+            -Name 'VirtualNetworkName' `
+            -Prompt 'Virtual network name'
+    }
+
+    Write-Step 'Validating existing virtual network'
+    $virtualNetworkResult = Invoke-AzureCli -Arguments @(
+        'network', 'vnet', 'show', '--subscription', $VirtualNetworkSubscriptionId,
+        '--resource-group', $VirtualNetworkResourceGroupName, '--name', $VirtualNetworkName,
+        '--only-show-errors', '--output', 'json'
+    ) -AllowFailure
+    if ($virtualNetworkResult.ExitCode -eq 0) {
+        $virtualNetwork = $virtualNetworkResult.Output | ConvertFrom-Json -Depth 100
+        if ($virtualNetwork.location -ine $Location) {
+            $script:CompactInstallerError = $true
+            throw "The selected virtual network '$VirtualNetworkName' is in '$($virtualNetwork.location)', but the Function App will be deployed to '$Location'. Azure Functions VNet integration requires both resources to use the same region. Select a VNet in '$Location' or restart the installer with -Location '$($virtualNetwork.location)'."
+        }
+        Write-Host "Virtual network '$VirtualNetworkName' validated." -ForegroundColor Green
+        break
+    }
+
+    $notFoundMessage = "Virtual network '$VirtualNetworkName' was not found in resource group '$VirtualNetworkResourceGroupName'."
+    if ($virtualNetworkNameWasSupplied) {
+        $script:CompactInstallerError = $true
+        throw $notFoundMessage
+    }
+
+    Write-Host $notFoundMessage -ForegroundColor Red
+    $VirtualNetworkName = Read-RequiredInstallerValue `
+        -Name 'VirtualNetworkName' `
+        -Prompt 'Virtual network name'
+} while ($true)
+
+do {
+    if ([string]::IsNullOrWhiteSpace($SubnetName)) {
+        $SubnetName = Read-RequiredInstallerValue `
+            -Name 'SubnetName' `
+            -Prompt 'Flex Consumption integration subnet name'
+    }
+
+    Write-Step 'Validating FC1 integration subnet'
+    $subnetResult = Invoke-AzureCli -Arguments @(
+        'network', 'vnet', 'subnet', 'show', '--subscription', $VirtualNetworkSubscriptionId,
+        '--resource-group', $VirtualNetworkResourceGroupName, '--vnet-name', $VirtualNetworkName,
+        '--name', $SubnetName, '--only-show-errors', '--output', 'json'
+    ) -AllowFailure
+    if ($subnetResult.ExitCode -eq 0) {
+        $subnet = $subnetResult.Output | ConvertFrom-Json -Depth 100
+        try {
+            Assert-Subnet -Subnet $subnet
+        }
+        catch {
+            if ($subnetNameWasSupplied) {
+                $script:CompactInstallerError = $true
+                throw
+            }
+
+            Write-Host $_.Exception.Message -ForegroundColor Red
+            $SubnetName = Read-RequiredInstallerValue `
+                -Name 'SubnetName' `
+                -Prompt 'Flex Consumption integration subnet name'
+            continue
+        }
+        $script:ExpectedSubnetId = [string]$subnet.id
+        Write-Host "FC1 integration subnet '$SubnetName' validated." -ForegroundColor Green
+        break
+    }
+
+    $notFoundMessage = "FC1 integration subnet '$SubnetName' was not found in virtual network '$VirtualNetworkName'."
+    if ($subnetNameWasSupplied) {
+        $script:CompactInstallerError = $true
+        throw $notFoundMessage
+    }
+
+    Write-Host $notFoundMessage -ForegroundColor Red
+    $SubnetName = Read-RequiredInstallerValue `
+        -Name 'SubnetName' `
+        -Prompt 'Flex Consumption integration subnet name'
+} while ($true)
+
+do {
+    if ([string]::IsNullOrWhiteSpace($PrivateEndpointSubnetName)) {
+        $PrivateEndpointSubnetName = Read-RequiredInstallerValue `
+            -Name 'PrivateEndpointSubnetName' `
+            -Prompt 'Private endpoint subnet name'
+    }
+
+    Write-Step 'Validating private endpoint subnet'
+    $privateEndpointSubnetResult = Invoke-AzureCli -Arguments @(
+        'network', 'vnet', 'subnet', 'show', '--subscription', $VirtualNetworkSubscriptionId,
+        '--resource-group', $VirtualNetworkResourceGroupName, '--vnet-name', $VirtualNetworkName,
+        '--name', $PrivateEndpointSubnetName, '--only-show-errors', '--output', 'json'
+    ) -AllowFailure
+    if ($privateEndpointSubnetResult.ExitCode -eq 0) {
+        $privateEndpointSubnet = $privateEndpointSubnetResult.Output |
+            ConvertFrom-Json -Depth 100
+        Assert-PrivateEndpointSubnet -Subnet $privateEndpointSubnet
+        break
+    }
+
+    $notFoundMessage = "Private endpoint subnet '$PrivateEndpointSubnetName' was not found in virtual network '$VirtualNetworkName'."
+    if ($privateEndpointSubnetNameWasSupplied) {
+        $script:CompactInstallerError = $true
+        throw $notFoundMessage
+    }
+
+    Write-Host $notFoundMessage -ForegroundColor Red
+    $PrivateEndpointSubnetName = Read-RequiredInstallerValue `
+        -Name 'PrivateEndpointSubnetName' `
+        -Prompt 'Private endpoint subnet name'
+} while ($true)
+
+$privateEndpoints = Get-AzureJson -Arguments @(
+    'network', 'private-endpoint', 'list', '--subscription', $VirtualNetworkSubscriptionId
+)
+if (@($privateEndpoints | Where-Object { $_.subnet.id -ieq $subnet.id }).Count -gt 0) {
+    throw "FC1 integration subnet '$SubnetName' must not contain private endpoints."
+}
+Write-Host "Private endpoint subnet '$PrivateEndpointSubnetName' validated." -ForegroundColor Green
+
+if ([string]::IsNullOrWhiteSpace($KeyVaultResourceGroupName)) {
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'KeyVaultResourceGroupName must be supplied explicitly for noninteractive execution.'
+    }
+    $enteredKeyVaultResourceGroupName = Read-Host (
+        "Key Vault resource group name [$ResourceGroupName]"
+    )
+    $KeyVaultResourceGroupName = if (
+        [string]::IsNullOrWhiteSpace($enteredKeyVaultResourceGroupName)
+    ) {
+        $ResourceGroupName
+    }
+    else {
+        $enteredKeyVaultResourceGroupName.Trim()
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($KeyVaultName)) {
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'KeyVaultName must be supplied explicitly for noninteractive execution.'
+    }
+    $keyVaultNameSuffix = ((Get-AppResourceNameSuffix) -replace '[^a-z0-9-]', '-').Trim('-')
+    if ([string]::IsNullOrWhiteSpace($keyVaultNameSuffix)) {
+        $keyVaultNameSuffix = "devtagger-$([DateTime]::UtcNow.ToString('yyyyMMdd'))"
+    }
+    $maximumKeyVaultSuffixLength = 21
+    if ($keyVaultNameSuffix.Length -gt $maximumKeyVaultSuffixLength) {
+        $keyVaultNameSuffix = $keyVaultNameSuffix.Substring(0, $maximumKeyVaultSuffixLength).TrimEnd('-')
+    }
+    $defaultKeyVaultName = "kv-$keyVaultNameSuffix"
+    $enteredKeyVaultName = Read-Host "Key Vault name [$defaultKeyVaultName]"
+    $KeyVaultName = if ([string]::IsNullOrWhiteSpace($enteredKeyVaultName)) {
+        $defaultKeyVaultName
+    }
+    else {
+        $enteredKeyVaultName.Trim()
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($ActiveDirectoryForestDomain)) {
+    $defaultActiveDirectoryForestDomain = Get-LoggedOnUserForestDomain
+    if ([string]::IsNullOrWhiteSpace($defaultActiveDirectoryForestDomain)) {
+        $ActiveDirectoryForestDomain = Read-RequiredInstallerValue `
+            -Name 'ActiveDirectoryForestDomain' `
+            -Prompt 'Active Directory forest DNS name'
+    }
+    else {
+        $enteredActiveDirectoryForestDomain = Read-Host (
+            "Active Directory forest DNS name [$defaultActiveDirectoryForestDomain]"
+        )
+        $ActiveDirectoryForestDomain = if (
+            [string]::IsNullOrWhiteSpace($enteredActiveDirectoryForestDomain)
+        ) {
+            $defaultActiveDirectoryForestDomain
+        }
+        else {
+            $enteredActiveDirectoryForestDomain.Trim()
+        }
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($ActiveDirectoryServer)) {
+    $ActiveDirectoryServer = $ActiveDirectoryForestDomain
+}
+
+if ([string]::IsNullOrWhiteSpace($ADServiceAccount)) {
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'ADServiceAccount must be supplied explicitly for noninteractive execution.'
+    }
+    $defaultADServiceAccount = "HybridDeviceTagger@$ActiveDirectoryForestDomain"
+    $enteredADServiceAccount = Read-Host (
+        "Service Account [$defaultADServiceAccount]"
+    )
+    $ADServiceAccount = if (
+        [string]::IsNullOrWhiteSpace($enteredADServiceAccount)
+    ) {
+        $defaultADServiceAccount
+    }
+    else {
+        $enteredADServiceAccount.Trim()
+    }
+}
+
+$requiredStringInputs = @()
+if ([string]::IsNullOrWhiteSpace($ActiveDirectoryBindUserDistinguishedName)) {
+    $resolvedServiceAccountDn = Resolve-ADServiceAccountDistinguishedName
+    if ([string]::IsNullOrWhiteSpace($resolvedServiceAccountDn)) {
+        $requiredStringInputs += @{
+            Name = 'ActiveDirectoryBindUserDistinguishedName'
+            Prompt = 'Active Directory bind user distinguished name'
+        }
+    }
+    else {
+        $ActiveDirectoryBindUserDistinguishedName = $resolvedServiceAccountDn
+        Write-Host 'Existing Active Directory service account found; distinguished name resolved automatically.' -ForegroundColor Green
+    }
+}
 if (-not $PrepareActiveDirectoryAccountOnly -and
     -not $SkipActiveDirectoryDirectoryChecks -and
     $null -eq $ActiveDirectoryCredential) {
-    throw 'ActiveDirectoryCredential is required unless Active Directory directory checks are explicitly skipped for an existing deployment.'
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'ActiveDirectoryCredential must be supplied explicitly for noninteractive execution.'
+    }
+    $ActiveDirectoryCredential = Get-Credential `
+        -UserName $ADServiceAccount `
+        -Message 'Enter the Active Directory service-account password for bind validation'
+    if ($null -eq $ActiveDirectoryCredential) {
+        throw 'Active Directory service-account credential entry was canceled.'
+    }
+}
+foreach ($inputDefinition in $requiredStringInputs) {
+    $variable = Get-Variable -Name $inputDefinition.Name
+    if ([string]::IsNullOrWhiteSpace([string]$variable.Value)) {
+        $variable.Value = Read-RequiredInstallerValue `
+            -Name $inputDefinition.Name `
+            -Prompt $inputDefinition.Prompt
+    }
+}
+if ($null -eq $TaggingRules -or $TaggingRules.Count -eq 0) {
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'TaggingRules must be supplied explicitly for noninteractive execution.'
+    }
+    Write-Step 'Creating tagging rule'
+    $TaggingRules = @(Read-InteractiveTaggingRule)
+}
+
+Write-Step 'Validating input parameters'
+$requiredInputValidation = @(
+    @{ Name = 'ResourceGroupName'; Value = $ResourceGroupName; MaximumLength = 90 },
+    @{ Name = 'Location'; Value = $Location; MaximumLength = 64 },
+    @{ Name = 'VirtualNetworkName'; Value = $VirtualNetworkName; MaximumLength = 64 },
+    @{ Name = 'SubnetName'; Value = $SubnetName; MaximumLength = 80 },
+    @{ Name = 'PrivateEndpointSubnetName'; Value = $PrivateEndpointSubnetName; MaximumLength = 80 },
+    @{ Name = 'VirtualNetworkResourceGroupName'; Value = $VirtualNetworkResourceGroupName; MaximumLength = 90 },
+    @{ Name = 'KeyVaultResourceGroupName'; Value = $KeyVaultResourceGroupName; MaximumLength = 90 },
+    @{ Name = 'ActiveDirectoryServer'; Value = $ActiveDirectoryServer; MaximumLength = 253 },
+    @{ Name = 'ADServiceAccount'; Value = $ADServiceAccount; MaximumLength = 256 },
+    @{ Name = 'ActiveDirectoryBindUserDistinguishedName'; Value = $ActiveDirectoryBindUserDistinguishedName; MaximumLength = 2048 }
+)
+foreach ($validation in $requiredInputValidation) {
+    if ([string]::IsNullOrWhiteSpace([string]$validation.Value) -or
+        ([string]$validation.Value).Length -gt $validation.MaximumLength) {
+        throw "$($validation.Name) must contain 1-$($validation.MaximumLength) characters."
+    }
+}
+if ($FunctionAppName -notmatch '^[a-zA-Z0-9-]{2,60}$') {
+    throw 'FunctionAppName must contain 2-60 letters, numbers, or hyphens.'
+}
+if ($StorageAccountName -notmatch '^[a-z0-9]{3,24}$') {
+    throw 'StorageAccountName must contain 3-24 lowercase letters or numbers.'
+}
+if ($KeyVaultName -notmatch '^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$') {
+    throw 'KeyVaultName must contain 3-24 letters, numbers, or hyphens and must start with a letter and end with a letter or number.'
+}
+if ($ActiveDirectoryForestDomain -notmatch '^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$') {
+    throw 'ActiveDirectoryForestDomain must be a valid DNS domain name.'
+}
+if ($TaggingRules.Count -gt 100) {
+    throw 'TaggingRules cannot contain more than 100 rules.'
 }
 $script:NormalizedTaggingRules = @(ConvertTo-NormalizedTaggingRule)
 $normalizedTaggingRulesJson = ConvertTo-Json -InputObject $script:NormalizedTaggingRules -Depth 10 -Compress
@@ -1535,7 +2340,6 @@ foreach ($tag in $Tags.GetEnumerator()) {
 }
 
 Write-Step 'Checking local prerequisites'
-Assert-Command -Name az -InstallHint 'Install Azure CLI 2.60.0 or newer.'
 Assert-Command -Name dotnet -InstallHint 'Install the .NET 8 SDK.'
 if (-not (Test-Path $templatePath)) { throw "Bicep template not found: $templatePath" }
 if (-not (Test-Path $projectPath)) { throw "Function project not found: $projectPath" }
@@ -1567,17 +2371,11 @@ if (-not ($sdkVersions -match '^8\.')) {
     throw 'A .NET 8 SDK is required.'
 }
 
-Write-Step 'Validating Azure account and subscription'
-$account = Get-AzureJson -Arguments @('account', 'show')
-if ($account.user.name -ine $ExpectedAzureAccount) {
-    throw "Azure account mismatch. Expected '$ExpectedAzureAccount', active account is '$($account.user.name)'."
+if ([string]::IsNullOrWhiteSpace($VirtualNetworkSubscriptionId)) {
+    $VirtualNetworkSubscriptionId = $SubscriptionId
 }
-if ($account.id -ine $SubscriptionId) {
-    $null = Invoke-AzureCli -Arguments @('account', 'set', '--subscription', $SubscriptionId, '--only-show-errors')
-    $account = Get-AzureJson -Arguments @('account', 'show')
-}
-if ($account.id -ine $SubscriptionId) {
-    throw "Unable to select subscription '$SubscriptionId'."
+if ([string]::IsNullOrWhiteSpace($KeyVaultSubscriptionId)) {
+    $KeyVaultSubscriptionId = $SubscriptionId
 }
 
 Write-Step 'Validating Entra administrative-unit targets'
@@ -1587,6 +2385,20 @@ if ($restrictedAdministrativeUnits.Count -gt 0) {
         ForEach-Object { "  - $($_.displayName) ($($_.id))" } |
         Out-String
     Write-Warning "Rules target restricted management administrative units:`n$targetSummary"
+}
+
+Write-InstallationSummary -RestrictedAdministrativeUnits $restrictedAdministrativeUnits
+if (-not $ValidateOnly -and -not $WhatIfPreference) {
+    if (-not $PSCmdlet.ShouldProcess(
+        "$SubscriptionId/$ResourceGroupName",
+        'Execute the installation plan shown above'
+    )) {
+        Write-Host 'Installation canceled before any changes were made.' -ForegroundColor Yellow
+        return
+    }
+}
+
+if ($restrictedAdministrativeUnits.Count -gt 0) {
     if (-not $ValidateOnly -and -not $WhatIfPreference -and
         -not $GrantRestrictedAdministrativeUnitRole) {
         if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
@@ -1631,47 +2443,16 @@ if ($resourceGroupResult.ExitCode -ne 0) {
     if ($ValidateOnly -or $WhatIfPreference) {
         throw "Resource group '$ResourceGroupName' must exist before validation or What-if can run."
     }
-    if ($PSCmdlet.ShouldProcess("$SubscriptionId/$ResourceGroupName", "Create resource group in $Location")) {
-        $null = Invoke-AzureCli -Arguments @(
-            'group', 'create', '--subscription', $SubscriptionId,
-            '--name', $ResourceGroupName, '--location', $Location,
-            '--only-show-errors'
-        )
-    }
+    $null = Invoke-AzureCli -Arguments @(
+        'group', 'create', '--subscription', $SubscriptionId,
+        '--name', $ResourceGroupName, '--location', $Location,
+        '--only-show-errors'
+    )
 }
 $fc1Locations = Get-AzureJson -Arguments @('functionapp', 'list-flexconsumption-locations')
 if (@($fc1Locations | Where-Object { $_.name -ieq $Location }).Count -eq 0) {
     throw "Location '$Location' does not support Azure Functions Flex Consumption."
 }
-
-Write-Step 'Validating existing virtual network and subnet'
-$virtualNetwork = Get-AzureJson -Arguments @(
-    'network', 'vnet', 'show', '--subscription', $VirtualNetworkSubscriptionId,
-    '--resource-group', $VirtualNetworkResourceGroupName, '--name', $VirtualNetworkName
-)
-if ($virtualNetwork.location -ine $Location) {
-    throw "VNet location '$($virtualNetwork.location)' must match Function App location '$Location'."
-}
-$subnet = Get-AzureJson -Arguments @(
-    'network', 'vnet', 'subnet', 'show', '--subscription', $VirtualNetworkSubscriptionId,
-    '--resource-group', $VirtualNetworkResourceGroupName, '--vnet-name', $VirtualNetworkName,
-    '--name', $SubnetName
-)
-$script:ExpectedSubnetId = [string]$subnet.id
-Assert-Subnet -Subnet $subnet
-
-$privateEndpoints = Get-AzureJson -Arguments @(
-    'network', 'private-endpoint', 'list', '--subscription', $VirtualNetworkSubscriptionId
-)
-if (@($privateEndpoints | Where-Object { $_.subnet.id -ieq $subnet.id }).Count -gt 0) {
-    throw "FC1 integration subnet '$SubnetName' must not contain private endpoints."
-}
-
-$null = Get-AzureJson -Arguments @(
-    'network', 'vnet', 'subnet', 'show', '--subscription', $VirtualNetworkSubscriptionId,
-    '--resource-group', $VirtualNetworkResourceGroupName, '--vnet-name', $VirtualNetworkName,
-    '--name', $PrivateEndpointSubnetName
-)
 
 Write-Step 'Validating existing Key Vault and password secret'
 $vault = Get-AzureJson -Arguments @(
@@ -1770,10 +2551,6 @@ try {
         return
     }
 
-    if (-not $PSCmdlet.ShouldProcess("$SubscriptionId/$ResourceGroupName", 'Deploy HybridDeviceTagger infrastructure and permissions')) {
-        return
-    }
-
     Write-Step 'Deploying Azure infrastructure'
     $deploymentName = "hybrid-device-tagger-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
     $deployment = Get-AzureJson -Arguments @(
@@ -1806,5 +2583,22 @@ try {
 finally {
     if ([System.IO.File]::Exists($parameterFile)) {
         [System.IO.File]::Delete($parameterFile)
+    }
+}
+}
+catch {
+    if ($VerbosePreference -eq 'Continue' -or -not $script:CompactInstallerError) {
+        Write-Host "Installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        throw
+    }
+    $compactFailure = $true
+    $Host.UI.WriteErrorLine($_.Exception.Message)
+}
+finally {
+    if ($transcriptStarted) {
+        Stop-Transcript | Out-Null
+    }
+    if (-not $compactFailure) {
+        Write-Host "Installer log: $installerLogPath"
     }
 }

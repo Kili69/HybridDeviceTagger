@@ -1,8 +1,14 @@
+/*
+ * Author: Andreas Lucas (aka Kili) <andreas.lucas@microsoft.com>
+ * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ */
+
 using Azure.Core;
 using Azure.Identity;
 using Azure.Monitor.OpenTelemetry.Exporter;
 using Azure.Security.KeyVault.Secrets;
 using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Specialized;
 using HybridDeviceTagger.Options;
 using HybridDeviceTagger.Services;
 using Microsoft.Azure.Functions.Worker;
@@ -86,11 +92,10 @@ builder.Services.AddScoped<IEntraMembershipClient>(serviceProvider =>
     serviceProvider.GetRequiredService<MicrosoftGraphDeviceClient>());
 builder.Services.AddSingleton(serviceProvider =>
 {
-    const string containerName = "membership-ledger";
     var connectionString = builder.Configuration["AzureWebJobsStorage"];
     if (!string.IsNullOrWhiteSpace(connectionString))
     {
-        return new BlobContainerClient(connectionString, containerName);
+        return new BlobServiceClient(connectionString);
     }
 
     var accountName = builder.Configuration["AzureWebJobsStorage__accountName"];
@@ -101,11 +106,20 @@ builder.Services.AddSingleton(serviceProvider =>
     }
 
     var credential = serviceProvider.GetRequiredService<TokenCredential>();
-    return new BlobContainerClient(
-        new Uri($"https://{accountName}.blob.core.windows.net/{containerName}"),
+    return new BlobServiceClient(
+        new Uri($"https://{accountName}.blob.core.windows.net"),
         credential);
 });
-builder.Services.AddSingleton<IDeviceMembershipLedger, BlobDeviceMembershipLedger>();
+builder.Services.AddSingleton<IDeviceMembershipLedger>(serviceProvider =>
+    new BlobDeviceMembershipLedger(
+        serviceProvider.GetRequiredService<BlobServiceClient>()
+            .GetBlobContainerClient("membership-ledger")));
+builder.Services.AddSingleton<IRunTraceStore>(serviceProvider =>
+    new BlobRunTraceStore(
+        serviceProvider.GetRequiredService<BlobServiceClient>()
+            .GetBlobContainerClient("run-traces")
+            .GetAppendBlobClient(BlobRunTraceStore.BlobName),
+        serviceProvider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<BlobRunTraceStore>>()));
 builder.Services.AddScoped<DeviceMembershipReconciliationService>();
 builder.Services.AddTransient<DeviceTaggingService>();
 

@@ -1,0 +1,4 @@
+#!/bin/sh
+
+pwsh -NoProfile -File scripts/Assert-CommitMetadata.ps1 -Staged
+exit $?

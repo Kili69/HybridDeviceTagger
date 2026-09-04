@@ -28,23 +28,41 @@ public sealed class DeviceTaggingServiceTests
             [unchangedDeviceId] = CreateEntraDevice(unchangedDeviceId, "Tier 0", "ServerAd"),
             [nonHybridDeviceId] = CreateEntraDevice(nonHybridDeviceId, null, "AzureAd")
         });
+        var ledger = new StubMembershipLedger();
         var service = new DeviceTaggingService(
             directorySource,
             entraClient,
-            CreateMembershipService(),
+            CreateMembershipService(ledger),
+            ledger,
             Microsoft.Extensions.Options.Options.Create(CreateOptions(
                 ("OU=Computers,DC=example,DC=com", new Dictionary<string, string>
                 {
                     ["extensionAttribute1"] = "Tier 0"
                 }))),
             NullLogger<DeviceTaggingService>.Instance);
+        var trace = new RecordingRunTraceSession();
 
-        var result = await service.TagDevicesAsync(CancellationToken.None);
+        var result = await service.TagDevicesAsync(CancellationToken.None, trace);
 
         Assert.Equal(new TaggingResult(4, 1, 1, 1, 1), result);
         var update = Assert.Single(entraClient.Updates);
         Assert.Equal(updateDeviceId.ToString("D"), update.ObjectId);
         Assert.Equal("Tier 0", update.Attributes["extensionAttribute1"]);
+        Assert.Equal(
+            "Tier 0",
+            ledger.Values[updateDeviceId].ExtensionAttributes["extensionAttribute1"]);
+        Assert.Equal(
+            "Tier 0",
+            ledger.Values[unchangedDeviceId].ExtensionAttributes["extensionAttribute1"]);
+        Assert.Contains(trace.Events, traceEvent =>
+            traceEvent.Phase == "Discovery" &&
+            traceEvent.Action == "SearchActiveDirectoryRule" &&
+            traceEvent.Outcome == "Succeeded");
+        Assert.Contains(trace.Events, traceEvent =>
+            traceEvent.Phase == "Device" &&
+            traceEvent.Action == "PatchExtensionAttributes" &&
+            traceEvent.Outcome == "Succeeded");
+        Assert.DoesNotContain("Tier 0", trace.SerializedDetails, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -74,10 +92,12 @@ public sealed class DeviceTaggingServiceTests
             [serverDeviceId] = CreateEntraDevice(serverDeviceId, "ServerAd",
                 ("extensionAttribute2", "old"))
         });
+        var ledger = new StubMembershipLedger();
         var service = new DeviceTaggingService(
             directorySource,
             entraClient,
-            CreateMembershipService(),
+            CreateMembershipService(ledger),
+            ledger,
             Microsoft.Extensions.Options.Options.Create(CreateOptions(
                 (tier0Ou, new Dictionary<string, string>
                 {
@@ -115,10 +135,12 @@ public sealed class DeviceTaggingServiceTests
             ["OU=Parent,DC=example,DC=com"] = [device],
             ["OU=Child,OU=Parent,DC=example,DC=com"] = [device]
         });
+        var ledger = new StubMembershipLedger();
         var service = new DeviceTaggingService(
             directorySource,
             new StubEntraDeviceClient(new Dictionary<Guid, EntraDevice>()),
-            CreateMembershipService(),
+            CreateMembershipService(ledger),
+            ledger,
             Microsoft.Extensions.Options.Options.Create(CreateOptions(
                 ("OU=Parent,DC=example,DC=com", new Dictionary<string, string>
                 {
@@ -156,10 +178,12 @@ public sealed class DeviceTaggingServiceTests
                 [{"name":"Tier1 servers","description":"Tags Tier 1 servers.","baseDn":"OU=Server,DC=example,DC=com","extensionAttributes":{"extensionAttribute2":"Tier1"}}]
                 """
         };
+        var ledger = new StubMembershipLedger();
         var service = new DeviceTaggingService(
             directorySource,
             entraClient,
-            CreateMembershipService(),
+            CreateMembershipService(ledger),
+            ledger,
             Microsoft.Extensions.Options.Options.Create(options),
             NullLogger<DeviceTaggingService>.Instance);
 
@@ -167,6 +191,98 @@ public sealed class DeviceTaggingServiceTests
 
         var update = Assert.Single(entraClient.Updates);
         Assert.Equal("Tier1", update.Attributes["extensionAttribute2"]);
+    }
+
+    [Fact]
+    public async Task TagDevicesAsync_RemovesOwnedStateWhenDeviceLeavesAllTargetOus()
+    {
+        var deviceId = Guid.NewGuid();
+        var groupId = Guid.NewGuid();
+        var administrativeUnitId = Guid.NewGuid();
+        var entraDevice = CreateEntraDevice(
+            deviceId,
+            "ServerAd",
+            ("extensionAttribute1", "Tier 0"));
+        var entraClient = new StubEntraDeviceClient(new Dictionary<Guid, EntraDevice>
+        {
+            [deviceId] = entraDevice
+        });
+        var membershipClient = new StubEntraMembershipClient();
+        membershipClient.GroupMemberships.Add(groupId);
+        membershipClient.AdministrativeUnitMemberships.Add(administrativeUnitId);
+        var ledger = new StubMembershipLedger();
+        ledger.Values[deviceId] = new ManagedDeviceMemberships(
+            entraDevice.Id,
+            [groupId],
+            [administrativeUnitId])
+        {
+            ExtensionAttributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["extensionAttribute1"] = "Tier 0"
+            }
+        };
+        var service = new DeviceTaggingService(
+            new StubDirectoryDeviceSource([]),
+            entraClient,
+            new DeviceMembershipReconciliationService(membershipClient, ledger),
+            ledger,
+            Microsoft.Extensions.Options.Options.Create(CreateOptions(
+                ("OU=Computers,DC=example,DC=com", new Dictionary<string, string>
+                {
+                    ["extensionAttribute1"] = "Tier 0"
+                }))),
+            NullLogger<DeviceTaggingService>.Instance);
+
+        var result = await service.TagDevicesAsync(CancellationToken.None);
+
+        Assert.Equal(1, result.RemovedFromScope);
+        Assert.Equal(1, result.Updated);
+        Assert.Equal(2, result.MembershipsRemoved);
+        var update = Assert.Single(entraClient.Updates);
+        Assert.Null(update.Attributes["extensionAttribute1"]);
+        Assert.Contains(groupId, membershipClient.RemovedGroups);
+        Assert.Contains(administrativeUnitId, membershipClient.RemovedAdministrativeUnits);
+        Assert.Empty(ledger.Values);
+    }
+
+    [Fact]
+    public async Task TagDevicesAsync_PreservesManuallyChangedAttributeWhenDeviceLeavesTargetOus()
+    {
+        var deviceId = Guid.NewGuid();
+        var entraDevice = CreateEntraDevice(
+            deviceId,
+            "ServerAd",
+            ("extensionAttribute1", "Manually managed"));
+        var entraClient = new StubEntraDeviceClient(new Dictionary<Guid, EntraDevice>
+        {
+            [deviceId] = entraDevice
+        });
+        var ledger = new StubMembershipLedger();
+        ledger.Values[deviceId] = new ManagedDeviceMemberships(entraDevice.Id, [], [])
+        {
+            ExtensionAttributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["extensionAttribute1"] = "Tier 0"
+            }
+        };
+        var service = new DeviceTaggingService(
+            new StubDirectoryDeviceSource([]),
+            entraClient,
+            new DeviceMembershipReconciliationService(new StubEntraMembershipClient(), ledger),
+            ledger,
+            Microsoft.Extensions.Options.Options.Create(CreateOptions(
+                ("OU=Computers,DC=example,DC=com", new Dictionary<string, string>
+                {
+                    ["extensionAttribute1"] = "Tier 0"
+                }))),
+            NullLogger<DeviceTaggingService>.Instance);
+
+        var result = await service.TagDevicesAsync(CancellationToken.None);
+
+        Assert.Equal(1, result.RemovedFromScope);
+        Assert.Equal(0, result.Updated);
+        Assert.Empty(entraClient.Updates);
+        Assert.Empty(ledger.Values);
     }
 
     private static TaggingOptions CreateOptions(
@@ -182,8 +298,9 @@ public sealed class DeviceTaggingServiceTests
             }).ToList()
         };
 
-    private static DeviceMembershipReconciliationService CreateMembershipService() =>
-        new(new StubEntraMembershipClient(), new StubMembershipLedger());
+    private static DeviceMembershipReconciliationService CreateMembershipService(
+        StubMembershipLedger ledger) =>
+        new(new StubEntraMembershipClient(), ledger);
 
     private static DirectoryDevice CreateDirectoryDevice(Guid deviceId, string? ou = null) =>
         new(
@@ -249,7 +366,7 @@ public sealed class DeviceTaggingServiceTests
             _devices = devices;
         }
 
-        public List<(string ObjectId, IReadOnlyDictionary<string, string> Attributes)> Updates { get; } = [];
+        public List<(string ObjectId, IReadOnlyDictionary<string, string?> Attributes)> Updates { get; } = [];
 
         public Task<EntraDevice?> FindByDeviceIdAsync(
             Guid deviceId,
@@ -261,7 +378,7 @@ public sealed class DeviceTaggingServiceTests
 
         public Task SetExtensionAttributesAsync(
             string entraObjectId,
-            IReadOnlyDictionary<string, string> extensionAttributes,
+            IReadOnlyDictionary<string, string?> extensionAttributes,
             CancellationToken cancellationToken)
         {
             Updates.Add((entraObjectId, extensionAttributes));
@@ -271,54 +388,123 @@ public sealed class DeviceTaggingServiceTests
 
     private sealed class StubEntraMembershipClient : IEntraMembershipClient
     {
+        public HashSet<Guid> GroupMemberships { get; } = [];
+        public HashSet<Guid> AdministrativeUnitMemberships { get; } = [];
+        public List<Guid> RemovedGroups { get; } = [];
+        public List<Guid> RemovedAdministrativeUnits { get; } = [];
+
         public Task<bool> IsGroupMemberAsync(
             Guid groupId,
             string entraObjectId,
             CancellationToken cancellationToken) =>
-            Task.FromResult(false);
+            Task.FromResult(GroupMemberships.Contains(groupId));
 
         public Task AddGroupMemberAsync(
             Guid groupId,
             string entraObjectId,
-            CancellationToken cancellationToken) =>
-            Task.CompletedTask;
+            CancellationToken cancellationToken)
+        {
+            GroupMemberships.Add(groupId);
+            return Task.CompletedTask;
+        }
 
         public Task RemoveGroupMemberAsync(
             Guid groupId,
             string entraObjectId,
-            CancellationToken cancellationToken) =>
-            Task.CompletedTask;
+            CancellationToken cancellationToken)
+        {
+            GroupMemberships.Remove(groupId);
+            RemovedGroups.Add(groupId);
+            return Task.CompletedTask;
+        }
 
         public Task<bool> IsAdministrativeUnitMemberAsync(
             Guid administrativeUnitId,
             string entraObjectId,
             CancellationToken cancellationToken) =>
-            Task.FromResult(false);
+            Task.FromResult(AdministrativeUnitMemberships.Contains(administrativeUnitId));
 
         public Task AddAdministrativeUnitMemberAsync(
             Guid administrativeUnitId,
             string entraObjectId,
-            CancellationToken cancellationToken) =>
-            Task.CompletedTask;
+            CancellationToken cancellationToken)
+        {
+            AdministrativeUnitMemberships.Add(administrativeUnitId);
+            return Task.CompletedTask;
+        }
 
         public Task RemoveAdministrativeUnitMemberAsync(
             Guid administrativeUnitId,
             string entraObjectId,
-            CancellationToken cancellationToken) =>
-            Task.CompletedTask;
+            CancellationToken cancellationToken)
+        {
+            AdministrativeUnitMemberships.Remove(administrativeUnitId);
+            RemovedAdministrativeUnits.Add(administrativeUnitId);
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class StubMembershipLedger : IDeviceMembershipLedger
     {
+        public Dictionary<Guid, ManagedDeviceMemberships> Values { get; } = [];
+
+        public Task<IReadOnlyDictionary<Guid, ManagedDeviceMemberships>> GetAllAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyDictionary<Guid, ManagedDeviceMemberships>>(
+                new Dictionary<Guid, ManagedDeviceMemberships>(Values));
+
         public Task<ManagedDeviceMemberships?> GetAsync(
             Guid deviceId,
-            CancellationToken cancellationToken) =>
-            Task.FromResult<ManagedDeviceMemberships?>(null);
+            CancellationToken cancellationToken)
+        {
+            Values.TryGetValue(deviceId, out var memberships);
+            return Task.FromResult(memberships);
+        }
 
         public Task SetAsync(
             Guid deviceId,
             ManagedDeviceMemberships memberships,
-            CancellationToken cancellationToken) =>
-            Task.CompletedTask;
+            CancellationToken cancellationToken)
+        {
+            if (memberships.ExtensionAttributes.Count == 0 &&
+                memberships.EntraGroupIds.Count == 0 &&
+                memberships.AdministrativeUnitIds.Count == 0)
+            {
+                Values.Remove(deviceId);
+            }
+            else
+            {
+                Values[deviceId] = memberships;
+            }
+
+            return Task.CompletedTask;
+        }
     }
+
+    private sealed class RecordingRunTraceSession : IRunTraceSession
+    {
+        public List<RecordedTraceEvent> Events { get; } = [];
+
+        public string SerializedDetails =>
+            System.Text.Json.JsonSerializer.Serialize(Events.Select(traceEvent => traceEvent.Details));
+
+        public Task WriteAsync(
+            string level,
+            string phase,
+            string action,
+            string outcome,
+            IReadOnlyDictionary<string, object?>? details,
+            Exception? exception,
+            CancellationToken cancellationToken)
+        {
+            Events.Add(new RecordedTraceEvent(phase, action, outcome, details));
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed record RecordedTraceEvent(
+        string Phase,
+        string Action,
+        string Outcome,
+        IReadOnlyDictionary<string, object?>? Details);
 }

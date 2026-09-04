@@ -27,7 +27,7 @@ After deployment, Bicep grants the Function App's system-assigned managed identi
 
 If the Azure deployment user cannot grant Graph application roles, an Entra administrator must perform that step separately for the managed-identity service principal returned by the deployment. Code deployment can proceed after private Storage DNS is working, but device updates will fail until `Device.ReadWrite.All` is assigned.
 
-The script does not persist or pass the AD password to Azure Resource Manager. It uses the supplied `PSCredential` only for preflight directory queries. The current password must already exist in the Key Vault.
+The script does not persist or pass the AD password to Azure Resource Manager. It uses `ActiveDirectoryCredential` only for preflight directory queries and bind validation. When this parameter is omitted during an interactive run, the installer opens a credential prompt for the configured `ADServiceAccount`. Being signed in as a domain user is sufficient for some discovery queries but does not prove that the Function App's service account can bind with its own password. Noninteractive runs must supply `ActiveDirectoryCredential` explicitly. The current password must already exist in the Key Vault.
 
 Account creation and password resets are isolated in `-PrepareActiveDirectoryAccountOnly`. The script checks the configured service-account DN using a separate `ActiveDirectoryProvisioningCredential`. If the account is absent, it asks before creating and enabling it with a cryptographically randomized complex password. If the account exists, it offers a randomized complex password or secure manual entry before resetting it. The selected password is written directly to the current Key Vault secret without being displayed. If the provisioning credential parameter is omitted, the installer requests it in a local credential dialog. Both operations require LDAPS. The installer explicitly sets `pwdLastSet=-1`, so **User must change password at next logon** is never enabled. Validation, What-if, and normal deployment never create an account or reset a password.
 
@@ -60,8 +60,6 @@ $taggingRules = @(
 )
 
 ./Deployment/Install-HybridDeviceTagger.ps1 `
-    -ExpectedAzureAccount 'deployment.user@contoso.com' `
-    -SubscriptionId '00000000-0000-0000-0000-000000000000' `
     -ResourceGroupName 'rg-hybrid-device-tagger-prod' `
     -Location 'westeurope' `
     -FunctionAppName 'func-hybrid-device-tagger-prod' `
@@ -76,12 +74,41 @@ $taggingRules = @(
     -ActiveDirectoryServer 'dc01.contoso.com' `
     -ActiveDirectoryTrustedCertificatePath 'C:\Certificates\Contoso-Root-CA.cer' `
     -LdapFallbackPort 389 `
-    -ActiveDirectoryBindUsername 'svc-HybridDeviceTagger@contoso.com' `
+    -ADServiceAccount 'svc-HybridDeviceTagger@contoso.com' `
     -ActiveDirectoryBindUserDistinguishedName 'CN=svc-HybridDeviceTagger,OU=Service Accounts,DC=contoso,DC=com' `
     -ActiveDirectoryCredential $credential `
     -TaggingRules $taggingRules `
     -ValidateOnly
 ```
+
+The installer uses the identity authenticated through `az login`. When `SubscriptionId` is omitted interactively, the installer proposes the active subscription shown by `az account show`; press Enter to accept it or enter a different subscription ID. The selected subscription is validated and confirmed by name and ID before any dependent installation inputs are collected or validated. Noninteractive runs must supply `SubscriptionId` explicitly. The Key Vault subscription inherits the resulting target subscription unless separately supplied.
+
+When the installer is started without a parameter splat, it asks for the subscription first and then prompts for each remaining required value in installation order. An empty interactive entry for a required value displays a short hint and repeats the same prompt until a value is entered. If `TaggingRules` is omitted, the installer guides the user through creation of the first rule instead of requesting JSON. The proposed defaults are `Rule1`, `1st Tagging Rule`, `OU=Computers,OU=Admin`, and `Tier 0` for `extensionAttribute1`. Fully parameterized calls remain noninteractive.
+
+For an omitted Active Directory forest DNS name, the installer proposes the forest of the logged-on Active Directory user when Windows can resolve it; press Enter to accept it. On a workgroup system or when no logged-on-user forest can be detected, the prompt has no default and requires an explicit value.
+
+When `ActiveDirectoryServer` is omitted, the installer uses `ActiveDirectoryForestDomain` as the LDAP/LDAPS endpoint so Active Directory can select a domain controller through DNS. Supply `ActiveDirectoryServer` only when the forest DNS name is not reachable or a specific domain controller must be used.
+
+The `ADServiceAccount` parameter specifies the UPN used by the Function App to bind to Active Directory. When omitted interactively, the prompt proposes `HybridDeviceTagger@<ActiveDirectoryForestDomain>`; press Enter to accept it or enter another UPN. When the account already exists and is discoverable through Active Directory, the installer resolves its distinguished name from the UPN and does not request `ActiveDirectoryBindUserDistinguishedName`. If the account is absent or automatic lookup is unavailable, the installer requests the distinguished name so it can create or locate the account explicitly. When `-PrepareActiveDirectoryAccountOnly` creates a missing account, both supported creation paths set the fixed description `Service account used by HybridDeviceTagger for Active Directory device discovery and password rotation.` The description is not an installer parameter and cannot be changed interactively.
+
+Network input is collected and validated incrementally. During interactive collection, the installer first proposes the target subscription as the virtual-network subscription; press Enter to use it or enter another subscription ID. A VNet in another subscription is supported when it belongs to the same Entra tenant and the deployment identity has the required read and subnet-join permissions there. The installer then asks for and validates the virtual-network resource group, VNet, FC1 integration subnet, and private-endpoint subnet in that order before collecting Key Vault or Active Directory values. A missing interactively entered resource group, VNet, or subnet is reported and requested again. An interactively selected integration subnet that fails the FC1 requirements is also reported and requested again. A missing or unsuitable network resource supplied through `VirtualNetworkResourceGroupName`, `VirtualNetworkName`, `SubnetName`, or `PrivateEndpointSubnetName` terminates the run. The VNet and Function App must use the same Azure region; a mismatch terminates with a concise message identifying both regions and the available corrections. The integration subnet must use IPv4, meet the FC1 prefix requirements, be delegated exclusively to `Microsoft.App/environments`, contain no service endpoints or private endpoints, and differ from the private-endpoint subnet. The private-endpoint subnet must use IPv4 and must not be delegated.
+
+The interactive resource-group prompt proposes `rg-HybridDeviceTagger`; press Enter to accept it or enter another resource group name.
+
+The interactive location prompt proposes the Azure region `westeurope`; press Enter to accept it or enter another FC1-supported region.
+
+The interactive Function App prompt proposes `func-devtagger-yyyyMMdd` using the current UTC date, for example `func-devtagger-20260904`; press Enter to accept it or enter another globally unique name.
+
+Resource-name defaults follow the same workload-and-date naming scheme. For the default Function App name `func-devtagger-20260904`, the installer and Bicep template use:
+
+- Storage account: `stdevtagger20260904` (without hyphens because Azure Storage permits only lowercase letters and numbers);
+- Existing Key Vault: `kv-devtagger-20260904`;
+- Flex Consumption plan: `asp-devtagger-20260904`;
+- Log Analytics workspace: `log-devtagger-20260904`;
+- Application Insights: `appi-devtagger-20260904`;
+- Storage private endpoint: `pep-devtagger-20260904-blob`.
+
+The interactive Storage account prompt derives its default from the selected Function App name, adds the `st` prefix, removes unsupported characters, converts it to lowercase, and truncates the suffix when required by the 24-character Storage limit. The interactive Key Vault prompt similarly adds the `kv-` prefix to the Function App suffix and truncates it to the 24-character Key Vault limit. The Key Vault resource-group prompt defaults to the selected Function App resource group. These prompts accept their defaults with Enter. The Key Vault remains an existing shared resource and is not created or renamed. Existing VNet and subnet names are supplied separately and are not renamed.
 
 The script reads all domain cross-references from the forest configuration partition. An OU-only `BaseDn`, such as `OU=Tier0,OU=Admin`, is resolved and subtree-tested in every forest domain; domains without that path are skipped, while a path absent from the entire forest fails validation. A full DN containing `DC=` remains limited to that domain. Each rule must configure at least one extension attribute, Entra group Object ID, or administrative-unit Object ID. Group and AU targets are limited to 50 unique, nonempty GUIDs per type. The script cannot prove the account's self-service `unicodePwd` change permission without actually rotating the password. Confirm `SELF / Change Password` separately before production installation.
 
@@ -97,7 +124,11 @@ For Azure DevOps or another noninteractive environment, `-AllowLdapFallback` is 
 
 ## What-if and installation
 
-Replace `-ValidateOnly` with `-WhatIf` to show the ARM changes without applying them. Remove both switches to install. The script requests confirmation before deploying unless called with `-Confirm:$false`.
+Replace `-ValidateOnly` with `-WhatIf` to show the ARM changes without applying them. Remove both switches to install. Before the first Azure, Entra, Active Directory, Key Vault, or code change, the installer displays a summary of the selected mode, deployment target, resources, permissions, shared-resource references, and optional actions. It then uses standard PowerShell `ShouldProcess` confirmation for the complete plan. Use `-Confirm` to force the prompt or `-Confirm:$false` only for an already approved unattended installation. Declining exits before any installation change. Validation and What-if display the same summary but do not request approval because they do not apply changes.
+
+The central approval also covers `-RegisterProviders`, `-CreateResourceGroup`, and `-PrepareActiveDirectoryAccountOnly`, ensuring those operations cannot mutate state before the summary and confirmation. LDAP fallback, selection of a replacement AD password, and restricted administrative-unit role assignment retain their additional purpose-specific safety prompts.
+
+An empty interactive required value or an unsuitable interactively selected FC1 integration subnet is requested again rather than terminating the installer. By default, specifying a missing VNet resource group, VNet, integration subnet, or private-endpoint subnet, supplying an unsuitable integration subnet, or selecting a VNet in a different region prints only its actionable exception message. Run the installer with `-Verbose` when the full PowerShell error record, source location, and stack information are needed for those validation errors. Unexpected operational, Azure, Entra, Active Directory, and deployment failures remain terminating errors in both modes so automation can detect them reliably. The installer transcript is closed correctly in both modes.
 
 ## Updating tagging rules after installation
 
@@ -240,7 +271,7 @@ When `AddRule` is called interactively without an action, the script prompts for
 
 With scalar parameters, `AddRule` updates an existing case-insensitive `RuleName` instead of creating a duplicate. When `BaseDn` or `RuleDescription` is omitted, the existing values are retained. Existing extension attributes are also retained; supplied attribute numbers add new assignments or replace the values of those specific attributes. A new rule name still requires `BaseDn`.
 
-Use `-EntraGroupId` and `-AdministrativeUnitId` with Object ID arrays to replace those target sets on a scalar upsert. Omitting either parameter preserves that existing target set. Passing an empty array clears that target type. The Function removes obsolete memberships only when its Blob ownership ledger proves that HybridDeviceTagger originally added them; pre-existing manual memberships are never claimed or removed.
+Use `-EntraGroupId` and `-AdministrativeUnitId` with Object ID arrays to replace those target sets on a scalar upsert. Omitting either parameter preserves that existing target set. Passing an empty array clears that target type. The Function records managed extension-attribute values and only memberships that HybridDeviceTagger added in its Blob ownership ledger. When a device leaves all configured OUs, or an action no longer applies through any matching rule, the next tagging run clears attributes that still equal their recorded managed value and removes owned group, AU, and RMAU memberships. Manually changed attributes and pre-existing manual memberships are preserved.
 
 Rule names are limited to 1-128 Unicode letters or numbers plus spaces, dots, underscores, hyphens, and parentheses. Base DNs must contain valid `OU=` components with an optional trailing `DC=` part, for example `OU=Tier0,OU=Admin` or `OU=Tier0,OU=Admin,DC=contoso,DC=com`. A domain root such as `DC=contoso,DC=com` is also accepted. LDAP-special characters in component values must be escaped, for example `OU=Tier0\,Privileged,OU=Admin`. The same checks run in the deployment scripts and during Function App startup validation.
 
@@ -260,7 +291,7 @@ Remove one rule by its case-insensitive unique name:
 
 Configurations created before rule names were introduced remain readable with `-ShowCurrent`. Migrate them once by supplying the complete rule set with `-TaggingRules`, including `Name` and `Description` for every rule. Add and remove operations reject legacy unnamed rules so they cannot create a partially migrated configuration.
 
-The updater validates rule syntax but cannot verify that an OU exists in Active Directory. Run the next DeviceTagger invocation and inspect Application Insights after applying a change. Removing a rule or changing a value affects future synchronization only; it does not clear values previously written to Entra devices. Retain the previous `Tagging__RulesJson` printed after a successful update when rollback may be required.
+The updater validates rule syntax but cannot verify that an OU exists in Active Directory. Run the next DeviceTagger invocation and inspect Application Insights after applying a change. Removing a rule, removing an action, or moving a computer outside all configured OUs causes the next tagging run to clean the Entra state recorded as owned by HybridDeviceTagger. Retain the previous `Tagging__RulesJson` printed after a successful update when rollback may be required.
 
 For an interactive account bootstrap, either pass the provisioning credential separately or let the installer prompt for it:
 
@@ -295,3 +326,35 @@ For noninteractive Azure DevOps execution, authenticate Azure CLI before invokin
 - The Function App managed identity receives `Storage Blob Data Owner`, `Key Vault Secrets Officer`, and Microsoft Graph `Device.ReadWrite.All`.
 
 The installer is idempotent: Bicep converges existing compatible resources, deterministic role-assignment names prevent duplicates, and the Graph role is checked before creation.
+
+## Troubleshooting
+
+### Installer transcript
+
+Every `Install-HybridDeviceTagger.ps1` invocation replaces `HybridDeviceTagger-Install.log` in the current user's temporary directory. The PowerShell transcript captures the console workflow for validation, What-if, Active Directory preparation, and installation and is closed on success, failure, cancellation, or an early operational return.
+
+```powershell
+$installerLog = Join-Path ([System.IO.Path]::GetTempPath()) 'HybridDeviceTagger-Install.log'
+code $installerLog
+```
+
+The transcript can contain user, device, resource, and directory names and must be treated as confidential. The script does not print passwords; do not write credentials to the console during manual troubleshooting.
+
+### Latest-run diagnostic trace
+
+Each `DeviceTaggerFunction` invocation replaces `device-tagger-last-run.jsonl` in the private `run-traces` Blob container. Actions are appended immediately as JSON Lines with a UTC timestamp, sequence, invocation ID, phase, action, outcome, device and target IDs, and structured exception details. Extension-attribute values, passwords, and tokens are not written; attribute comparisons use SHA-256 fingerprints. The fixed latest-run file is intended for direct analysis in VS Code and remains useful when a run fails after only part of the workflow completed.
+
+Download requires Blob data-plane read permission and network access to the private Storage endpoint:
+
+```powershell
+az storage blob download `
+    --account-name '<storage-account>' `
+    --container-name 'run-traces' `
+    --name 'device-tagger-last-run.jsonl' `
+    --file '.\device-tagger-last-run.jsonl' `
+    --auth-mode login
+
+code '.\device-tagger-last-run.jsonl'
+```
+
+The exported trace can then be opened directly in VS Code and provided to Copilot for failure analysis.

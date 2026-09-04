@@ -14,10 +14,16 @@ The application separates trigger, orchestration, directory, Graph, and credenti
 ```mermaid
 flowchart LR
     DT[DeviceTaggerFunction] --> DTS[DeviceTaggingService]
+    DT --> RTS[IRunTraceStore]
+    RTS --> BRT[BlobRunTraceStore]
     DTS --> ADS[IActiveDirectoryDeviceSource]
     ADS --> LDAP[LdapActiveDirectoryDeviceSource]
     DTS --> EDC[IEntraDeviceClient]
     EDC --> GRAPH[MicrosoftGraphDeviceClient]
+    DTS --> DMR[DeviceMembershipReconciliationService]
+    DTS --> DML[IDeviceMembershipLedger]
+    DMR --> DML
+    DML --> BDML[BlobDeviceMembershipLedger]
 
     RT[PasswordRotationFunction] --> PRS[PasswordRotationService]
     PRS --> CS[IActiveDirectoryCredentialStore]
@@ -30,6 +36,8 @@ flowchart LR
     LDAP --> LCF[ActiveDirectoryLdapConnectionFactory]
     LPC --> LCF
     LDAP --> KV
+    BRT --> BLOB[Azure Blob Storage]
+    BDML --> BLOB
 ```
 
 ### Startup and dependency injection
@@ -43,6 +51,7 @@ flowchart LR
 - constructs the Key Vault `SecretClient`;
 - maps every service interface to its production implementation;
 - configures the Graph `HttpClient` with `https://graph.microsoft.com/v1.0/` as its base address.
+- creates Blob clients for the private membership ledger and latest-run trace containers.
 
 The Azure clients, LDAP adapters, credential store, password generator, and `TimeProvider` are singletons. The two workflow orchestrators are transient. `MicrosoftGraphDeviceClient` is created through `HttpClientFactory`.
 
@@ -54,8 +63,11 @@ sequenceDiagram
     participant Service as DeviceTaggingService
     participant AD as LdapActiveDirectoryDeviceSource
     participant Graph as MicrosoftGraphDeviceClient
+    participant Ledger as BlobDeviceMembershipLedger
+    participant Trace as BlobRunTraceStore
 
-    Timer->>Service: TagDevicesAsync()
+    Timer->>Trace: Replace latest JSONL trace
+    Timer->>Service: TagDevicesAsync(trace)
     loop Each tagging rule
         Service->>AD: GetHybridJoinedDevicesAsync(BaseDn)
         AD-->>Service: DirectoryDevice records
@@ -65,14 +77,20 @@ sequenceDiagram
         Graph-->>Service: EntraDevice or null
         alt Device exists, TrustType is ServerAd, and values differ
             Service->>Graph: SetExtensionAttributesAsync(changed values)
+            Service->>Ledger: Persist managed state
         else Already correct or ineligible
             Service->>Service: Count without writing
         end
     end
+    loop Each ledger device outside all configured OUs
+        Service->>Graph: Clear unchanged owned attributes and memberships
+        Service->>Ledger: Delete empty ownership state
+    end
+    Service->>Trace: Append structured action events
     Service-->>Timer: TaggingResult
 ```
 
-Rules may overlap. Assignments for different extension attributes are merged for the same device. If two matching rules assign different values to the same attribute, the run fails instead of applying an order-dependent result. Graph PATCH requests contain only attributes whose current values differ, making repeated runs idempotent.
+Rules may overlap. Assignments for different extension attributes are merged for the same device. If two matching rules assign different values to the same attribute, the run fails instead of applying an order-dependent result. Graph PATCH requests contain only attributes whose current values differ, making repeated runs idempotent. The ownership ledger records managed attribute values and memberships created by the application. When a device leaves all configured OUs, only attributes that still match their recorded value and memberships proven to be application-owned are removed.
 
 An OU-only path is resolved in every forest domain by reading cross-reference objects from the forest configuration partition. A full distinguished name containing `DC=` targets only that domain. Searches use subtree scope and LDAP paging, so nested OUs and large result sets are supported.
 
@@ -113,7 +131,7 @@ The new password is stored as the `next` secret before Active Directory is chang
 
 ### `DeviceTaggerFunction`
 
-The timer-trigger entry point for device tagging. Its schedule comes from `%TaggingSchedule%`. It delegates all work to `DeviceTaggingService` and logs the aggregate `TaggingResult`. The class is intentionally thin so scheduling remains independent from business logic.
+The timer-trigger entry point for device tagging. Its schedule comes from `%TaggingSchedule%`. It replaces the latest-run trace, delegates all work to `DeviceTaggingService`, records success or structured exception details, and logs the aggregate `TaggingResult`. The class is intentionally thin so scheduling remains independent from business logic.
 
 ### `PasswordRotationFunction`
 
@@ -123,7 +141,7 @@ The timer-trigger entry point for password maintenance. Its schedule comes from 
 
 ### `DeviceTaggingService`
 
-Coordinates one complete tagging run. It asks the Active Directory source for every configured rule, deduplicates devices by `DeviceId`, merges non-conflicting attribute assignments, looks up each device in Graph, verifies `TrustType == "ServerAd"`, calculates changed values, and patches only those values. It returns counts for discovered, updated, unchanged, missing, and non-hybrid devices.
+Coordinates one complete tagging run. It asks the Active Directory source for every configured rule, deduplicates devices by `DeviceId`, merges non-conflicting attribute assignments, looks up each device in Graph, verifies `TrustType == "ServerAd"`, calculates changed values, and patches only those values. It reconciles group and administrative-unit memberships, removes owned state for devices outside all configured OUs, and emits ordered trace events around every external action and decision. It returns counts for discovered, updated, unchanged, missing, non-hybrid, and cleaned devices.
 
 The private nested `DeviceTagAssignment` record groups one `DirectoryDevice` with the mutable, case-insensitive set of desired attributes accumulated from all matching rules.
 
@@ -171,6 +189,14 @@ Implements `IEntraDeviceClient`. It obtains an application token for the Graph `
 
 The Function managed identity therefore needs the Microsoft Graph application permission `Device.ReadWrite.All`.
 
+### `BlobDeviceMembershipLedger`
+
+Implements `IDeviceMembershipLedger` in the private `membership-ledger` container. One JSON document per hybrid device records the Entra object ID, managed extension-attribute values, and memberships that HybridDeviceTagger created. Empty records are deleted. Enumeration lets the orchestrator identify devices that were managed previously but are no longer returned by any configured OU rule.
+
+### `BlobRunTraceStore`
+
+Implements `IRunTraceStore` with the private `run-traces` container. Starting an invocation replaces `device-tagger-last-run.jsonl`; each event is then appended immediately as one compact JSON object and receives a UTC timestamp, sequence, invocation ID, severity, phase, action, outcome, details, and optional exception data. Append failures disable tracing for that invocation and produce a normal application warning instead of interrupting device tagging. Attribute values are represented only by SHA-256 fingerprints, and credentials or tokens are never supplied to the trace API.
+
 ## Service Interfaces
 
 ### `IActiveDirectoryCredentialStore`
@@ -188,6 +214,14 @@ Defines normal bind validation, secure bind validation, and password modificatio
 ### `IEntraDeviceClient`
 
 Defines lookup by hybrid device ID and extension-attribute updates by Entra object ID. It isolates HTTP, token acquisition, and Graph JSON from the tagging service.
+
+### `IDeviceMembershipLedger`
+
+Defines loading, enumerating, persisting, and deleting managed Entra ownership state independently from Blob Storage.
+
+### `IRunTraceStore` and `IRunTraceSession`
+
+`IRunTraceStore` starts the latest-run artifact for one invocation. The returned `IRunTraceSession` accepts structured events without exposing Blob APIs to workflow code. `RunTrace.None` keeps orchestration tests and alternate hosts independent from diagnostic storage.
 
 ### `IPasswordGenerator`
 

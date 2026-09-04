@@ -1,3 +1,8 @@
+/*
+ * Author: Andreas Lucas (aka Kili) <andreas.lucas@microsoft.com>
+ * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ */
+
 targetScope = 'resourceGroup'
 
 type taggingRule = {
@@ -43,7 +48,7 @@ param keyVaultResourceGroupName string
 @description('Subscription containing the existing Key Vault.')
 param keyVaultSubscriptionId string = subscription().subscriptionId
 
-@description('DNS name of any domain controller in the target Active Directory forest.')
+@description('Forest DNS name used for discovery, or the DNS name of a specific domain controller when discovery is unavailable.')
 param activeDirectoryServer string
 
 @description('Allow read and bind operations to fall back to unencrypted LDAP when LDAPS is unavailable.')
@@ -95,11 +100,15 @@ param instanceMemoryMB int = 2048
 @description('Tags applied to newly created resources.')
 param tags object = {}
 
-var servicePlanName = '${functionAppName}-plan'
-var logAnalyticsWorkspaceName = '${functionAppName}-law'
-var applicationInsightsName = '${functionAppName}-appi'
+var normalizedFunctionAppName = toLower(functionAppName)
+var resourceNameSuffix = startsWith(normalizedFunctionAppName, 'func-')
+  ? substring(normalizedFunctionAppName, 5)
+  : normalizedFunctionAppName
+var servicePlanName = 'asp-${resourceNameSuffix}'
+var logAnalyticsWorkspaceName = 'log-${resourceNameSuffix}'
+var applicationInsightsName = 'appi-${resourceNameSuffix}'
 var deploymentContainerName = 'app-package-${uniqueString(resourceGroup().id, functionAppName)}'
-var storagePrivateEndpointName = 'pe-${storageAccountName}-blob'
+var storagePrivateEndpointName = 'pep-${resourceNameSuffix}-blob'
 var keyVaultSecretsOfficerRoleDefinitionId = '/subscriptions/${keyVaultSubscriptionId}/providers/Microsoft.Authorization/roleDefinitions/b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
 var storageBlobDataOwnerRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b')
 
@@ -156,6 +165,14 @@ resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/con
 
 resource membershipLedgerContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   name: 'membership-ledger'
+  parent: blobService
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+resource runTraceContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  name: 'run-traces'
   parent: blobService
   properties: {
     publicAccess: 'None'
