@@ -1,6 +1,6 @@
 # HybridDeviceTagger
 
-HybridDeviceTagger ist eine .NET-8-Isolated Azure Function. Sie durchsucht eine oder mehrere konfigurierte Active-Directory-OUs einschließlich aller untergeordneten OUs nach Computerobjekten. Computer mit `msDS-DeviceID` werden mit Microsoft Entra ID abgeglichen und erhalten regelabhängig Werte für `extensionAttribute1` bis `extensionAttribute15`.
+HybridDeviceTagger ist eine .NET-8-Isolated Azure Function. Sie durchsucht eine oder mehrere konfigurierte Active-Directory-OUs einschließlich aller untergeordneten OUs nach synchronisierten Computerobjekten mit `userCertificate`. Die AD-`objectGUID` wird mit der Entra-`deviceId` abgeglichen; passende Geräte erhalten regelabhängig Werte für `extensionAttribute1` bis `extensionAttribute15` und werden optional Entra-Sicherheitsgruppen sowie normalen oder eingeschränkten administrativen Einheiten hinzugefügt.
 
 Vorkonfiguriert sind:
 
@@ -8,7 +8,7 @@ Vorkonfiguriert sind:
 - Geräteabgleich: alle 15 Minuten
 - Kennwortprüfung: täglich; Rotation nach 25 Tagen
 
-Die Verarbeitung ist idempotent. Ein Graph-PATCH wird nur für Extension-Attribute gesendet, deren bestehender Wert vom Zielwert abweicht. Computer ohne `msDS-DeviceID`, nicht in Entra gefundene Geräte und Geräte ohne `trustType=ServerAd` werden nicht verändert.
+Die Verarbeitung ist idempotent. Ein Graph-PATCH wird nur für Extension-Attribute gesendet, deren bestehender Wert vom Zielwert abweicht. Computer ohne `userCertificate`, nicht in Entra gefundene Geräte und Geräte ohne `trustType=ServerAd` werden nicht verändert.
 
 ## Voraussetzungen
 
@@ -16,7 +16,7 @@ Die Verarbeitung ist idempotent. Ein Graph-PATCH wird nur für Extension-Attribu
 - Azure Storage oder lokal Azurite für den Timer Trigger
 - DNS-Auflösung und Netzwerkzugriff der Function App auf die DNS-Namen aller betroffenen Forest-Domains über LDAPS auf Port 636 oder ersatzweise LDAP auf Port 389
 - System-assigned oder user-assigned Managed Identity für die Function App
-- Microsoft-Graph-Application-Permission `Device.ReadWrite.All` für diese Managed Identity mit Admin Consent
+- Microsoft-Graph-Application-Permissions `Device.ReadWrite.All`, `GroupMember.ReadWrite.All` und `AdministrativeUnit.ReadWrite.All` für diese Managed Identity mit Admin Consent
 - Ein forestweit verwendbares AD-Servicekonto mit Leserechten auf die konfigurierten OUs in allen Domains und dem Recht, das eigene Kennwort zu ändern
 - Ein Azure Key Vault für die beiden Kennwort-Secrets
 
@@ -33,6 +33,7 @@ Managed Identity authentifiziert den Zugriff auf Microsoft Graph und Azure Key V
 | `ActiveDirectory__UseSsl` | LDAPS aktivieren | `true` |
 | `ActiveDirectory__AllowLdapFallback` | Bei nicht verfügbarem LDAPS Lese- und Bindzugriffe über LDAP erlauben | `false`; der Installer ermittelt den Wert |
 | `ActiveDirectory__LdapFallbackPort` | Port für den signierten und versiegelten LDAP-Negotiate-Fallback | `389` |
+| `ActiveDirectory__TrustedCertificatePath` | Optionaler Pfad zu einem privaten Root-CA- oder selbstsignierten Lab-Zertifikat für LDAPS | leer; Installer paketiert das Zertifikat als PEM |
 | `ActiveDirectory__BindUsername` | UPN des Servicekontos | `svc-HybridDeviceTagger@bloedgelaber.de` |
 | `ActiveDirectory__BindUserDistinguishedName` | DN des Servicekontos für `unicodePwd` | muss angepasst werden |
 | `ActiveDirectory__PageSize` | LDAP-Seitengröße | `500` |
@@ -42,17 +43,29 @@ Managed Identity authentifiziert den Zugriff auf Microsoft Graph und Azure Key V
 | `PasswordRotation__RotateAfterDays` | Alter bei regulärer Rotation | `25` |
 | `PasswordRotation__PasswordLength` | Länge des generierten Kennworts | `40` |
 | `PasswordRotation__SecretExpiryDays` | Ablauf einer Secret-Version | `35` |
+| `Tagging__Rules__<n>__Name` | Eindeutiger, case-insensitiver Regelname für Verwaltung und Logs | erforderlich |
+| `Tagging__Rules__<n>__Description` | Lesbare Beschreibung des Zwecks | erforderlich |
 | `Tagging__Rules__<n>__BaseDn` | OU-only-Pfad für alle Forest-Domains oder vollständiger domainspezifischer DN | erforderlich |
-| `Tagging__Rules__<n>__ExtensionAttributes__extensionAttribute<m>` | Zielwert für Attribut 1 bis 15 | mindestens eines je Regel |
+| `Tagging__Rules__<n>__ExtensionAttributes__extensionAttribute<m>` | Zielwert für Attribut 1 bis 15 | optional |
+| `Tagging__Rules__<n>__EntraGroupIds__<m>` | Object ID einer statischen Entra-Sicherheitsgruppe | optional, maximal 50 |
+| `Tagging__Rules__<n>__AdministrativeUnitIds__<m>` | Object ID einer normalen oder eingeschränkten administrativen Einheit | optional, maximal 50 |
+
+Jede Regel benötigt mindestens eine Aktion aus diesen drei Zielarten. Die Mitgliedschaftsziele aller passenden Regeln werden vereinigt. HybridDeviceTagger speichert ausschließlich selbst erzeugte Mitgliedschaften im privaten Blob-Container `membership-ledger`. Wird ein solches Ziel später aus allen passenden Regeln entfernt, entfernt die Function auch diese Mitgliedschaft. Bereits vorher manuell oder durch andere Systeme vorhandene Mitgliedschaften werden nie als Eigentum übernommen und daher nie entfernt.
 
 Primär verwendet das Servicekonto Basic Bind über LDAPS. Der Installer prüft LDAPS zuerst. Bei erfolgreichem Bind wird `AllowLdapFallback` zwingend auf `false` gesetzt und LDAPS bleibt Pflicht. Ist LDAPS wegen eines Verbindungs-, TLS- oder Verfügbarkeitsfehlers nicht erreichbar, erklärt der Installer den Fallback und fragt, ob LDAP verwendet werden darf. Erst nach ausdrücklicher Zustimmung werden Geräteabfragen und Credential-Tests über LDAP mit Negotiate-Authentifizierung, LDAP Signing und Sealing ermöglicht. Ungültige Anmeldedaten lösen keinen Fallback aus. Der Fallback verwendet zwar kein TLS, schützt Bind und LDAP-Verkehr aber über die ausgehandelte SASL-Sicherheitsschicht.
+
+Für private PKIs kann der Installer mit `-ActiveDirectoryTrustedCertificatePath` ein öffentliches Root-CA-Zertifikat im DER- oder PEM-Format übernehmen. Für einen Lab-DC darf dies auch dessen direkt selbstsigniertes Serverzertifikat sein. Das validierte Zertifikat wird ohne privaten Schlüssel als PEM in das Function-Paket geschrieben. Die Anwendung akzeptiert nur Zertifikate, die eine gültige Kette zu diesem Trust Anchor, die EKU Server Authentication und den DNS-Namen des LDAP-Ziels besitzen.
 
 Beispiel für lokale App Settings:
 
 ```text
+Tagging__Rules__0__Name=Tier 0 workstations
+Tagging__Rules__0__Description=Tags privileged administrative workstations.
 Tagging__Rules__0__BaseDn=OU=Tier0,OU=Admin
 Tagging__Rules__0__ExtensionAttributes__extensionAttribute1=PAW
 Tagging__Rules__0__ExtensionAttributes__extensionAttribute2=Tier0
+Tagging__Rules__1__Name=Tier 1 servers
+Tagging__Rules__1__Description=Tags server devices as Tier 1.
 Tagging__Rules__1__BaseDn=OU=Server
 Tagging__Rules__1__ExtensionAttributes__extensionAttribute2=Tier1
 ```
@@ -60,6 +73,24 @@ Tagging__Rules__1__ExtensionAttributes__extensionAttribute2=Tier1
 Enthält `BaseDn` nur OU-Komponenten, beispielsweise `OU=Tier0,OU=Admin`, liest die Function die Domain-CrossRefs aus der Forest-Konfigurationspartition und sucht diesen OU-Pfad in jeder Domain. Eine Domain, in der der Pfad nicht existiert, wird übersprungen; existiert er in keiner Domain, schlägt die Regel fehl. Ein vollständiger DN wie `OU=Tier0,OU=Admin,DC=child,DC=example,DC=com` begrenzt die Regel dagegen auf genau diese Domain.
 
 Jede konkrete OU wird mit LDAP `SearchScope.Subtree` durchsucht und erfasst damit Computer direkt in der Basis-OU und in allen darunterliegenden OUs. Regeln dürfen sich überlappen; Zuweisungen unterschiedlicher Attribute werden für ein Gerät zusammengeführt. Weisen überlappende Regeln demselben Attribut unterschiedliche Werte zu, wird der Lauf mit einem Konfigurationsfehler beendet, statt einen reihenfolgeabhängigen Wert zu schreiben.
+
+## Tagging-Regeln nach der Installation ändern
+
+Mit `Deployment/Update-TaggingConfiguration.ps1` lässt sich der vollständige gewünschte Regelsatz einer bestehenden Function App aktualisieren, ohne Infrastruktur oder Anwendungscode erneut bereitzustellen. `-ShowCurrent` zeigt die aktuelle Konfiguration auch ohne `-TaggingRules` an. `-AddRule` akzeptiert eine Regel als PSObject oder JSON über `-InputObject`, ein einzelnes Pipelineobjekt oder die Parameter `RuleName`, `BaseDn`, `ExtensionAttribute` und `Value`; `RuleDescription` ist optional. Bei `-ShowCurrent`, `-AddRule` und `-RemoveRuleName` bleibt die lesbare Host-Anzeige erhalten und zusätzlich wird genau ein strukturiertes Konfigurationsobjekt ausgegeben. Bei `-WhatIf` enthält es den tatsächlich gespeicherten Iststand, nach einer erfolgreichen Änderung den neuen Stand. Das Skript validiert neue Regeln, ersetzt atomar nur `Tagging__RulesJson` und startet die Function App neu. Beispiele für Anzeigen, Hinzufügen, Ändern und Entfernen stehen in der [Installationsanleitung](Deployment/README.md#updating-tagging-rules-after-installation).
+
+`-TaggingRules` ersetzt den vollständigen Regelsatz und verlangt deshalb zusätzlich zur normalen PowerShell-Bestätigung eine ausdrückliche Sicherheitsabfrage. `-Confirm:$false` umgeht diese Abfrage nicht. Nichtinteraktive, genehmigte Pipelines müssen `-ForceTaggingRulesReplacement` explizit angeben; `-WhatIf` benötigt keine Bestätigung.
+
+Wird `-AddRule` interaktiv ohne `InputObject` und ohne vollständige Einzelparameter aufgerufen, fragt das Skript die fehlenden Werte direkt im Terminal ab. Die Aktionsauswahl `A`, `G` und `U` erlaubt Extension-Attribute, Gruppen, administrative Einheiten oder Kombinationen davon. Eine Regel kann mehrere Ziele jeder Art enthalten. Nichtinteraktiv werden korrespondierende Listen verwendet, beispielsweise `-ExtensionAttribute 1,2 -Value 'Server','Tier1' -EntraGroupId $groupId -AdministrativeUnitId $auId`. Attributnummern müssen eindeutig zwischen 1 und 15 liegen und beide Attributlisten gleich lang sein. In CI gibt es keine Prompts; dort müssen ein Inputobjekt oder alle Pflichtwerte übergeben werden.
+
+Bei skalaren Parametern aktualisiert `-AddRule` einen bereits vorhandenen, case-insensitiven `RuleName`, statt eine doppelte Regel anzulegen. Ohne `-BaseDn` und `-RuleDescription` bleiben die vorhandenen Werte erhalten. Bestehende Extension-Attribute bleiben ebenfalls bestehen; angegebene Nummern werden ergänzt oder gezielt überschrieben. Nur ein neuer Regelname benötigt zwingend einen Base DN.
+
+Mit `-EntraGroupId` und `-AdministrativeUnitId` lassen sich jeweils bis zu 50 eindeutige Object IDs setzen. Bei einem vorhandenen Regelname bleiben nicht angegebene Zielarten unverändert; eine ausdrücklich angegebene Liste ersetzt die bisherige Liste dieser Zielart. Eine leere Liste entfernt alle Ziele dieser Art und löst im nächsten Lauf nur für vom Tagger selbst erzeugte Mitgliedschaften eine Entfernung aus.
+
+Regelnamen dürfen 1 bis 128 Unicode-Buchstaben oder Ziffern sowie Leerzeichen, Punkte, Unterstriche, Bindestriche und Klammern enthalten. Ein Base DN besteht aus gültigen `OU=`-Komponenten und optional einem nachfolgenden `DC=`-Teil; auch ein reiner Domain-DN ist zulässig. Sonderzeichen in DN-Werten müssen LDAP-konform maskiert werden. Deployment-Skripte und Function-Startup prüfen dieselben Regeln.
+
+Eingabegrößen werden vor JSON-Verarbeitung sowie Azure- oder LDAP-Aufrufen begrenzt: maximal 100 Regeln und 32.768 Zeichen serialisiertes Regel-JSON. Pro Regel gelten 128 Zeichen für den Namen, 1.024 für die Beschreibung, 2.048 für den Base DN, höchstens 15 Extension-Attribute, 1.024 Zeichen je Attributwert sowie jeweils 50 eindeutige Gruppen- und AU-IDs. Ressourcen-, AD-, Key-Vault- und Tag-Parameter folgen zusätzlich den jeweiligen Dienstgrenzen und werden soweit relevant beim Function-Start erneut validiert.
+
+Entfernte Regeln oder geänderte Tagwerte wirken nur auf künftige Synchronisierungsläufe. Bereits von einer alten Regel gesetzte Entra-Attribute werden nicht automatisch gelöscht.
 
 ## Erstmalige Einrichtung des AD-Kennworts
 
@@ -125,8 +156,57 @@ Das Verzeichnis `Deployment` enthält ein idempotentes PowerShell-Installationss
 
 Beginnen Sie immer mit `-ValidateOnly`, danach mit `-WhatIf`, und führen Sie erst anschließend die Installation aus. Parameter, Voraussetzungen, Berechtigungen und ein vollständiges Beispiel stehen in [Deployment/README.md](Deployment/README.md).
 
+## Code-Dokumentation
+
+Eine englische Beschreibung der Architektur, Abläufe sowie der Verantwortlichkeiten und Zusammenarbeit aller Klassen steht in [CODE_DOCUMENTATION.md](CODE_DOCUMENTATION.md).
+
 ## Azure-Betrieb
 
-Die Function App muss aus ihrem virtuellen Netzwerk den konfigurierten Domain Controller sowie die über die Forest-CrossRefs ermittelten Domain-DNS-Namen auflösen und per LDAPS erreichen, beispielsweise über Site-to-Site-VPN oder ExpressRoute. Optional kann LDAP auf Port 389 als Fallback erreichbar sein. Legen Sie alle Werte aus der Konfiguration als Function-App-Settings an und aktivieren Sie Managed Identity. Weisen Sie deren Service Principal die Graph-App-Rolle `Device.ReadWrite.All` sowie die beschriebenen Key-Vault-Rechte zu.
+Die Function App muss aus ihrem virtuellen Netzwerk den konfigurierten Domain Controller sowie die über die Forest-CrossRefs ermittelten Domain-DNS-Namen auflösen und per LDAPS erreichen, beispielsweise über Site-to-Site-VPN oder ExpressRoute. Optional kann LDAP auf Port 389 als Fallback erreichbar sein. Legen Sie alle Werte aus der Konfiguration als Function-App-Settings an und aktivieren Sie Managed Identity. Weisen Sie deren Service Principal die drei beschriebenen Graph-App-Rollen sowie die Key-Vault- und Blob-Rechte zu. Für Geräte in eingeschränkten administrativen Einheiten benötigt die Managed Identity zusätzlich die vom Installer erzeugte Least-Privilege-Rolle direkt am jeweiligen RMAU-Scope.
+
+### Ablauf- und Fehlerprotokolle
+
+Die Anwendung sendet strukturierte OpenTelemetry-Logs, Exceptions sowie HTTP-Abhängigkeiten an das mit der Function App verbundene Application Insights. In Azure öffnen Sie `func-hybriddevicetagger-appi` und anschließend **Überwachung > Protokolle**. Jede Timer-Ausführung schreibt Start, Ergebnis oder Fehler mit derselben `InvocationId`. Geräteupdates enthalten nur die Device-ID und die Namen geänderter Attribute; Attributwerte und Kennwörter werden nicht protokolliert.
+
+Bei direkter Abfrage des verbundenen Log-Analytics-Workspace `func-hybriddevicetagger-law` heißen die entsprechenden Tabellen `AppTraces`, `AppExceptions`, `AppRequests` und `AppDependencies`. Die folgenden Kurzformen `traces`, `exceptions`, `requests` und `dependencies` gelten im Protokollbereich der Application-Insights-Ressource.
+
+Letzte Abläufe und ihre Ergebnisfelder:
+
+```kusto
+traces
+| where timestamp > ago(24h)
+| where cloud_RoleName == "func-hybriddevicetagger"
+| where message has_any ("Device tagging", "Tagging rule", "Password rotation")
+| project timestamp, severityLevel, message, operation_Id, customDimensions
+| order by timestamp desc
+```
+
+Fehler einschließlich Stacktrace:
+
+```kusto
+exceptions
+| where timestamp > ago(7d)
+| where cloud_RoleName == "func-hybriddevicetagger"
+| project timestamp, type, outerMessage, innermostMessage, operation_Id, details
+| order by timestamp desc
+```
+
+Fehlgeschlagene Aufrufe an Microsoft Graph oder Key Vault:
+
+```kusto
+dependencies
+| where timestamp > ago(7d)
+| where cloud_RoleName == "func-hybriddevicetagger" and success == false
+| project timestamp, target, name, resultCode, duration, operation_Id
+| order by timestamp desc
+```
+
+Mit einer `operation_Id` aus einem Treffer lässt sich eine komplette Ausführung korrelieren:
+
+```kusto
+union traces, exceptions, requests, dependencies
+| where operation_Id == "OPERATION_ID_EINSETZEN"
+| order by timestamp asc
+```
 
 Die Funktion markiert Geräte innerhalb der OU. Sie entfernt das Attribut nicht automatisch, wenn ein Computer später aus der OU verschoben wird.

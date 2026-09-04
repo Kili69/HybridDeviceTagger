@@ -7,8 +7,9 @@ using HybridDeviceTagger.Models;
 namespace HybridDeviceTagger.Services;
 
 /// <summary>Reads and updates Microsoft Entra devices through authenticated Graph requests.</summary>
-public sealed class MicrosoftGraphDeviceClient : IEntraDeviceClient
+public sealed class MicrosoftGraphDeviceClient : IEntraDeviceClient, IEntraMembershipClient
 {
+    /// <summary>The application-permission scope used to request Microsoft Graph tokens.</summary>
     private static readonly TokenRequestContext TokenContext =
         new(["https://graph.microsoft.com/.default"]);
 
@@ -81,6 +82,107 @@ public sealed class MicrosoftGraphDeviceClient : IEntraDeviceClient
         response.EnsureSuccessStatusCode();
     }
 
+    /// <inheritdoc />
+    public Task<bool> IsGroupMemberAsync(
+        Guid groupId,
+        string entraObjectId,
+        CancellationToken cancellationToken) =>
+        IsMemberAsync($"groups/{groupId:D}/members/{entraObjectId}", cancellationToken);
+
+    /// <inheritdoc />
+    public Task AddGroupMemberAsync(
+        Guid groupId,
+        string entraObjectId,
+        CancellationToken cancellationToken) =>
+        AddMemberAsync($"groups/{groupId:D}/members/$ref", entraObjectId, cancellationToken);
+
+    /// <inheritdoc />
+    public Task RemoveGroupMemberAsync(
+        Guid groupId,
+        string entraObjectId,
+        CancellationToken cancellationToken) =>
+        RemoveMemberAsync(
+            $"groups/{groupId:D}/members/{entraObjectId}/$ref",
+            cancellationToken);
+
+    /// <inheritdoc />
+    public Task<bool> IsAdministrativeUnitMemberAsync(
+        Guid administrativeUnitId,
+        string entraObjectId,
+        CancellationToken cancellationToken) =>
+        IsMemberAsync(
+            $"directory/administrativeUnits/{administrativeUnitId:D}/members/{entraObjectId}",
+            cancellationToken);
+
+    /// <inheritdoc />
+    public Task AddAdministrativeUnitMemberAsync(
+        Guid administrativeUnitId,
+        string entraObjectId,
+        CancellationToken cancellationToken) =>
+        AddMemberAsync(
+            $"directory/administrativeUnits/{administrativeUnitId:D}/members/$ref",
+            entraObjectId,
+            cancellationToken);
+
+    /// <inheritdoc />
+    public Task RemoveAdministrativeUnitMemberAsync(
+        Guid administrativeUnitId,
+        string entraObjectId,
+        CancellationToken cancellationToken) =>
+        RemoveMemberAsync(
+            $"directory/administrativeUnits/{administrativeUnitId:D}/members/{entraObjectId}/$ref",
+            cancellationToken);
+
+    private async Task<bool> IsMemberAsync(
+        string requestUri,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{requestUri}?$select=id");
+        await AuthorizeAsync(request, cancellationToken);
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return false;
+        }
+
+        response.EnsureSuccessStatusCode();
+        return true;
+    }
+
+    private async Task AddMemberAsync(
+        string requestUri,
+        string entraObjectId,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, requestUri)
+        {
+            Content = JsonContent.Create(new Dictionary<string, string>
+            {
+                ["@odata.id"] = $"https://graph.microsoft.com/v1.0/devices/{entraObjectId}"
+            })
+        };
+        await AuthorizeAsync(request, cancellationToken);
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+    }
+
+    private async Task RemoveMemberAsync(
+        string requestUri,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Delete, requestUri);
+        await AuthorizeAsync(request, cancellationToken);
+
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        if (response.StatusCode != System.Net.HttpStatusCode.NotFound)
+        {
+            response.EnsureSuccessStatusCode();
+        }
+    }
+
+    /// <summary>Obtains a managed-identity token and adds it to one Graph request.</summary>
     private async Task AuthorizeAsync(
         HttpRequestMessage request,
         CancellationToken cancellationToken)
@@ -89,6 +191,7 @@ public sealed class MicrosoftGraphDeviceClient : IEntraDeviceClient
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
     }
 
+    /// <summary>Reads an optional JSON string while treating missing and JSON null as absent.</summary>
     private static string? GetOptionalString(JsonElement element, string propertyName) =>
         element.TryGetProperty(propertyName, out var property) &&
         property.ValueKind is not JsonValueKind.Null

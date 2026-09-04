@@ -45,6 +45,11 @@ public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPassword
             cancellationToken);
     }
 
+    /// <summary>Tests a credential through either the normal bind path or mandatory LDAPS.</summary>
+    /// <remarks>
+    /// LDAP failures become <see langword="false"/> because failed credentials are an expected
+    /// input to rotation recovery. Cancellation and non-LDAP failures still propagate.
+    /// </remarks>
     private Task<bool> CanBindAsync(
         StoredDirectoryCredential credential,
         bool requireSecureConnection,
@@ -99,6 +104,8 @@ public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPassword
         return Task.CompletedTask;
     }
 
+    /// <summary>Encodes the quoted UTF-16LE representation required by AD's <c>unicodePwd</c>.</summary>
+    /// <remarks>Omitting the surrounding quotes causes Active Directory to reject the syntax.</remarks>
     private static byte[] ToUnicodePassword(string password) =>
         Encoding.Unicode.GetBytes($"\"{password}\"");
 }

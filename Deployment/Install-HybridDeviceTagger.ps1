@@ -24,18 +24,21 @@
 param(
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 320)]
     [string]$ExpectedAzureAccount,
 
     [Parameter(Mandatory)]
-    [ValidatePattern('^[0-9a-fA-F-]{36}$')]
+    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$SubscriptionId,
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 90)]
     [string]$ResourceGroupName,
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 64)]
     [string]$Location,
 
     [Parameter(Mandatory)]
@@ -48,26 +51,31 @@ param(
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 64)]
     [string]$VirtualNetworkName,
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 80)]
     [string]$SubnetName,
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 80)]
     [string]$PrivateEndpointSubnetName,
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 90)]
     [string]$VirtualNetworkResourceGroupName,
 
     [Parameter(Mandatory)]
-    [ValidateNotNullOrEmpty()]
+    [ValidatePattern('^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$')]
     [string]$KeyVaultName,
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 90)]
     [string]$KeyVaultResourceGroupName,
 
     [Parameter(Mandatory)]
@@ -76,6 +84,7 @@ param(
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 253)]
     [string]$ActiveDirectoryServer,
 
     [switch]$AllowLdapFallback,
@@ -83,12 +92,18 @@ param(
     [ValidateRange(1, 65535)]
     [int]$LdapFallbackPort = 389,
 
+    [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 4096)]
+    [string]$ActiveDirectoryTrustedCertificatePath,
+
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 256)]
     [string]$ActiveDirectoryBindUsername,
 
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 2048)]
     [string]$ActiveDirectoryBindUserDistinguishedName,
 
     [ValidateNotNull()]
@@ -97,26 +112,31 @@ param(
     [ValidateNotNull()]
     [pscredential]$ActiveDirectoryProvisioningCredential,
 
-    [ValidatePattern('^[0-9a-fA-F-]{36}$')]
+    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$VirtualNetworkSubscriptionId = $SubscriptionId,
 
-    [ValidatePattern('^[0-9a-fA-F-]{36}$')]
+    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$KeyVaultSubscriptionId = $SubscriptionId,
 
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 127)]
     [string]$CurrentCredentialEntryName = 'hybrid-device-tagger-ad-password-current',
 
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 127)]
     [string]$StagedCredentialEntryName = 'hybrid-device-tagger-ad-password-next',
 
     [Parameter(Mandatory)]
     [ValidateNotNull()]
+    [ValidateCount(1, 100)]
     [object[]]$TaggingRules,
 
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 100)]
     [string]$TaggingSchedule = '0 */15 * * * *',
 
     [ValidateNotNullOrEmpty()]
+    [ValidateLength(1, 100)]
     [string]$RotationSchedule = '0 30 2 * * *',
 
     [ValidateRange(1, 1000)]
@@ -131,23 +151,28 @@ param(
     [ValidateRange(26, 365)]
     [int]$InitialSecretExpiryDays = 35,
 
+    [ValidateCount(0, 50)]
     [hashtable]$Tags = @{},
 
     [switch]$CreateResourceGroup,
     [switch]$RegisterProviders,
     [switch]$PrepareActiveDirectoryAccountOnly,
+    [switch]$SkipActiveDirectoryDirectoryChecks,
     [switch]$ValidateOnly,
-    [switch]$SkipCodeDeployment
+    [switch]$SkipCodeDeployment,
+    [switch]$GrantRestrictedAdministrativeUnitRole
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$script:TrustedCertificate = $null
 
 $scriptRoot = $PSScriptRoot
 $repositoryRoot = Split-Path -Parent $scriptRoot
 $templatePath = Join-Path $scriptRoot 'main.bicep'
 $projectPath = Join-Path $repositoryRoot 'src/HybridDeviceTagger/HybridDeviceTagger.csproj'
+$trustedCertificatePackagePath = 'certificates/active-directory-trust-anchor.pem'
 $requiredProviders = @(
     'Microsoft.App',
     'Microsoft.Authorization',
@@ -158,6 +183,67 @@ $requiredProviders = @(
     'Microsoft.Storage',
     'Microsoft.Web'
 )
+
+$certificateAssemblies = @(
+    ([AppContext]::GetData('TRUSTED_PLATFORM_ASSEMBLIES') -split [IO.Path]::PathSeparator)
+    [System.DirectoryServices.Protocols.LdapConnection].Assembly.Location
+) | Select-Object -Unique
+if (-not ('HybridDeviceTaggerLdapCertificateValidatorV2' -as [type])) {
+    Add-Type -ReferencedAssemblies $certificateAssemblies -TypeDefinition @'
+using System;
+using System.DirectoryServices.Protocols;
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+
+#pragma warning disable SYSLIB0057
+
+public static class HybridDeviceTaggerLdapCertificateValidatorV2
+{
+    public static VerifyServerCertificateCallback Create(
+        string expectedServer,
+        X509Certificate2 trustAnchor)
+    {
+        return (_, certificate) => Validate(expectedServer, certificate, trustAnchor);
+    }
+
+    public static bool ValidateTlsEndpoint(
+        string expectedServer,
+        int port,
+        X509Certificate2 trustAnchor)
+    {
+        using var client = new TcpClient();
+        client.Connect(expectedServer, port);
+        using var stream = new SslStream(
+            client.GetStream(),
+            false,
+            (_, certificate, _, _) =>
+                certificate is not null && Validate(expectedServer, certificate, trustAnchor));
+        stream.AuthenticateAsClient(expectedServer);
+        return stream.IsAuthenticated && stream.IsEncrypted;
+    }
+
+    private static bool Validate(
+        string expectedServer,
+        X509Certificate certificate,
+        X509Certificate2 trustAnchor)
+    {
+        using var serverCertificate = new X509Certificate2(
+            certificate.Export(X509ContentType.Cert));
+        using var chain = new X509Chain();
+        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+        chain.ChainPolicy.CustomTrustStore.Add(trustAnchor);
+        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
+
+        var certificateName = serverCertificate.GetNameInfo(X509NameType.DnsName, false);
+        return certificateName.Equals(expectedServer, StringComparison.OrdinalIgnoreCase) &&
+            chain.Build(serverCertificate);
+    }
+}
+'@
+}
 
 function Write-Step {
     param([Parameter(Mandatory)][string]$Message)
@@ -222,9 +308,17 @@ function Test-ForestRelativeOuPath {
     $Path -notmatch '(?i)(?:^|(?<!\\),)\s*DC\s*='
 }
 
-function Test-OuOnlyPath {
+function Test-ValidTaggingRuleName {
+    param([Parameter(Mandatory)][string]$Name)
+    $Name.Trim() -match '^[\p{L}\p{N}][\p{L}\p{N} ._()\-]{0,127}$'
+}
+
+function Test-ValidTaggingBaseDn {
     param([Parameter(Mandatory)][string]$Path)
-    @($Path.Trim().TrimEnd(',') -split '(?<!\\),').Where({ $_ -notmatch '(?i)^\s*OU\s*=' }).Count -eq 0
+    $valuePattern = '(?!#)(?:\\[^\x00-\x1F\x7F]|[^,+"\\<>;\x00-\x1F\x7F])+'
+    $ouPattern = "(?i:OU)\s*=$valuePattern"
+    $dcPattern = "(?i:DC)\s*=$valuePattern"
+    $Path -match "^\s*(?:$ouPattern(?:\s*,\s*$ouPattern)*(?:\s*,\s*$dcPattern)*|$dcPattern(?:\s*,\s*$dcPattern)*)\s*$"
 }
 
 function Get-DomainDnsNameFromDistinguishedName {
@@ -235,30 +329,69 @@ function Get-DomainDnsNameFromDistinguishedName {
     ) | ForEach-Object { $_.Groups[1].Value.Trim() }) -join '.'
 }
 
+function Get-TaggingRuleValue {
+    param(
+        [Parameter(Mandatory)][object]$InputRule,
+        [Parameter(Mandatory)][string]$PropertyName
+    )
+
+    if ($InputRule -is [System.Collections.IDictionary]) {
+        return $InputRule[$PropertyName]
+    }
+
+    $property = $InputRule.PSObject.Properties[$PropertyName]
+    if ($null -ne $property) {
+        return $property.Value
+    }
+}
+
 function ConvertTo-NormalizedTaggingRule {
     if ($TaggingRules.Count -eq 0) {
         throw 'At least one tagging rule is required.'
     }
 
     $normalizedRules = [System.Collections.Generic.List[object]]::new()
+    $ruleNames = [System.Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
     foreach ($rule in $TaggingRules) {
+        $name = [string](Get-TaggingRuleValue -InputRule $rule -PropertyName 'Name')
+        if ([string]::IsNullOrWhiteSpace($name)) {
+            throw 'Every tagging rule requires a non-empty Name.'
+        }
+        if (-not (Test-ValidTaggingRuleName $name)) {
+            throw "Tagging rule name '$name' contains unsupported characters. Use 1-128 letters, numbers, spaces, dots, underscores, hyphens, or parentheses."
+        }
+        if (-not $ruleNames.Add($name.Trim())) {
+            throw "Tagging rule name '$name' is duplicated."
+        }
+        $description = [string](Get-TaggingRuleValue -InputRule $rule -PropertyName 'Description')
+        if ([string]::IsNullOrWhiteSpace($description)) {
+            throw "Tagging rule '$name' requires a non-empty Description."
+        }
+        if ($description.Length -gt 1024) {
+            throw "Tagging rule '$name' Description cannot exceed 1024 characters."
+        }
         $baseDn = [string]$rule.BaseDn
         if ([string]::IsNullOrWhiteSpace($baseDn)) {
             throw 'Every tagging rule requires a non-empty BaseDn.'
         }
-        if ((Test-ForestRelativeOuPath $baseDn) -and -not (Test-OuOnlyPath $baseDn)) {
-            throw "Tagging rule '$baseDn' must be a full distinguished name or an OU-only path."
+        if ($baseDn.Length -gt 2048) {
+            throw "Tagging rule '$name' BaseDn cannot exceed 2048 characters."
+        }
+        if (-not (Test-ValidTaggingBaseDn $baseDn)) {
+            throw "Tagging rule '$baseDn' must be a valid OU distinguished name with an optional trailing DC part."
         }
 
         $attributes = [System.Collections.Generic.Dictionary[string, string]]::new(
             [StringComparer]::OrdinalIgnoreCase
         )
-        $rawAttributes = $rule.ExtensionAttributes
-        if ($null -eq $rawAttributes) {
-            throw "Tagging rule '$baseDn' requires ExtensionAttributes."
-        }
+        $rawAttributes = Get-TaggingRuleValue -InputRule $rule -PropertyName 'ExtensionAttributes'
 
-        $entries = if ($rawAttributes -is [System.Collections.IDictionary]) {
+        $entries = if ($null -eq $rawAttributes) {
+            @()
+        }
+        elseif ($rawAttributes -is [System.Collections.IDictionary]) {
             $rawAttributes.GetEnumerator() | ForEach-Object {
                 [pscustomobject]@{ Name = [string]$_.Key; Value = [string]$_.Value }
             }
@@ -276,17 +409,55 @@ function ConvertTo-NormalizedTaggingRule {
             if ([string]::IsNullOrWhiteSpace($entry.Value)) {
                 throw "Tagging rule '$baseDn' requires a non-empty value for '$($entry.Name)'."
             }
+            if ($entry.Value.Length -gt 1024) {
+                throw "Tagging rule '$name' value for '$($entry.Name)' cannot exceed 1024 characters."
+            }
             if (-not $attributes.TryAdd($entry.Name, $entry.Value)) {
                 throw "Tagging rule '$baseDn' contains duplicate attribute '$($entry.Name)'."
             }
         }
-        if ($attributes.Count -eq 0) {
-            throw "Tagging rule '$baseDn' requires at least one extension attribute."
+        if ($attributes.Count -gt 15) {
+            throw "Tagging rule '$name' cannot contain more than 15 extension attributes."
+        }
+
+        $membershipTargets = [ordered]@{}
+        foreach ($propertyName in @('EntraGroupIds', 'AdministrativeUnitIds')) {
+            $targetIds = @(
+                Get-TaggingRuleValue -InputRule $rule -PropertyName $propertyName |
+                    Where-Object { $null -ne $_ }
+            )
+            if ($targetIds.Count -gt 50) {
+                throw "Tagging rule '$name' cannot contain more than 50 $propertyName."
+            }
+
+            $normalizedIds = [System.Collections.Generic.List[guid]]::new()
+            $uniqueIds = [System.Collections.Generic.HashSet[guid]]::new()
+            foreach ($targetId in $targetIds) {
+                $parsedId = [guid]::Empty
+                if (-not [guid]::TryParse([string]$targetId, [ref]$parsedId) -or
+                    $parsedId -eq [guid]::Empty) {
+                    throw "Tagging rule '$name' contains an invalid or empty GUID in $propertyName."
+                }
+                if (-not $uniqueIds.Add($parsedId)) {
+                    throw "Tagging rule '$name' contains duplicate ID '$parsedId' in $propertyName."
+                }
+                $normalizedIds.Add($parsedId)
+            }
+            $membershipTargets[$propertyName] = $normalizedIds.ToArray()
+        }
+        if ($attributes.Count -eq 0 -and
+            $membershipTargets.EntraGroupIds.Count -eq 0 -and
+            $membershipTargets.AdministrativeUnitIds.Count -eq 0) {
+            throw "Tagging rule '$name' requires at least one extension attribute, Entra group, or administrative unit."
         }
 
         $normalizedRules.Add([ordered]@{
+            name = $name.Trim()
+            description = $description.Trim()
             baseDn = $baseDn
             extensionAttributes = $attributes
+            entraGroupIds = $membershipTargets.EntraGroupIds
+            administrativeUnitIds = $membershipTargets.AdministrativeUnitIds
         })
     }
 
@@ -313,14 +484,28 @@ function Connect-LdapDirectory {
     else {
         [System.DirectoryServices.Protocols.AuthType]::Negotiate
     }
+    $networkCredential = $Credential.GetNetworkCredential()
+    if (-not $UseSsl -and $networkCredential.UserName.Contains('@')) {
+        $userPrincipalNameParts = $networkCredential.UserName.Split('@', 2)
+        $networkCredential = [System.Net.NetworkCredential]::new(
+            $userPrincipalNameParts[0],
+            $networkCredential.Password,
+            $userPrincipalNameParts[1])
+    }
     $connection = [System.DirectoryServices.Protocols.LdapConnection]::new(
         $identifier,
-        $Credential.GetNetworkCredential(),
+        $networkCredential,
         $authenticationType
     )
     $connection.Timeout = [TimeSpan]::FromSeconds(15)
     $connection.SessionOptions.ProtocolVersion = 3
     $connection.SessionOptions.SecureSocketLayer = $UseSsl
+    if ($UseSsl -and $script:TrustedCertificate) {
+        $connection.SessionOptions.VerifyServerCertificate =
+            [HybridDeviceTaggerLdapCertificateValidatorV2]::Create(
+                $Server,
+                $script:TrustedCertificate)
+    }
     if (-not $UseSsl) {
         $connection.SessionOptions.Signing = $true
         $connection.SessionOptions.Sealing = $true
@@ -391,6 +576,21 @@ function Connect-ValidatedLdapDirectory {
             throw
         }
 
+        if ($script:TrustedCertificate -and
+            [HybridDeviceTaggerLdapCertificateValidatorV2]::ValidateTlsEndpoint(
+                $Server,
+                636,
+                $script:TrustedCertificate)) {
+            Write-Warning @"
+The native Windows LDAP client could not bind over LDAPS, but the strict TLS certificate handshake succeeded.
+Installer directory checks will use LDAP with Negotiate signing and sealing. The deployed Function remains LDAPS-only.
+"@
+            return Connect-LdapDirectory `
+                -Server $Server `
+                -Port $LdapFallbackPort `
+                -UseSsl $false
+        }
+
         $null = Confirm-LdapFallbackUse
         $connection = Connect-LdapDirectory `
             -Server $Server `
@@ -399,6 +599,19 @@ function Connect-ValidatedLdapDirectory {
         $script:EffectiveAllowLdapFallback = $true
         $connection
     }
+}
+
+function Get-LdapServerForDomain {
+    param([Parameter(Mandatory)][string]$DomainDnsName)
+
+    if ($ActiveDirectoryServer.EndsWith(
+        ".$DomainDnsName",
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        return $ActiveDirectoryServer
+    }
+
+    $DomainDnsName
 }
 
 function Confirm-ActiveDirectoryAccountChange {
@@ -800,14 +1013,16 @@ function Test-LdapConfiguration {
         $searchTargets = if ($isForestRelative) {
             @($forestDomains | ForEach-Object {
                 [pscustomobject]@{
-                    Server = $_.DnsRoot
+                    Server = Get-LdapServerForDomain $_.DnsRoot
                     BaseDn = "$($configuredBaseDn.Trim().TrimEnd(',')),$($_.NamingContext)"
                 }
             })
         }
         else {
             @([pscustomobject]@{
-                Server = Get-DomainDnsNameFromDistinguishedName $configuredBaseDn
+                Server = Get-LdapServerForDomain (
+                    Get-DomainDnsNameFromDistinguishedName $configuredBaseDn
+                )
                 BaseDn = $configuredBaseDn
             })
         }
@@ -831,9 +1046,9 @@ function Test-LdapConfiguration {
 
                 $deviceRequest = [System.DirectoryServices.Protocols.SearchRequest]::new(
                     $target.BaseDn,
-                    '(objectCategory=computer)',
+                    '(&(objectCategory=computer)(userCertificate=*))',
                     [System.DirectoryServices.Protocols.SearchScope]::Subtree,
-                    [string[]]@('msDS-DeviceID')
+                    [string[]]@('objectGUID')
                 )
                 $deviceRequest.SizeLimit = 1
                 try {
@@ -955,12 +1170,15 @@ function Assert-KeyVault {
         return
     }
 
+    $secretResourceId = "/subscriptions/$KeyVaultSubscriptionId/resourceGroups/" +
+        "$KeyVaultResourceGroupName/providers/Microsoft.KeyVault/vaults/" +
+        "$KeyVaultName/secrets/$CurrentCredentialEntryName"
     $secret = Invoke-AzureCli -Arguments @(
-        'keyvault', 'secret', 'show',
-        '--vault-name', $KeyVaultName,
-        '--name', $CurrentCredentialEntryName,
+        'resource', 'show',
+        '--ids', $secretResourceId,
         '--subscription', $KeyVaultSubscriptionId,
-        '--query', '{enabled:attributes.enabled,expires:attributes.expires,id:id,value:value}',
+        '--api-version', '2024-11-01',
+        '--query', '{enabled:properties.attributes.enabled,expires:properties.attributes.exp,id:id}',
         '--only-show-errors', '--output', 'json'
     ) -AllowFailure
     if ($secret.ExitCode -ne 0) {
@@ -971,12 +1189,10 @@ function Assert-KeyVault {
     if ($secretMetadata.enabled -eq $false) {
         throw "Current AD password secret '$CurrentCredentialEntryName' is disabled."
     }
-    if ($secretMetadata.value -cne $ActiveDirectoryCredential.GetNetworkCredential().Password) {
-        throw 'The current Key Vault credential does not match the AD credential supplied for LDAPS validation.'
-    }
     if ($secretMetadata.expires) {
         $minimumExpiry = [DateTimeOffset]::UtcNow.AddDays(25)
-        if ([DateTimeOffset]::Parse($secretMetadata.expires) -le $minimumExpiry) {
+        $secretExpiry = [DateTimeOffset]::FromUnixTimeSeconds($secretMetadata.expires)
+        if ($secretExpiry -le $minimumExpiry) {
             throw "Current AD password secret expires before the 25-day rotation interval."
         }
     }
@@ -1097,6 +1313,11 @@ function Get-DeploymentParameter {
         activeDirectoryServer = $ActiveDirectoryServer
         allowLdapFallback = $script:EffectiveAllowLdapFallback
         ldapFallbackPort = $LdapFallbackPort
+        activeDirectoryTrustedCertificatePath = if ($ActiveDirectoryTrustedCertificatePath) {
+            $trustedCertificatePackagePath
+        } else {
+            ''
+        }
         activeDirectoryBindUsername = $ActiveDirectoryBindUsername
         activeDirectoryBindUserDistinguishedName = $ActiveDirectoryBindUserDistinguishedName
         taggingRules = $script:NormalizedTaggingRules
@@ -1116,7 +1337,7 @@ function Get-DeploymentParameter {
     @{ '$schema' = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'; contentVersion = '1.0.0.0'; parameters = $parameters }
 }
 
-function Grant-GraphDevicePermission {
+function Grant-GraphApplicationPermission {
     param([Parameter(Mandatory)][string]$PrincipalId)
 
     $graphServicePrincipal = Get-AzureJson -Arguments @(
@@ -1127,38 +1348,134 @@ function Grant-GraphDevicePermission {
     if (-not $graph) {
         throw 'Microsoft Graph service principal was not found in the tenant.'
     }
-    $appRole = @($graph.appRoles | Where-Object {
-        $_.value -eq 'Device.ReadWrite.All' -and $_.allowedMemberTypes -contains 'Application'
-    })[0]
-    if (-not $appRole) {
-        throw 'Microsoft Graph application role Device.ReadWrite.All was not found.'
-    }
-
     $assignments = Get-AzureJson -Arguments @(
         'rest', '--method', 'get',
         '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$PrincipalId/appRoleAssignments"
     )
-    $existing = @($assignments.value | Where-Object {
-        $_.resourceId -eq $graph.id -and $_.appRoleId -eq $appRole.id
-    })
-    if ($existing.Count -gt 0) {
-        Write-Host 'Microsoft Graph Device.ReadWrite.All is already assigned.'
+    foreach ($permission in @(
+        'Device.ReadWrite.All',
+        'GroupMember.ReadWrite.All',
+        'AdministrativeUnit.ReadWrite.All'
+    )) {
+        $appRole = @($graph.appRoles | Where-Object {
+            $_.value -eq $permission -and $_.allowedMemberTypes -contains 'Application'
+        })[0]
+        if (-not $appRole) {
+            throw "Microsoft Graph application role $permission was not found."
+        }
+
+        $existing = @($assignments.value | Where-Object {
+            $_.resourceId -eq $graph.id -and $_.appRoleId -eq $appRole.id
+        })
+        if ($existing.Count -gt 0) {
+            Write-Host "Microsoft Graph $permission is already assigned."
+            continue
+        }
+
+        $body = ConvertTo-AzureCliJsonArgument -Json (@{
+            principalId = $PrincipalId
+            resourceId = $graph.id
+            appRoleId = $appRole.id
+        } | ConvertTo-Json -Compress)
+        $null = Invoke-AzureCli -Arguments @(
+            'rest', '--method', 'post',
+            '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$PrincipalId/appRoleAssignments",
+            '--headers', 'Content-Type=application/json',
+            '--body', $body,
+            '--only-show-errors'
+        )
+    }
+}
+
+function Get-RestrictedAdministrativeUnitTarget {
+    $administrativeUnitIds = @(
+        $script:NormalizedTaggingRules |
+            ForEach-Object {
+                @(Get-TaggingRuleValue -InputRule $_ -PropertyName 'administrativeUnitIds')
+            } |
+            Select-Object -Unique
+    )
+    $restrictedTargets = [System.Collections.Generic.List[object]]::new()
+    foreach ($administrativeUnitId in $administrativeUnitIds) {
+        $administrativeUnit = Get-AzureJson -Arguments @(
+            'rest', '--method', 'get',
+            '--url', "https://graph.microsoft.com/v1.0/directory/administrativeUnits/$administrativeUnitId`?`$select=id,displayName,isMemberManagementRestricted"
+        )
+        if ($administrativeUnit.isMemberManagementRestricted -eq $true) {
+            $restrictedTargets.Add($administrativeUnit)
+        }
+    }
+    $restrictedTargets.ToArray()
+}
+
+function Grant-RestrictedAdministrativeUnitRole {
+    param(
+        [Parameter(Mandatory)][string]$PrincipalId,
+        [Parameter(Mandatory)][object[]]$AdministrativeUnits
+    )
+
+    if ($AdministrativeUnits.Count -eq 0) {
         return
     }
 
-    $body = @{
-        principalId = $PrincipalId
-        resourceId = $graph.id
-        appRoleId = $appRole.id
-    } | ConvertTo-Json -Compress
-    $body = ConvertTo-AzureCliJsonArgument -Json $body
-    $null = Invoke-AzureCli -Arguments @(
-        'rest', '--method', 'post',
-        '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$PrincipalId/appRoleAssignments",
-        '--headers', 'Content-Type=application/json',
-        '--body', $body,
-        '--only-show-errors'
+    $roleName = 'HybridDeviceTagger Restricted Device Attribute Writer'
+    $encodedRoleName = [uri]::EscapeDataString("displayName eq '$roleName'")
+    $roleDefinitions = Get-AzureJson -Arguments @(
+        'rest', '--method', 'get',
+        '--url', "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$filter=$encodedRoleName"
     )
+    $roleDefinition = @($roleDefinitions.value)[0]
+    if (-not $roleDefinition) {
+        $roleBody = ConvertTo-AzureCliJsonArgument -Json (@{
+            displayName = $roleName
+            description = 'Updates only device extension attributes for HybridDeviceTagger-managed RMAU devices.'
+            isEnabled = $true
+            rolePermissions = @(@{
+                allowedResourceActions = @(
+                    'microsoft.directory/devices/allProperties/read',
+                    'microsoft.directory/devices/extensionAttributeSet1/update',
+                    'microsoft.directory/devices/extensionAttributeSet2/update',
+                    'microsoft.directory/devices/extensionAttributeSet3/update'
+                )
+            })
+        } | ConvertTo-Json -Depth 10 -Compress)
+        $roleDefinition = Get-AzureJson -Arguments @(
+            'rest', '--method', 'post',
+            '--url', 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions',
+            '--headers', 'Content-Type=application/json',
+            '--body', $roleBody
+        )
+    }
+
+    $encodedPrincipalFilter = [uri]::EscapeDataString("principalId eq '$PrincipalId'")
+    $roleAssignments = Get-AzureJson -Arguments @(
+        'rest', '--method', 'get',
+        '--url', "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?`$filter=$encodedPrincipalFilter"
+    )
+    foreach ($administrativeUnit in $AdministrativeUnits) {
+        $directoryScopeId = "/administrativeUnits/$($administrativeUnit.id)"
+        $existing = @($roleAssignments.value | Where-Object {
+            $_.roleDefinitionId -eq $roleDefinition.id -and
+            $_.directoryScopeId -eq $directoryScopeId
+        })
+        if ($existing.Count -gt 0) {
+            Write-Host "RMAU role is already assigned for '$($administrativeUnit.displayName)' ($($administrativeUnit.id))."
+            continue
+        }
+
+        $assignmentBody = ConvertTo-AzureCliJsonArgument -Json (@{
+            principalId = $PrincipalId
+            roleDefinitionId = $roleDefinition.id
+            directoryScopeId = $directoryScopeId
+        } | ConvertTo-Json -Compress)
+        $null = Invoke-AzureCli -Arguments @(
+            'rest', '--method', 'post',
+            '--url', 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments',
+            '--headers', 'Content-Type=application/json',
+            '--body', $assignmentBody,
+            '--only-show-errors'
+        )
+    }
 }
 
 function Publish-FunctionApp {
@@ -1170,6 +1487,14 @@ function Publish-FunctionApp {
         & dotnet publish $projectPath --configuration Release --output $publishPath
         if ($LASTEXITCODE -ne 0) {
             throw 'dotnet publish failed.'
+        }
+        if ($ActiveDirectoryTrustedCertificatePath) {
+            $certificateDirectory = Join-Path $publishPath 'certificates'
+            $null = New-Item -ItemType Directory -Path $certificateDirectory -Force
+            [System.IO.File]::WriteAllText(
+                (Join-Path $publishPath $trustedCertificatePackagePath),
+                $script:TrustedCertificate.ExportCertificatePem(),
+                [System.Text.Encoding]::ASCII)
         }
         Compress-Archive -Path (Join-Path $publishPath '*') -DestinationPath $zipPath -CompressionLevel Optimal
         $null = Invoke-AzureCli -Arguments @(
@@ -1188,15 +1513,48 @@ function Publish-FunctionApp {
     }
 }
 
+Write-Step 'Validating input parameters'
+if (-not $PrepareActiveDirectoryAccountOnly -and
+    -not $SkipActiveDirectoryDirectoryChecks -and
+    $null -eq $ActiveDirectoryCredential) {
+    throw 'ActiveDirectoryCredential is required unless Active Directory directory checks are explicitly skipped for an existing deployment.'
+}
+$script:NormalizedTaggingRules = @(ConvertTo-NormalizedTaggingRule)
+$normalizedTaggingRulesJson = ConvertTo-Json -InputObject $script:NormalizedTaggingRules -Depth 10 -Compress
+if ($normalizedTaggingRulesJson.Length -gt 32768) {
+    throw 'Serialized tagging configuration cannot exceed 32768 characters.'
+}
+
+foreach ($tag in $Tags.GetEnumerator()) {
+    if ([string]::IsNullOrEmpty([string]$tag.Key) -or ([string]$tag.Key).Length -gt 512) {
+        throw 'Azure tag keys must contain 1-512 characters.'
+    }
+    if (([string]$tag.Value).Length -gt 256) {
+        throw "Azure tag '$($tag.Key)' value cannot exceed 256 characters."
+    }
+}
+
 Write-Step 'Checking local prerequisites'
 Assert-Command -Name az -InstallHint 'Install Azure CLI 2.60.0 or newer.'
 Assert-Command -Name dotnet -InstallHint 'Install the .NET 8 SDK.'
 if (-not (Test-Path $templatePath)) { throw "Bicep template not found: $templatePath" }
 if (-not (Test-Path $projectPath)) { throw "Function project not found: $projectPath" }
-if (-not $PrepareActiveDirectoryAccountOnly -and $null -eq $ActiveDirectoryCredential) {
-    throw 'ActiveDirectoryCredential is required unless PrepareActiveDirectoryAccountOnly is used.'
+if ($ActiveDirectoryTrustedCertificatePath -and -not (Test-Path -LiteralPath $ActiveDirectoryTrustedCertificatePath -PathType Leaf)) {
+    throw "Active Directory trusted certificate not found: $ActiveDirectoryTrustedCertificatePath"
 }
-$script:NormalizedTaggingRules = @(ConvertTo-NormalizedTaggingRule)
+if ($ActiveDirectoryTrustedCertificatePath) {
+    try {
+        $script:TrustedCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            (Resolve-Path -LiteralPath $ActiveDirectoryTrustedCertificatePath).Path)
+    }
+    catch {
+        throw "Active Directory trusted certificate is not a valid X.509 certificate: $ActiveDirectoryTrustedCertificatePath"
+    }
+    if ($script:TrustedCertificate.NotAfter -le [DateTime]::UtcNow) {
+        throw "Active Directory trusted certificate has expired: $ActiveDirectoryTrustedCertificatePath"
+    }
+    Write-Host "Using Active Directory trust anchor $($script:TrustedCertificate.Thumbprint)."
+}
 $script:ActiveDirectoryPasswordChanged = $false
 $script:EffectiveAllowLdapFallback = $false
 
@@ -1220,6 +1578,25 @@ if ($account.id -ine $SubscriptionId) {
 }
 if ($account.id -ine $SubscriptionId) {
     throw "Unable to select subscription '$SubscriptionId'."
+}
+
+Write-Step 'Validating Entra administrative-unit targets'
+$restrictedAdministrativeUnits = @(Get-RestrictedAdministrativeUnitTarget)
+if ($restrictedAdministrativeUnits.Count -gt 0) {
+    $targetSummary = $restrictedAdministrativeUnits |
+        ForEach-Object { "  - $($_.displayName) ($($_.id))" } |
+        Out-String
+    Write-Warning "Rules target restricted management administrative units:`n$targetSummary"
+    if (-not $ValidateOnly -and -not $WhatIfPreference -and
+        -not $GrantRestrictedAdministrativeUnitRole) {
+        if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+            throw 'RMAU targets require explicit approval. Re-run with -GrantRestrictedAdministrativeUnitRole.'
+        }
+        $confirmation = Read-Host 'Create and assign the least-privilege device extension-attribute role at these RMAU scopes? Type YES to continue'
+        if ($confirmation -cne 'YES') {
+            throw 'RMAU role assignment was not explicitly approved; installation stopped before deployment.'
+        }
+    }
 }
 
 Write-Step 'Checking Azure resource providers'
@@ -1323,7 +1700,35 @@ if ($PrepareActiveDirectoryAccountOnly) {
 }
 
 Write-Step 'Validating Active Directory forest, OU, account, read access, and LDAPS certificate'
-Test-LdapConfiguration
+if ($SkipActiveDirectoryDirectoryChecks) {
+    if ($PrepareActiveDirectoryAccountOnly) {
+        throw 'Active Directory directory checks cannot be skipped while preparing the service account.'
+    }
+    if (-not $script:TrustedCertificate) {
+        throw 'Skipping Active Directory directory checks requires an explicit trusted certificate.'
+    }
+    $existingFunction = Invoke-AzureCli -Arguments @(
+        'functionapp', 'show',
+        '--subscription', $SubscriptionId,
+        '--resource-group', $ResourceGroupName,
+        '--name', $FunctionAppName,
+        '--only-show-errors', '--output', 'none'
+    ) -AllowFailure
+    if ($existingFunction.ExitCode -ne 0) {
+        throw 'Active Directory directory checks may be skipped only when updating an existing Function App.'
+    }
+    if (-not [HybridDeviceTaggerLdapCertificateValidatorV2]::ValidateTlsEndpoint(
+        $ActiveDirectoryServer,
+        636,
+        $script:TrustedCertificate)) {
+        throw "Strict LDAPS certificate validation failed for '$ActiveDirectoryServer:636'."
+    }
+    $script:EffectiveAllowLdapFallback = $false
+    Write-Warning 'Skipped repeated forest, OU, and account checks for the existing deployment; strict LDAPS endpoint validation succeeded.'
+}
+else {
+    Test-LdapConfiguration
+}
 
 if ($PrepareActiveDirectoryAccountOnly) {
     Write-Host 'Active Directory service-account preparation completed. No Azure resources were deployed.' -ForegroundColor Green
@@ -1381,8 +1786,15 @@ try {
         throw 'The deployment did not return the Function App managed identity principal ID.'
     }
 
-    Write-Step 'Assigning Microsoft Graph Device.ReadWrite.All'
-    Grant-GraphDevicePermission -PrincipalId $principalId
+    Write-Step 'Assigning Microsoft Graph application permissions'
+    Grant-GraphApplicationPermission -PrincipalId $principalId
+
+    if ($restrictedAdministrativeUnits.Count -gt 0) {
+        Write-Step 'Assigning restricted administrative-unit roles'
+        Grant-RestrictedAdministrativeUnitRole `
+            -PrincipalId $principalId `
+            -AdministrativeUnits $restrictedAdministrativeUnits
+    }
 
     if (-not $SkipCodeDeployment) {
         Write-Step 'Building and deploying Function App code'

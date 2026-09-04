@@ -19,9 +19,13 @@
     "PasswordRotation__RotateAfterDays": "25",
     "PasswordRotation__PasswordLength": "40",
     "PasswordRotation__SecretExpiryDays": "35",
+    "Tagging__Rules__0__Name": "Tier 0 workstations",
+    "Tagging__Rules__0__Description": "Tags privileged administrative workstations.",
     "Tagging__Rules__0__BaseDn": "OU=Tier0,OU=Admin",
     "Tagging__Rules__0__ExtensionAttributes__extensionAttribute1": "PAW",
     "Tagging__Rules__0__ExtensionAttributes__extensionAttribute2": "Tier0",
+    "Tagging__Rules__1__Name": "Tier 1 servers",
+    "Tagging__Rules__1__Description": "Tags server devices as Tier 1.",
     "Tagging__Rules__1__BaseDn": "OU=Server",
     "Tagging__Rules__1__ExtensionAttributes__extensionAttribute2": "Tier1"
   }

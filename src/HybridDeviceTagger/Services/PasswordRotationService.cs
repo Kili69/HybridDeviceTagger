@@ -85,6 +85,11 @@ public sealed class PasswordRotationService
         return new PasswordRotationResult(PasswordRotationOutcome.Rotated, ageDays);
     }
 
+    /// <summary>Recovers an interrupted rotation by validating and promoting the staged secret.</summary>
+    /// <remarks>
+    /// Recovery is attempted only after <c>current</c> can no longer bind. If neither credential
+    /// works, the method fails without overwriting either secret so an operator can investigate.
+    /// </remarks>
     private async Task<PasswordRotationResult> RecoverFromNextAsync(
         CancellationToken cancellationToken)
     {
@@ -103,6 +108,8 @@ public sealed class PasswordRotationService
             GetAgeDays(next.CreatedOn));
     }
 
+            /// <summary>Calculates whole elapsed UTC days from Key Vault creation metadata.</summary>
+            /// <returns>The non-negative age, or <see langword="null"/> when metadata is unavailable.</returns>
     private int? GetAgeDays(DateTimeOffset? createdOn) =>
         createdOn is null
             ? null

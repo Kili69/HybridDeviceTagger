@@ -31,7 +31,7 @@ Status: Validated
 - Storage account: `sahdtagger`
 - Flex Consumption plan and supporting monitoring resources defined by `Deployment/main.bicep`.
 - Managed identity RBAC for Key Vault and deployment storage.
-- Microsoft Graph application role `Device.ReadWrite.All`.
+- Microsoft Graph application roles `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All`.
 
 ## 5. Security And Data Handling
 
@@ -57,6 +57,21 @@ Status: Validated
 - [x] Verify Function App, managed identity, RBAC, settings, package deployment, and health.
 
 ## 7. Validation Proof
+
+Membership release validation completed: `2026-09-04`.
+
+- Azure CLI account, tenant, and subscription match the approved production context.
+- Release build passed with 0 warnings and 0 errors; focused test runs passed 39/39 and 18/18.
+- Both deployment scripts passed PowerShell parsing and PSScriptAnalyzer; Bicep build and lint passed.
+- Effective Azure Policy assignments were reviewed for the target resource group.
+- The installer `-ValidateOnly` run passed against the current live rules using the credential-free existing-installation path; strict LDAPS validation matched thumbprint `E9C632C3ADE1CA74EBBBAF9CE114AB47FD3C619D`.
+- ARM What-if reported 1 create, 6 modifies, 0 deletes, 3 no-change, 1 unsupported, and 5 ignored resources. The sole create is the private `membership-ledger` Blob container. Storage public network access remains `Disabled`.
+- Static role review confirmed resource-scoped Storage and Key Vault roles, the three required Microsoft Graph app roles, and restricted administrative-unit roles scoped only to configured RMAUs. The current live rules contain no administrative-unit targets.
+- Live membership release installation completed successfully on `2026-09-04`; the Function package was published after all Graph role assignments succeeded.
+- Managed identity `19346b5c-09d0-4ac5-a4fd-03b8253f7e01` has `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All`.
+- Function App `func-hybriddevicetagger` is running on the `FC1` Flex Consumption plan. Azure discovered `DeviceTaggerFunction` and `PasswordRotationFunction`.
+- Storage public network access remains `Disabled`, Blob public access remains disabled, and the private `membership-ledger` container exists with no public access.
+- The two production rules were preserved unchanged. A transient worker start during the app-settings update was followed by a clean host restart and host-lock acquisition at `2026-09-04T13:00:48Z`; no later exceptions or error-level traces were observed.
 
 - Validation completed: `2026-09-03`.
 - AD password reset completed through Active Directory Web Services; the randomized password was synchronized directly to Key Vault without disclosure.
@@ -99,5 +114,5 @@ Commands and checks executed:
 - Identity checked: system-assigned managed identity of `func-hybriddevicetagger`.
 - `Storage Blob Data Owner` is scoped to `sahdtagger` for managed-identity deployment package access.
 - `Key Vault Secrets Officer` is scoped to `kv-hybriddevicetagger` for current/next secret read, stage, and promotion operations.
-- Microsoft Graph application role `Device.ReadWrite.All` is assigned to the same principal after ARM deployment for device extension-attribute updates.
+- Microsoft Graph application roles `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All` are assigned to the same principal for device attributes, group membership, and administrative-unit membership.
 - No generic subscription- or resource-group-scoped Reader, Contributor, or Owner role is assigned to the Function identity.

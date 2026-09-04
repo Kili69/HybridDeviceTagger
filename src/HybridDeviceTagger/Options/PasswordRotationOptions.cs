@@ -21,6 +21,10 @@ public sealed class PasswordRotationOptions : IValidatableObject
     public int SecretExpiryDays { get; init; } = 35;
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Secret versions must outlive the rotation threshold so the staged credential remains
+    /// available throughout the normal recovery window.
+    /// </remarks>
     public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
     {
         if (SecretExpiryDays <= RotateAfterDays)

@@ -9,7 +9,9 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Discovers hybrid-joined computers through paged LDAP searches.</summary>
 public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSource
 {
-    private const string ComputerFilter = "(objectCategory=computer)";
+    internal const string ComputerFilter =
+        "(&(objectCategory=computer)(userCertificate=*))";
+    internal const string DeviceIdAttribute = "objectGUID";
     private readonly ActiveDirectoryOptions _options;
     private readonly IActiveDirectoryCredentialStore _credentialStore;
     private readonly ActiveDirectoryLdapConnectionFactory _connectionFactory;
@@ -48,7 +50,7 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
             :
             [
                 new SearchTarget(
-                    ActiveDirectorySearchPath.GetDomainDnsName(baseDn),
+                    GetLdapServer(ActiveDirectorySearchPath.GetDomainDnsName(baseDn)),
                     baseDn)
             ];
         var devices = new Dictionary<Guid, DirectoryDevice>();
@@ -85,6 +87,11 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
         return devices.Values.ToArray();
     }
 
+    /// <summary>Runs a paged subtree search and projects computers with valid hybrid device IDs.</summary>
+    /// <remarks>
+    /// Microsoft Entra Connect identifies synchronized domain-joined computers by a populated
+    /// <c>userCertificate</c> and maps their AD <c>objectGUID</c> to the Entra <c>deviceId</c>.
+    /// </remarks>
     private IReadOnlyList<DirectoryDevice> SearchDevices(
         LdapConnection connection,
         string baseDn,
@@ -101,7 +108,7 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
                 baseDn,
                 ComputerFilter,
                 SearchScope.Subtree,
-                "msDS-DeviceID",
+                DeviceIdAttribute,
                 "name",
                 "distinguishedName");
             request.Controls.Add(pageRequest);
@@ -125,6 +132,11 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
         return devices;
     }
 
+    /// <summary>Resolves an OU-only path against every domain advertised by the forest.</summary>
+    /// <remarks>
+    /// The method reads domain <c>crossRef</c> objects from the configuration partition and pairs
+    /// each domain DNS root with the complete domain-specific OU distinguished name.
+    /// </remarks>
     private async Task<IReadOnlyList<SearchTarget>> GetForestSearchTargetsAsync(
         string ouPath,
         CancellationToken cancellationToken)
@@ -158,12 +170,23 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
                 !string.IsNullOrWhiteSpace(domain.NamingContext) &&
                 !string.IsNullOrWhiteSpace(domain.DnsRoot))
             .Select(domain => new SearchTarget(
-                domain.DnsRoot!,
+                GetLdapServer(domain.DnsRoot!),
                 ActiveDirectorySearchPath.CombineWithDomain(ouPath, domain.NamingContext!)))
             .OrderBy(target => target.Server, StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
 
+    /// <summary>Uses the configured DC when it belongs to the domain being searched.</summary>
+    private string GetLdapServer(string domainDnsName) =>
+        _options.Server.EndsWith($".{domainDnsName}", StringComparison.OrdinalIgnoreCase)
+            ? _options.Server
+            : domainDnsName;
+
+    /// <summary>Creates a connection with automatic staged-credential recovery.</summary>
+    /// <remarks>
+    /// The active credential is tried first. If its bind fails during an interrupted rotation,
+    /// the staged <c>next</c> credential is loaded and tried against the same server.
+    /// </remarks>
     private async Task<LdapConnection> CreateConnectionAsync(
         string server,
         CancellationToken cancellationToken)
@@ -185,10 +208,11 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
         }
     }
 
+    /// <summary>Projects one LDAP entry when it contains a valid hybrid device identifier.</summary>
     private static bool TryReadDevice(SearchResultEntry entry, out DirectoryDevice device)
     {
         device = default!;
-        if (!TryReadGuid(entry.Attributes["msDS-DeviceID"], out var deviceId))
+        if (!TryReadGuid(entry.Attributes[DeviceIdAttribute], out var deviceId))
         {
             return false;
         }
@@ -200,7 +224,8 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
         return true;
     }
 
-    private static bool TryReadGuid(DirectoryAttribute? attribute, out Guid value)
+    /// <summary>Reads a device GUID from either its 16-byte LDAP form or textual form.</summary>
+    internal static bool TryReadGuid(DirectoryAttribute? attribute, out Guid value)
     {
         value = Guid.Empty;
         if (attribute is null || attribute.Count == 0)
@@ -216,16 +241,19 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
         };
     }
 
+    /// <summary>Constructs a GUID from a validated 16-byte value.</summary>
     private static bool TryCreateGuid(byte[] bytes, out Guid value)
     {
         value = new Guid(bytes);
         return true;
     }
 
+    /// <summary>Reads the first LDAP attribute value as text, or returns <see langword="null"/>.</summary>
     private static string? ReadString(DirectoryAttribute? attribute) =>
         attribute is null || attribute.Count == 0
             ? null
             : attribute[0]?.ToString();
 
+    /// <summary>Pairs a domain DNS endpoint with its complete LDAP search base.</summary>
     private sealed record SearchTarget(string Server, string BaseDn);
 }

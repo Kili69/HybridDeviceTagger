@@ -10,22 +10,26 @@ public sealed class DeviceTaggingService
 {
     private readonly IActiveDirectoryDeviceSource _directoryDeviceSource;
     private readonly IEntraDeviceClient _entraDeviceClient;
+    private readonly DeviceMembershipReconciliationService _membershipService;
     private readonly TaggingOptions _options;
     private readonly ILogger<DeviceTaggingService> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="DeviceTaggingService"/> class.</summary>
     /// <param name="directoryDeviceSource">The Active Directory device source.</param>
     /// <param name="entraDeviceClient">The Microsoft Entra device client.</param>
+    /// <param name="membershipService">The Entra membership reconciler.</param>
     /// <param name="options">The configured OU tagging rules.</param>
     /// <param name="logger">The structured logger.</param>
     public DeviceTaggingService(
         IActiveDirectoryDeviceSource directoryDeviceSource,
         IEntraDeviceClient entraDeviceClient,
+        DeviceMembershipReconciliationService membershipService,
         IOptions<TaggingOptions> options,
         ILogger<DeviceTaggingService> logger)
     {
         _directoryDeviceSource = directoryDeviceSource;
         _entraDeviceClient = entraDeviceClient;
+        _membershipService = membershipService;
         _options = options.Value;
         _logger = logger;
     }
@@ -41,6 +45,8 @@ public sealed class DeviceTaggingService
         var unchanged = 0;
         var notFound = 0;
         var notHybridJoined = 0;
+        var membershipsAdded = 0;
+        var membershipsRemoved = 0;
 
         foreach (var assignment in assignments.Values)
         {
@@ -54,8 +60,7 @@ public sealed class DeviceTaggingService
             {
                 notFound++;
                 _logger.LogWarning(
-                    "No Entra device found for AD computer {ComputerName} with device ID {DeviceId}",
-                    directoryDevice.Name,
+                    "No Entra device found for AD device ID {DeviceId}",
                     directoryDevice.DeviceId);
                 continue;
             }
@@ -78,17 +83,34 @@ public sealed class DeviceTaggingService
                     attribute => attribute.Key,
                     attribute => attribute.Value,
                     StringComparer.OrdinalIgnoreCase);
-            if (changedAttributes.Count == 0)
+            if (changedAttributes.Count > 0)
             {
-                unchanged++;
-                continue;
+                await _entraDeviceClient.SetExtensionAttributesAsync(
+                    entraDevice.Id,
+                    changedAttributes,
+                    cancellationToken);
+                _logger.LogInformation(
+                    "Updated Entra device {DeviceId}. Changed attributes: {ChangedAttributes}",
+                    directoryDevice.DeviceId,
+                    string.Join(",", changedAttributes.Keys.Order(StringComparer.OrdinalIgnoreCase)));
             }
 
-            await _entraDeviceClient.SetExtensionAttributesAsync(
+            var membershipResult = await _membershipService.ReconcileAsync(
+                directoryDevice.DeviceId,
                 entraDevice.Id,
-                changedAttributes,
+                assignment.EntraGroupIds,
+                assignment.AdministrativeUnitIds,
                 cancellationToken);
-            updated++;
+            membershipsAdded += membershipResult.Added;
+            membershipsRemoved += membershipResult.Removed;
+            if (changedAttributes.Count > 0 || membershipResult.Changed)
+            {
+                updated++;
+            }
+            else
+            {
+                unchanged++;
+            }
         }
 
         return new TaggingResult(
@@ -96,18 +118,37 @@ public sealed class DeviceTaggingService
             updated,
             unchanged,
             notFound,
-            notHybridJoined);
+            notHybridJoined,
+            membershipsAdded,
+            membershipsRemoved);
     }
 
+    /// <summary>Builds one deduplicated, conflict-free attribute assignment per device.</summary>
+    /// <remarks>
+    /// Devices may match multiple rules. Different attributes are merged, while two different
+    /// values for the same attribute fail the run to avoid order-dependent updates.
+    /// </remarks>
     private async Task<Dictionary<Guid, DeviceTagAssignment>> GetAssignmentsAsync(
         CancellationToken cancellationToken)
     {
         var assignments = new Dictionary<Guid, DeviceTagAssignment>();
-        foreach (var rule in _options.GetRules())
+        var rules = _options.GetRules();
+        for (var ruleIndex = 0; ruleIndex < rules.Count; ruleIndex++)
         {
+            var rule = rules[ruleIndex];
+            _logger.LogInformation(
+                "Searching Active Directory for tagging rule {RuleName} ({RuleNumber} of {RuleCount}): {RuleDescription}",
+                rule.Name,
+                ruleIndex + 1,
+                rules.Count,
+                rule.Description);
             var devices = await _directoryDeviceSource.GetHybridJoinedDevicesAsync(
                 rule.BaseDn,
                 cancellationToken);
+            _logger.LogInformation(
+                "Tagging rule {RuleName} discovered {DeviceCount} candidate devices",
+                rule.Name,
+                devices.Count);
             foreach (var device in devices)
             {
                 if (!assignments.TryGetValue(device.DeviceId, out var assignment))
@@ -128,15 +169,26 @@ public sealed class DeviceTaggingService
 
                     assignment.ExtensionAttributes[attributeName] = value;
                 }
+
+                assignment.EntraGroupIds.UnionWith(rule.EntraGroupIds);
+                assignment.AdministrativeUnitIds.UnionWith(rule.AdministrativeUnitIds);
             }
         }
 
         return assignments;
     }
 
+    /// <summary>Accumulates all desired extension attributes for one discovered device.</summary>
     private sealed record DeviceTagAssignment(DirectoryDevice Device)
     {
+        /// <summary>Gets the case-insensitive assignment map merged from matching rules.</summary>
         public Dictionary<string, string> ExtensionAttributes { get; } =
             new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Gets desired Entra security-group memberships.</summary>
+        public HashSet<Guid> EntraGroupIds { get; } = [];
+
+        /// <summary>Gets desired normal or restricted administrative-unit memberships.</summary>
+        public HashSet<Guid> AdministrativeUnitIds { get; } = [];
     }
 }

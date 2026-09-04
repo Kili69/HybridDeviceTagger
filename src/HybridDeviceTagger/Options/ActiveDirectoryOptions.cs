@@ -10,6 +10,7 @@ public sealed class ActiveDirectoryOptions : IValidatableObject
 
     /// <summary>Gets the DNS name of the domain controller.</summary>
     [Required]
+    [StringLength(253, MinimumLength = 1)]
     public string Server { get; init; } = string.Empty;
 
     /// <summary>Gets the LDAPS port.</summary>
@@ -28,17 +29,27 @@ public sealed class ActiveDirectoryOptions : IValidatableObject
 
     /// <summary>Gets the user name used for LDAP binds.</summary>
     [Required]
+    [StringLength(256, MinimumLength = 1)]
     public string BindUsername { get; init; } = string.Empty;
 
     /// <summary>Gets the distinguished name of the account whose password is rotated.</summary>
     [Required]
+    [StringLength(2048, MinimumLength = 1)]
     public string BindUserDistinguishedName { get; init; } = string.Empty;
 
     /// <summary>Gets the LDAP server-side page size.</summary>
     [Range(1, 10000)]
     public int PageSize { get; init; } = 500;
 
+    /// <summary>Gets an optional PEM or DER certificate used as a private LDAP trust anchor.</summary>
+    [StringLength(4096)]
+    public string? TrustedCertificatePath { get; init; }
+
     /// <inheritdoc />
+    /// <remarks>
+    /// LDAPS remains mandatory as the primary transport because password operations require it.
+    /// A configured fallback must use a separate endpoint port.
+    /// </remarks>
     public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
     {
         if (!UseSsl)

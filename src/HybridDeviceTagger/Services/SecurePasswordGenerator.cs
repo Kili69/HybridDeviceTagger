@@ -5,6 +5,7 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Generates cryptographically random passwords without visually ambiguous characters.</summary>
 public sealed class SecurePasswordGenerator : IPasswordGenerator
 {
+    // Ambiguous characters are intentionally omitted to make emergency manual handling safer.
     private const string Uppercase = "ABCDEFGHJKLMNPQRSTUVWXYZ";
     private const string Lowercase = "abcdefghijkmnopqrstuvwxyz";
     private const string Digits = "23456789";
@@ -43,6 +44,7 @@ public sealed class SecurePasswordGenerator : IPasswordGenerator
         return new string(characters);
     }
 
+    /// <summary>Selects one uniformly distributed character using a cryptographic RNG.</summary>
     private static char Pick(string characters) =>
         characters[RandomNumberGenerator.GetInt32(characters.Length)];
 }

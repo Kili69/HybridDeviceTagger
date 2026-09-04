@@ -76,6 +76,8 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
             cancellationToken);
     }
 
+    /// <summary>Loads a required secret and converts its value and metadata to a bind credential.</summary>
+    /// <remarks>A missing required secret is allowed to propagate as a Key Vault error.</remarks>
     private async Task<StoredDirectoryCredential> GetRequiredSecretAsync(
         string secretName,
         CancellationToken cancellationToken)
@@ -86,6 +88,11 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
         return ToCredential(response.Value);
     }
 
+    /// <summary>Creates a new secret version with the configured recovery lifetime.</summary>
+    /// <remarks>
+    /// The same operation is used to stage <c>next</c> and to promote a validated password to
+    /// <c>current</c>. Existing versions remain available according to Key Vault retention policy.
+    /// </remarks>
     private async Task<StoredDirectoryCredential> SetSecretAsync(
         string secretName,
         string password,
@@ -98,6 +105,7 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
         return ToCredential(response.Value);
     }
 
+    /// <summary>Combines a secret password and creation timestamp with the configured bind user.</summary>
     private StoredDirectoryCredential ToCredential(KeyVaultSecret secret) =>
         new(
             _activeDirectoryOptions.BindUsername,

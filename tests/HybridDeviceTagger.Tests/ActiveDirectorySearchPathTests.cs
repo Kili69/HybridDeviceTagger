@@ -41,4 +41,31 @@ public sealed class ActiveDirectorySearchPathTests
         Assert.True(ActiveDirectorySearchPath.IsForestRelative("CN=Computers"));
         Assert.False(ActiveDirectorySearchPath.IsOuPath("CN=Computers"));
     }
+
+    [Theory]
+    [InlineData("OU=Tier0")]
+    [InlineData("OU=Tier0,OU=Admin")]
+    [InlineData("OU=Tier0\\,Privileged,OU=Admin")]
+    [InlineData("OU=Tier0,DC=example,DC=com")]
+    [InlineData("DC=example,DC=com")]
+    public void ValidBaseDn_IsAccepted(string path) =>
+        Assert.True(ActiveDirectorySearchPath.IsValidBaseDn(path));
+
+    [Theory]
+    [InlineData("umptata")]
+    [InlineData("CN=Computers,DC=example,DC=com")]
+    [InlineData("DC=example,OU=Computers")]
+    [InlineData("OU=,DC=example,DC=com")]
+    [InlineData("OU=Computers,")]
+    [InlineData("OU=Computers\\")]
+    public void InvalidBaseDn_IsRejected(string path) =>
+        Assert.False(ActiveDirectorySearchPath.IsValidBaseDn(path));
+
+    [Fact]
+    public void IsValidBaseDn_RejectsOversizedPath()
+    {
+        var path = $"OU={new string('a', ActiveDirectorySearchPath.MaximumDistinguishedNameLength)}";
+
+        Assert.False(ActiveDirectorySearchPath.IsValidBaseDn(path));
+    }
 }

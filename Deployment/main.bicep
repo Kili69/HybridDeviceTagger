@@ -54,6 +54,9 @@ param allowLdapFallback bool = false
 @maxValue(65535)
 param ldapFallbackPort int = 389
 
+@description('Optional path in the application package to a DER or PEM private LDAP trust anchor.')
+param activeDirectoryTrustedCertificatePath string = ''
+
 @description('UPN or DOMAIN\\user name used to bind to Active Directory.')
 param activeDirectoryBindUsername string
 
@@ -133,7 +136,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     allowCrossTenantReplication: false
     defaultToOAuthAuthentication: true
     minimumTlsVersion: 'TLS1_2'
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: 'Disabled'
     supportsHttpsTrafficOnly: true
   }
 }
@@ -145,6 +148,14 @@ resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01'
 
 resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   name: deploymentContainerName
+  parent: blobService
+  properties: {
+    publicAccess: 'None'
+  }
+}
+
+resource membershipLedgerContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  name: 'membership-ledger'
   parent: blobService
   properties: {
     publicAccess: 'None'
@@ -293,6 +304,20 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         {
           name: 'ActiveDirectory__LdapFallbackPort'
           value: string(ldapFallbackPort)
+        }
+        {
+          name: 'ActiveDirectory__TrustedCertificatePath'
+          value: activeDirectoryTrustedCertificatePath
+        }
+        {
+          name: 'LDAPTLS_CACERT'
+          value: empty(activeDirectoryTrustedCertificatePath)
+            ? '/etc/ssl/certs/ca-certificates.crt'
+            : '/home/site/wwwroot/${activeDirectoryTrustedCertificatePath}'
+        }
+        {
+          name: 'LDAPTLS_REQCERT'
+          value: 'DEMAND'
         }
         {
           name: 'ActiveDirectory__BindUsername'
