@@ -1,6 +1,6 @@
 #Requires -Version 7.2
 #Requires -Modules ActiveDirectory
-# Project-Version: 0.1.20260905.14
+# Project-Version: 0.1.20260905.15
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -109,6 +109,28 @@ AD service-account password when the credential is omitted and directory checks 
 
 .PARAMETER ActiveDirectoryProvisioningCredential
 Separate delegated credential used only when preparing or resetting the AD service account.
+
+.PARAMETER ManagementApiClientId
+Application ID of the existing single-tenant Entra registration that protects the management API.
+
+.PARAMETER ManagementApiAllowedPrincipalObjectId
+Bootstrap users, groups, or service principals that receive all five management API roles unless a
+role-specific principal list is supplied. This preserves existing installations during migration.
+
+.PARAMETER ManagementApiReaderPrincipalObjectId
+Users, groups, or service principals allowed to read all rules, statuses, and traces.
+
+.PARAMETER ManagementApiRuleAdministratorPrincipalObjectId
+Users, groups, or service principals allowed to read and change tagging rules.
+
+.PARAMETER ManagementApiTaggingOperatorPrincipalObjectId
+Users, groups, or service principals allowed to read tagging diagnostics and start tagging runs.
+
+.PARAMETER ManagementApiPasswordRotationAdministratorPrincipalObjectId
+Users, groups, or service principals allowed to read password-rotation status and force rotation.
+
+.PARAMETER ManagementApiCertificateAdministratorPrincipalObjectId
+Users, groups, or service principals allowed to read and change Active Directory LDAPS trust certificates.
 
 .PARAMETER VirtualNetworkSubscriptionId
 Subscription containing the existing virtual network. Interactive runs propose SubscriptionId,
@@ -291,6 +313,26 @@ param(
     [ValidateNotNull()]
     [ValidateCount(1, 100)]
     [guid[]]$ManagementApiAllowedPrincipalObjectId,
+
+    [ValidateNotNull()]
+    [ValidateCount(1, 100)]
+    [guid[]]$ManagementApiReaderPrincipalObjectId,
+
+    [ValidateNotNull()]
+    [ValidateCount(1, 100)]
+    [guid[]]$ManagementApiRuleAdministratorPrincipalObjectId,
+
+    [ValidateNotNull()]
+    [ValidateCount(1, 100)]
+    [guid[]]$ManagementApiTaggingOperatorPrincipalObjectId,
+
+    [ValidateNotNull()]
+    [ValidateCount(1, 100)]
+    [guid[]]$ManagementApiPasswordRotationAdministratorPrincipalObjectId,
+
+    [ValidateNotNull()]
+    [ValidateCount(1, 100)]
+    [guid[]]$ManagementApiCertificateAdministratorPrincipalObjectId,
 
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$VirtualNetworkSubscriptionId,
@@ -488,6 +530,7 @@ function Write-InstallationSummary {
     Write-Host "  - Application Insights: $FunctionAppName-appi"
     Write-Host "  - Storage private endpoint: pe-$StorageAccountName-blob"
     Write-Host "  - Entra-authenticated management API: api://$ManagementApiClientId"
+    Write-Host '  - Five least-privilege Entra application roles with assignment required'
     Write-Host '  - Managed-identity role assignments for Storage and the existing Key Vault'
     Write-Host '  - Microsoft Graph application permissions for device, group, and administrative-unit management'
     if ($RestrictedAdministrativeUnits.Count -gt 0) {
@@ -1702,7 +1745,6 @@ function Get-DeploymentParameter {
         activeDirectoryBindUsername = $ADServiceAccount
         activeDirectoryBindUserDistinguishedName = $ActiveDirectoryBindUserDistinguishedName
         managementApiClientId = $ManagementApiClientId
-        managementApiAllowedPrincipalObjectIds = @($ManagementApiAllowedPrincipalObjectId | ForEach-Object ToString)
         taggingRules = $script:NormalizedTaggingRules
         currentPasswordSecretName = $CurrentCredentialEntryName
         nextPasswordSecretName = $StagedCredentialEntryName
@@ -1767,6 +1809,157 @@ function Grant-GraphApplicationPermission {
             '--body', $body,
             '--only-show-errors'
         )
+    }
+}
+
+function Set-ManagementApiAuthorization {
+    $applicationResponse = Get-AzureJson -Arguments @(
+        'rest', '--method', 'get',
+        '--url', "https://graph.microsoft.com/v1.0/applications?`$filter=appId%20eq%20%27$ManagementApiClientId%27&`$select=id,appId,appRoles"
+    )
+    $application = @($applicationResponse.value)[0]
+    if (-not $application) {
+        throw "Management API application '$ManagementApiClientId' was not found in Microsoft Entra ID."
+    }
+
+    $servicePrincipalResponse = Get-AzureJson -Arguments @(
+        'rest', '--method', 'get',
+        '--url', "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId%20eq%20%27$ManagementApiClientId%27&`$select=id,appId,appRoleAssignmentRequired"
+    )
+    $servicePrincipal = @($servicePrincipalResponse.value)[0]
+    if (-not $servicePrincipal) {
+        throw "Management API enterprise application '$ManagementApiClientId' was not found."
+    }
+
+    $roleDefinitions = @(
+        [ordered]@{
+            id = 'bbd6f683-ae76-427f-9600-fef96529b9f5'
+            value = 'HybridDeviceTagger.Reader'
+            displayName = 'HybridDeviceTagger Reader'
+            description = 'Read tagging rules, operation statuses, and device-tagging traces.'
+            allowedMemberTypes = @('User', 'Application')
+            isEnabled = $true
+        },
+        [ordered]@{
+            id = '3410aec6-3808-4a5d-ae7c-408d1dc5f9ca'
+            value = 'HybridDeviceTagger.RuleAdministrator'
+            displayName = 'HybridDeviceTagger Rule Administrator'
+            description = 'Read, add, replace, and remove tagging rules.'
+            allowedMemberTypes = @('User', 'Application')
+            isEnabled = $true
+        },
+        [ordered]@{
+            id = '73647ecc-d6ab-4db9-868c-69ec04e5f70f'
+            value = 'HybridDeviceTagger.TaggingOperator'
+            displayName = 'HybridDeviceTagger Tagging Operator'
+            description = 'Read tagging diagnostics and start immediate device-tagging runs.'
+            allowedMemberTypes = @('User', 'Application')
+            isEnabled = $true
+        },
+        [ordered]@{
+            id = 'f3dd0b4b-4168-497e-82c6-56be89c05c3b'
+            value = 'HybridDeviceTagger.PasswordRotationAdministrator'
+            displayName = 'HybridDeviceTagger Password Rotation Administrator'
+            description = 'Read password-rotation status and force service-account password rotation.'
+            allowedMemberTypes = @('User', 'Application')
+            isEnabled = $true
+        },
+        [ordered]@{
+            id = '659858ff-b645-4b06-90ff-e79314628687'
+            value = 'HybridDeviceTagger.CertificateAdministrator'
+            displayName = 'HybridDeviceTagger Certificate Administrator'
+            description = 'Read and change Active Directory LDAPS trust certificates.'
+            allowedMemberTypes = @('User', 'Application')
+            isEnabled = $true
+        }
+    )
+
+    $updatedRoles = [System.Collections.Generic.List[object]]::new()
+    foreach ($existingRole in @($application.appRoles)) {
+        if ($roleDefinitions.id -notcontains [string]$existingRole.id) {
+            $conflict = @($roleDefinitions | Where-Object value -EQ ([string]$existingRole.value))[0]
+            if ($conflict) {
+                throw "Application role '$($existingRole.value)' already exists with unexpected ID '$($existingRole.id)'."
+            }
+            $updatedRoles.Add($existingRole)
+        }
+    }
+    foreach ($roleDefinition in $roleDefinitions) {
+        $updatedRoles.Add($roleDefinition)
+    }
+
+    $rolesNeedUpdate = $false
+    foreach ($roleDefinition in $roleDefinitions) {
+        $currentRole = @($application.appRoles | Where-Object id -EQ $roleDefinition.id)[0]
+        $memberTypeDifference = if ($currentRole) {
+            @(Compare-Object @($currentRole.allowedMemberTypes) @($roleDefinition.allowedMemberTypes))
+        } else { @('missing') }
+        if (-not $currentRole -or
+            [string]$currentRole.value -cne $roleDefinition.value -or
+            [string]$currentRole.displayName -cne $roleDefinition.displayName -or
+            [string]$currentRole.description -cne $roleDefinition.description -or
+            [bool]$currentRole.isEnabled -ne $roleDefinition.isEnabled -or
+            $memberTypeDifference.Count -gt 0) {
+            $rolesNeedUpdate = $true
+            break
+        }
+    }
+    if ($rolesNeedUpdate) {
+        $body = ConvertTo-AzureCliJsonArgument -Json (@{
+            appRoles = @($updatedRoles)
+        } | ConvertTo-Json -Depth 10 -Compress)
+        $null = Invoke-AzureCli -Arguments @(
+            'rest', '--method', 'patch',
+            '--url', "https://graph.microsoft.com/v1.0/applications/$($application.id)",
+            '--headers', 'Content-Type=application/json',
+            '--body', $body,
+            '--only-show-errors'
+        )
+        Write-Host 'Management API application roles configured.'
+    }
+
+    $existingAssignments = Get-AzureJson -Arguments @(
+        'rest', '--method', 'get',
+        '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$($servicePrincipal.id)/appRoleAssignedTo?`$select=principalId,appRoleId"
+    )
+    foreach ($roleDefinition in $roleDefinitions) {
+        foreach ($principalId in @($script:ManagementApiRoleAssignments[$roleDefinition.value])) {
+            $alreadyAssigned = @($existingAssignments.value | Where-Object {
+                [string]$_.principalId -eq [string]$principalId -and
+                [string]$_.appRoleId -eq [string]$roleDefinition.id
+            }).Count -gt 0
+            if ($alreadyAssigned) {
+                continue
+            }
+
+            $body = ConvertTo-AzureCliJsonArgument -Json (@{
+                principalId = [string]$principalId
+                resourceId = [string]$servicePrincipal.id
+                appRoleId = [string]$roleDefinition.id
+            } | ConvertTo-Json -Compress)
+            $null = Invoke-AzureCli -Arguments @(
+                'rest', '--method', 'post',
+                '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$($servicePrincipal.id)/appRoleAssignedTo",
+                '--headers', 'Content-Type=application/json',
+                '--body', $body,
+                '--only-show-errors'
+            )
+            Write-Host "Assigned $($roleDefinition.value) to principal '$principalId'."
+        }
+    }
+
+    if (-not $servicePrincipal.appRoleAssignmentRequired) {
+        $body = ConvertTo-AzureCliJsonArgument -Json (@{
+            appRoleAssignmentRequired = $true
+        } | ConvertTo-Json -Compress)
+        $null = Invoke-AzureCli -Arguments @(
+            'rest', '--method', 'patch',
+            '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$($servicePrincipal.id)",
+            '--headers', 'Content-Type=application/json',
+            '--body', $body,
+            '--only-show-errors'
+        )
+        Write-Host 'Management API enterprise application now requires role assignment.'
     }
 }
 
@@ -2343,6 +2536,25 @@ if (-not $PrepareActiveDirectoryAccountOnly -and
         $ManagementApiAllowedPrincipalObjectId = @($parsedAllowedPrincipalId)
     }
 }
+if (-not $PrepareActiveDirectoryAccountOnly) {
+    $script:ManagementApiRoleAssignments = [ordered]@{
+        'HybridDeviceTagger.Reader' = if ($ManagementApiReaderPrincipalObjectId.Count -gt 0) {
+            $ManagementApiReaderPrincipalObjectId
+        } else { $ManagementApiAllowedPrincipalObjectId }
+        'HybridDeviceTagger.RuleAdministrator' = if ($ManagementApiRuleAdministratorPrincipalObjectId.Count -gt 0) {
+            $ManagementApiRuleAdministratorPrincipalObjectId
+        } else { $ManagementApiAllowedPrincipalObjectId }
+        'HybridDeviceTagger.TaggingOperator' = if ($ManagementApiTaggingOperatorPrincipalObjectId.Count -gt 0) {
+            $ManagementApiTaggingOperatorPrincipalObjectId
+        } else { $ManagementApiAllowedPrincipalObjectId }
+        'HybridDeviceTagger.PasswordRotationAdministrator' = if ($ManagementApiPasswordRotationAdministratorPrincipalObjectId.Count -gt 0) {
+            $ManagementApiPasswordRotationAdministratorPrincipalObjectId
+        } else { $ManagementApiAllowedPrincipalObjectId }
+        'HybridDeviceTagger.CertificateAdministrator' = if ($ManagementApiCertificateAdministratorPrincipalObjectId.Count -gt 0) {
+            $ManagementApiCertificateAdministratorPrincipalObjectId
+        } else { $ManagementApiAllowedPrincipalObjectId }
+    }
+}
 
 Write-Step 'Validating input parameters'
 $requiredInputValidation = @(
@@ -2604,6 +2816,9 @@ try {
         Write-Host 'What-if completed. No resources were changed.' -ForegroundColor Green
         return
     }
+
+    Write-Step 'Configuring management API application roles'
+    Set-ManagementApiAuthorization
 
     Write-Step 'Deploying Azure infrastructure'
     $deploymentName = "hybrid-device-tagger-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"

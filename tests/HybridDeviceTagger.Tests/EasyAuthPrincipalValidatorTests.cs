@@ -17,6 +17,33 @@ public sealed class EasyAuthPrincipalValidatorTests
     }
 
     [Theory]
+    [InlineData("roles")]
+    [InlineData("http://schemas.microsoft.com/ws/2008/06/identity/claims/role")]
+    public void Authorize_AcceptsSupportedRoleClaimTypes(string roleClaimType)
+    {
+        var request = new DefaultHttpContext().Request;
+        request.Headers["X-MS-CLIENT-PRINCIPAL"] = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes(
+                $$"""{"auth_typ":"aad","claims":[{"typ":"oid","val":"test"},{"typ":"{{roleClaimType}}","val":"{{ManagementApiRoles.Reader}}"}]}"""));
+
+        var result = EasyAuthPrincipalValidator.Authorize(request, ManagementApiRoles.Reader);
+
+        Assert.Equal(EasyAuthAuthorizationResult.Authorized, result);
+    }
+
+    [Fact]
+    public void Authorize_RejectsAuthenticatedPrincipalWithoutRequiredRole()
+    {
+        var request = new DefaultHttpContext().Request;
+        request.Headers["X-MS-CLIENT-PRINCIPAL"] = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes("""{"auth_typ":"aad","claims":[{"typ":"oid","val":"test"}]}"""));
+
+        var result = EasyAuthPrincipalValidator.Authorize(request, ManagementApiRoles.Reader);
+
+        Assert.Equal(EasyAuthAuthorizationResult.Forbidden, result);
+    }
+
+    [Theory]
     [InlineData(null)]
     [InlineData("not-base64")]
     public void IsAuthenticated_RejectsMissingOrInvalidHeader(string? header)

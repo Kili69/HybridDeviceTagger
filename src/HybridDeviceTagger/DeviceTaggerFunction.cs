@@ -46,10 +46,16 @@ public class DeviceTaggerFunction : IDeviceTaggingRunner
         [TimerTrigger("%TaggingSchedule%")] TimerInfo timer,
         FunctionContext context,
         CancellationToken cancellationToken)
-        => await RunAsync(context.InvocationId, timer.IsPastDue, cancellationToken);
+        => await RunOperationAsync(context.InvocationId, timer.IsPastDue, cancellationToken);
 
     /// <inheritdoc />
-    public async Task<TaggingResult> RunAsync(
+    Task<TaggingResult> IDeviceTaggingRunner.RunAsync(
+        string invocationId,
+        bool isPastDue,
+        CancellationToken cancellationToken)
+        => RunOperationAsync(invocationId, isPastDue, cancellationToken);
+
+    private async Task<TaggingResult> RunOperationAsync(
         string invocationId,
         bool isPastDue,
         CancellationToken cancellationToken)

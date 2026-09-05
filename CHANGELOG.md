@@ -4,6 +4,28 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260905.15] - 2026-09-05
+
+### Added
+
+- Add Blob-backed management of multiple Active Directory LDAPS trust certificates with package fallback, ETag concurrency, DER/PEM import, metadata-only listing, and final-anchor protection.
+- Add authenticated REST endpoints and PowerShell cmdlets to list, add, and remove trusted certificates without restarting the Function App.
+- Add the `HybridDeviceTagger.CertificateAdministrator` application role and role-specific installer assignments alongside Reader, rule, tagging, and password-rotation roles.
+
+### Changed
+
+- Authorize every management endpoint from Easy Auth role claims while retaining issuer, audience, authentication, and Enterprise Application assignment enforcement.
+- Load the current certificate collection for every new LDAP connection and build a multi-anchor custom trust chain on Windows or an atomic PEM bundle for OpenLDAP.
+- Expand management API, PowerShell module, deployment, OpenAPI, and operational documentation for role-based certificate administration.
+
+### Fixed
+
+- Hide runner methods behind explicit interfaces so Azure Functions discovers only the intended timer entry points.
+
+### Removed
+
+- Remove the superseded standalone management API and tagging-configuration wrapper scripts in favor of the reusable PowerShell module.
+
 ## [0.1.20260905.14] - 2026-09-05
 
 ### Changed

@@ -14,7 +14,7 @@ public sealed class ActiveDirectoryLdapConnectionFactoryTests
         var valid = ActiveDirectoryLdapConnectionFactory.ValidateServerCertificate(
             "dc01.example.com",
             certificates.Server,
-            certificates.Root);
+            [certificates.Root]);
 
         Assert.True(valid);
     }
@@ -27,7 +27,7 @@ public sealed class ActiveDirectoryLdapConnectionFactoryTests
         var valid = ActiveDirectoryLdapConnectionFactory.ValidateServerCertificate(
             "dc02.example.com",
             certificates.Server,
-            certificates.Root);
+            [certificates.Root]);
 
         Assert.False(valid);
     }
@@ -41,9 +41,23 @@ public sealed class ActiveDirectoryLdapConnectionFactoryTests
         var valid = ActiveDirectoryLdapConnectionFactory.ValidateServerCertificate(
             "dc01.example.com",
             certificates.Server,
-            otherCertificates.Root);
+            [otherCertificates.Root]);
 
         Assert.False(valid);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_AcceptsMatchingRootAmongMultipleCertificates()
+    {
+        using var certificates = CreateCertificateChain("dc01.example.com");
+        using var otherCertificates = CreateCertificateChain("dc02.example.com");
+
+        var valid = ActiveDirectoryLdapConnectionFactory.ValidateServerCertificate(
+            "dc01.example.com",
+            certificates.Server,
+            [otherCertificates.Root, certificates.Root]);
+
+        Assert.True(valid);
     }
 
     private static CertificateChain CreateCertificateChain(string dnsName)

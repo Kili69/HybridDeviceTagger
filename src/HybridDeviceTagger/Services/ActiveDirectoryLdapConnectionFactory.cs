@@ -7,6 +7,7 @@ using System.DirectoryServices.Protocols;
 using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using HybridDeviceTagger.Models;
 using HybridDeviceTagger.Options;
 using Microsoft.Extensions.Logging;
@@ -18,31 +19,25 @@ namespace HybridDeviceTagger.Services;
 public sealed class ActiveDirectoryLdapConnectionFactory
 {
     private readonly ActiveDirectoryOptions _options;
+    private readonly IActiveDirectoryTrustStore _trustStore;
     private readonly ILogger<ActiveDirectoryLdapConnectionFactory> _logger;
-    private readonly X509Certificate2? _trustedCertificate;
+    private static readonly object TrustBundleLock = new();
+    private static readonly string TrustBundlePath = Path.Combine(
+        Path.GetTempPath(),
+        "hybrid-device-tagger-ldap-trust.pem");
 
     /// <summary>Initializes a new instance of the <see cref="ActiveDirectoryLdapConnectionFactory"/> class.</summary>
     /// <param name="options">The validated Active Directory connection settings.</param>
+    /// <param name="trustStore">The dynamic LDAPS trust-certificate provider.</param>
     /// <param name="logger">The structured logger.</param>
     public ActiveDirectoryLdapConnectionFactory(
         IOptions<ActiveDirectoryOptions> options,
+        IActiveDirectoryTrustStore trustStore,
         ILogger<ActiveDirectoryLdapConnectionFactory> logger)
     {
         _options = options.Value;
+        _trustStore = trustStore;
         _logger = logger;
-        if (!string.IsNullOrWhiteSpace(_options.TrustedCertificatePath))
-        {
-            var path = Path.GetFullPath(_options.TrustedCertificatePath);
-            _trustedCertificate = new X509Certificate2(path);
-            if (!OperatingSystem.IsWindows())
-            {
-                Environment.SetEnvironmentVariable("LDAPTLS_CACERT", path);
-                Environment.SetEnvironmentVariable("LDAPTLS_REQCERT", "DEMAND");
-            }
-            _logger.LogInformation(
-                "Loaded private LDAP trust anchor {Thumbprint} from configured certificate path",
-                _trustedCertificate.Thumbprint);
-        }
     }
 
     /// <summary>Creates and binds a connection, disposing it if the bind fails.</summary>
@@ -115,6 +110,11 @@ public sealed class ActiveDirectoryLdapConnectionFactory
         var identifier = new LdapDirectoryIdentifier(server, port);
         var networkCredential = new NetworkCredential(credential.Username, credential.Password);
         var authenticationType = useSsl ? AuthType.Basic : AuthType.Negotiate;
+        var trustedCertificates = useSsl ? _trustStore.GetCertificates() : [];
+        if (useSsl && !OperatingSystem.IsWindows())
+        {
+            ConfigureOpenLdapTrust(trustedCertificates);
+        }
         var connection = new LdapConnection(identifier, networkCredential, authenticationType)
         {
             Timeout = TimeSpan.FromSeconds(30)
@@ -122,10 +122,10 @@ public sealed class ActiveDirectoryLdapConnectionFactory
 
         connection.SessionOptions.ProtocolVersion = 3;
         connection.SessionOptions.SecureSocketLayer = useSsl;
-        if (useSsl && _trustedCertificate is not null && OperatingSystem.IsWindows())
+        if (useSsl && OperatingSystem.IsWindows())
         {
             connection.SessionOptions.VerifyServerCertificate = (_, certificate) =>
-                ValidateServerCertificate(server, certificate, _trustedCertificate);
+            ValidateServerCertificate(server, certificate, trustedCertificates);
         }
         if (!useSsl)
         {
@@ -157,17 +157,32 @@ public sealed class ActiveDirectoryLdapConnectionFactory
     internal static bool ValidateServerCertificate(
         string server,
         X509Certificate certificate,
-        X509Certificate2 trustedCertificate)
+        IReadOnlyCollection<X509Certificate2> trustedCertificates)
     {
         using var serverCertificate = new X509Certificate2(
             certificate.Export(X509ContentType.Cert));
         using var chain = new X509Chain();
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
-        chain.ChainPolicy.CustomTrustStore.Add(trustedCertificate);
+        chain.ChainPolicy.CustomTrustStore.AddRange(trustedCertificates.ToArray());
         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
         chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
 
         return chain.Build(serverCertificate) && MatchesDnsName(serverCertificate, server);
+    }
+
+    private static void ConfigureOpenLdapTrust(IReadOnlyCollection<X509Certificate2> certificates)
+    {
+        lock (TrustBundleLock)
+        {
+            var pem = string.Join(
+                Environment.NewLine,
+                certificates.Select(certificate => certificate.ExportCertificatePem()));
+            var temporaryPath = $"{TrustBundlePath}.{Guid.NewGuid():N}";
+            File.WriteAllText(temporaryPath, pem, Encoding.ASCII);
+            File.Move(temporaryPath, TrustBundlePath, overwrite: true);
+            Environment.SetEnvironmentVariable("LDAPTLS_CACERT", TrustBundlePath);
+            Environment.SetEnvironmentVariable("LDAPTLS_REQCERT", "DEMAND");
+        }
     }
 
     /// <summary>Checks the certificate DNS identity, including a single-label wildcard.</summary>

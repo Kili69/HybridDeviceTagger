@@ -73,10 +73,6 @@ param activeDirectoryBindUserDistinguishedName string
 @maxLength(36)
 param managementApiClientId string
 
-@description('Entra object IDs of users or service principals allowed to call the management API.')
-@minLength(1)
-param managementApiAllowedPrincipalObjectIds string[]
-
 @description('OU subtree rules and the Entra extension attributes assigned to matching devices.')
 @minLength(1)
 param taggingRules taggingRule[]
@@ -416,11 +412,6 @@ resource functionAppAuthentication 'Microsoft.Web/sites/config@2022-09-01' = {
             managementApiClientId
             'api://${managementApiClientId}'
           ]
-          defaultAuthorizationPolicy: {
-            allowedPrincipals: {
-              identities: managementApiAllowedPrincipalObjectIds
-            }
-          }
         }
       }
     }

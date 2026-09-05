@@ -32,6 +32,8 @@ Status: Validated
 - Flex Consumption plan and supporting monitoring resources defined by `Deployment/main.bicep`.
 - Managed identity RBAC for Key Vault and deployment storage.
 - Microsoft Graph application roles `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All`.
+- Management API application roles `Reader`, `RuleAdministrator`, `TaggingOperator`, `PasswordRotationAdministrator`, and `CertificateAdministrator` with assignment required.
+- Private Blob-backed management of multiple public Active Directory LDAPS trust certificates, with the packaged certificate as the bootstrap fallback.
 
 ## 5. Security And Data Handling
 
@@ -57,6 +59,34 @@ Status: Validated
 - [x] Verify Function App, managed identity, RBAC, settings, package deployment, and health.
 
 ## 7. Validation Proof
+
+Certificate-management release validation completed: `2026-09-05`.
+
+- The complete .NET Release suite passed with 89/89 tests, including eight Blob trust-store tests and focused API, authorization, multi-root Windows validation, and Linux PEM-bundle coverage.
+- `Deployment/main.bicep` compiled successfully through the Bicep MCP compiler and Azure CLI with no diagnostics. The generic parameterless ARM validation helper is not applicable because this repository intentionally builds required deployment parameters in `Deployment/Install-HybridDeviceTagger.ps1`; the existing live infrastructure and installer validation remain the deployment authority.
+- Production PowerShell files passed parsing and PSScriptAnalyzer with no warnings or errors. The module exports 13 commands, including all three documented trusted-certificate commands.
+- The OpenAPI 3.0 document is valid. Redocly reported nine pre-existing documentation-quality warnings outside the new trusted-certificate paths and schemas.
+- Static review confirmed the stable `CertificateAdministrator` role ID, preservation of unrelated app roles, role-specific assignment with bootstrap fallback, and app-role assignment before `appRoleAssignmentRequired` enforcement.
+- Effective policy assignments for `RG-HybridDeviceTagger` were retrieved under `kili@bloedgelaber.de` and reviewed. The update does not weaken the current FC1, private-network, managed-identity, Key Vault, Storage, Easy Auth, or Application Insights controls.
+- `git diff --check` completed without whitespace errors. No production certificate mutation or password rotation was invoked during validation.
+- `HybridDeviceTagger.CertificateAdministrator` is live with stable role ID `659858ff-b645-4b06-90ff-e79314628687`; the operator has all five role assignments and `appRoleAssignmentRequired` remains enabled.
+- The updated Function package was deployed after verifying LDAPS thumbprint `E9C632C3ADE1CA74EBBBAF9CE114AB47FD3C619D`. Azure reports 14 Functions, including all three trusted-certificate operations.
+- Read-only production verification returned HTTP `401` anonymously and HTTP `200` with a five-role token. It listed one metadata-only certificate from source `package`, exposed no certificate body, and Application Insights contained no exceptions or severity 3+ traces after deployment.
+
+Management API role-authorization validation completed: `2026-09-05`.
+
+- Azure extension and MCP contexts resolve to `kili@bloedgelaber.de`, tenant `d89a354d-2bce-44ed-b802-8f8600689247`, and subscription `23ca129f-1e1c-4a56-bc51-e3ec2c874a73`.
+- The complete .NET test suite passed with 76/76 tests. Focused authorization tests passed with 16/16 tests and verify HTTP `401`, HTTP `403`, short and URI role claims, and privileged-action denial. Two reflection tests prevent ambiguous public timer entry points.
+- `Deployment/main.bicep` compiled successfully with no diagnostics. Editor diagnostics and `git diff --check` are clean.
+- `Deployment/Install-HybridDeviceTagger.ps1` passed PowerShell parsing and PSScriptAnalyzer with no findings. Static review confirmed that app-role assignments are created before `appRoleAssignmentRequired` is enabled.
+- Effective Azure Policy assignments for `RG-HybridDeviceTagger` were retrieved and reviewed. This update does not weaken the existing network, identity, storage, or Key Vault controls.
+- Production verification will not invoke the forced password-rotation endpoint because it intentionally changes the Active Directory service-account password.
+- The management API app and Enterprise Application each expose all four roles. `kili@bloedgelaber.de` has all four migration assignments, `appRoleAssignmentRequired` is enabled, and the legacy Easy Auth allowed-identity list is empty.
+- The role-aware Function package was deployed successfully as deployment `042a2705-50e1-47ab-b9c5-d2c5cfaa0e8b` after validating LDAPS trust-anchor thumbprint `E9C632C3ADE1CA74EBBBAF9CE114AB47FD3C619D`.
+- Anonymous API access returns HTTP `401`. A previously cached delegated token without a role claim returns the expected HTTP `403` and sanitized error. Positive role-bearing token verification remains pending until Azure CLI renews its token cache.
+- Deployment telemetry exposed ambiguous `RunAsync` overloads on both timer classes. Their runner methods now use explicit interface implementations, the regression tests pass, and Application Insights contains no exceptions after the final deployment completed at `2026-09-05T15:29:55Z`.
+
+Certificate-management deployment is pending. Before deploying the updated Function package, add and assign `HybridDeviceTagger.CertificateAdministrator`; retain the approved packaged LDAPS certificate as the fallback. Production verification must list certificate metadata only and must not add or remove a trust anchor.
 
 Management operations release validation completed: `2026-09-05`.
 

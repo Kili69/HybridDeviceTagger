@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.14
+# Project-Version: 0.1.20260905.15
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -95,6 +95,44 @@ function Get-HybridDeviceTaggerConfigurationSnapshot {
     Invoke-HybridDeviceTaggerRequest -Method Get -Path 'tagging-rules' -IncludeResponseHeaders
 }
 
+function Get-HybridDeviceTaggerTrustedCertificateSnapshot {
+    Invoke-HybridDeviceTaggerRequest -Method Get -Path 'trusted-certificates' -IncludeResponseHeaders
+}
+
+<#
+.SYNOPSIS
+Connects the current PowerShell session to the HybridDeviceTagger management API.
+
+.DESCRIPTION
+Uses the existing Azure CLI sign-in to acquire a delegated Microsoft Entra access token and stores
+the API URI, token audience, token, and expiry in module scope. All other module cmdlets reuse this
+connection. By default, the command validates the connection by reading the tagging configuration.
+
+.PARAMETER ApiBaseUri
+Specifies the absolute HTTPS URI of the management API, including the /api/management path.
+
+.PARAMETER ClientId
+Specifies the non-secret Microsoft Entra application client ID used as the access-token audience.
+
+.PARAMETER SkipValidation
+Stores the connection without making the initial tagging-configuration request.
+
+.PARAMETER PassThru
+Returns non-sensitive connection information. The access token is never included.
+
+.OUTPUTS
+HybridDeviceTagger.Management.ConnectionInfo when PassThru is specified. Otherwise, no output.
+
+.EXAMPLE
+Connect-HybridDeviceTagger
+
+Connects to the production management API using the existing Azure CLI sign-in.
+
+.EXAMPLE
+Connect-HybridDeviceTagger -ApiBaseUri 'https://example.azurewebsites.net/api/management' -ClientId $clientId -PassThru
+
+Connects to another deployment and returns its non-sensitive connection information.
+#>
 function Connect-HybridDeviceTagger {
     [CmdletBinding()]
     param(
@@ -140,6 +178,30 @@ function Connect-HybridDeviceTagger {
     }
 }
 
+<#
+.SYNOPSIS
+Gets HybridDeviceTagger tagging rules.
+
+.DESCRIPTION
+Reads the effective tagging configuration through the connected management API. Without Name, the
+command emits every rule. With Name, it emits rules whose names match case-insensitively.
+
+.PARAMETER Name
+Specifies an optional rule name to retrieve. Matching is case-insensitive.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject. One object is emitted for each matching rule.
+
+.EXAMPLE
+Get-HybridDeviceTaggerRule
+
+Returns all effective tagging rules.
+
+.EXAMPLE
+Get-HybridDeviceTaggerRule -Name 'Kiosk devices'
+
+Returns the named rule when it exists.
+#>
 function Get-HybridDeviceTaggerRule {
     [CmdletBinding()]
     param(
@@ -158,6 +220,22 @@ function Get-HybridDeviceTaggerRule {
     }
 }
 
+<#
+.SYNOPSIS
+Gets the status of the latest device-tagging run.
+
+.DESCRIPTION
+Returns the persisted state, invocation ID, timestamps, result counters, and sanitized failure
+information for the latest scheduled or manually triggered device-tagging run.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject.
+
+.EXAMPLE
+Get-HybridDeviceTaggerLastRunStatus | Format-List
+
+Displays all properties of the latest device-tagging status.
+#>
 function Get-HybridDeviceTaggerLastRunStatus {
     [CmdletBinding()]
     param()
@@ -165,6 +243,22 @@ function Get-HybridDeviceTaggerLastRunStatus {
     Invoke-HybridDeviceTaggerRequest -Method Get -Path 'status/device-tagging'
 }
 
+<#
+.SYNOPSIS
+Gets the status of the latest password-rotation operation.
+
+.DESCRIPTION
+Returns the latest password-rotation check state and the timestamp of the last actual service-account
+password change. The response contains operational metadata but never contains a password.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject.
+
+.EXAMPLE
+Get-HybridDeviceTaggerPasswordRotationStatus | Format-List
+
+Displays the latest password-rotation status and last password-change timestamp.
+#>
 function Get-HybridDeviceTaggerPasswordRotationStatus {
     [CmdletBinding()]
     param()
@@ -172,6 +266,33 @@ function Get-HybridDeviceTaggerPasswordRotationStatus {
     Invoke-HybridDeviceTaggerRequest -Method Get -Path 'status/password-rotation'
 }
 
+<#
+.SYNOPSIS
+Gets the latest device-tagging trace as structured events.
+
+.DESCRIPTION
+Downloads and parses the latest JSONL trace. Each event is emitted as a
+HybridDeviceTagger.TraceEvent object. The default screen view is one logical line in the format
+time,severity,phase,status,action,details, while pipeline operations retain every event property.
+
+.OUTPUTS
+HybridDeviceTagger.TraceEvent. One object is emitted for each JSONL trace event.
+
+.EXAMPLE
+Get-HybridDeviceTaggerTrace
+
+Displays the latest trace using the concise one-line event view.
+
+.EXAMPLE
+$errors = @(Get-HybridDeviceTaggerTrace | Where-Object level -eq 'Error')
+
+Stores only error events as structured objects.
+
+.EXAMPLE
+Get-HybridDeviceTaggerTrace | Select-Object timestampUtc, action, details | Export-Csv ./trace.csv
+
+Exports selected structured trace properties to a CSV file.
+#>
 function Get-HybridDeviceTaggerTrace {
     [CmdletBinding()]
     param()
@@ -186,6 +307,161 @@ function Get-HybridDeviceTaggerTrace {
     }
 }
 
+<#
+.SYNOPSIS
+Gets the Active Directory LDAPS trust certificates.
+
+.DESCRIPTION
+Returns non-sensitive metadata for every certificate currently trusted by new Active Directory
+LDAP connections. Certificate bodies and private keys are never returned.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject. One object is emitted for each trusted certificate.
+
+.EXAMPLE
+Get-HybridDeviceTaggerTrustedCertificate
+
+Lists each certificate thumbprint, subject, issuer, and validity period.
+
+.EXAMPLE
+Get-HybridDeviceTaggerTrustedCertificate | Where-Object notAfterUtc -lt (Get-Date).AddDays(30)
+
+Finds trusted certificates that expire within 30 days.
+#>
+function Get-HybridDeviceTaggerTrustedCertificate {
+    [CmdletBinding()]
+    param()
+
+    $snapshot = Get-HybridDeviceTaggerTrustedCertificateSnapshot
+    @($snapshot.Content.certificates)
+}
+
+<#
+.SYNOPSIS
+Adds an Active Directory LDAPS trust certificate.
+
+.DESCRIPTION
+Reads one DER or PEM encoded public X.509 certificate, retrieves the latest collection ETag, and
+adds the certificate through the management API. Existing certificates are preserved. Files that
+contain a private key are rejected by the API.
+
+.PARAMETER Path
+Specifies the path to a DER or PEM encoded public certificate.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject representing the effective trusted-certificate collection.
+
+.EXAMPLE
+Add-HybridDeviceTaggerTrustedCertificate -Path ./contoso-root-ca.cer -WhatIf
+
+Previews adding the public root CA certificate.
+
+.EXAMPLE
+Add-HybridDeviceTaggerTrustedCertificate -Path ./contoso-root-ca.pem
+
+Adds the certificate while preserving all existing trust anchors.
+#>
+function Add-HybridDeviceTaggerTrustedCertificate {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory, Position = 0, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path
+    )
+
+    process {
+        $resolvedPath = Resolve-Path -LiteralPath $Path -ErrorAction Stop
+        $file = Get-Item -LiteralPath $resolvedPath -ErrorAction Stop
+        if ($file.PSIsContainer) {
+            throw "Certificate path '$Path' must identify a file."
+        }
+        if ($file.Length -gt 32768) {
+            throw 'The certificate file cannot exceed 32,768 bytes.'
+        }
+
+        $snapshot = Get-HybridDeviceTaggerTrustedCertificateSnapshot
+        if ($PSCmdlet.ShouldProcess($file.FullName, 'Add Active Directory LDAPS trust certificate')) {
+            Invoke-HybridDeviceTaggerRequest `
+                -Method Post `
+                -Path 'trusted-certificates' `
+                -Body @{ certificate = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file.FullName)) } `
+                -ETag $snapshot.ETag
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+Removes an Active Directory LDAPS trust certificate.
+
+.DESCRIPTION
+Retrieves the latest collection ETag and removes one certificate by SHA-1 thumbprint. The API
+rejects removal of the final certificate so LDAPS cannot be left without an explicit trust anchor.
+
+.PARAMETER Thumbprint
+Specifies the 40-character SHA-1 certificate thumbprint. Spaces and separators are accepted.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject representing the remaining trusted-certificate collection.
+
+.EXAMPLE
+Remove-HybridDeviceTaggerTrustedCertificate -Thumbprint '00112233445566778899AABBCCDDEEFF00112233' -WhatIf
+
+Previews removal of the selected trust certificate.
+
+.EXAMPLE
+Get-HybridDeviceTaggerTrustedCertificate | Where-Object thumbprint -eq $oldThumbprint |
+    Remove-HybridDeviceTaggerTrustedCertificate -Confirm
+
+Removes a certificate selected from the current collection after confirmation.
+#>
+function Remove-HybridDeviceTaggerTrustedCertificate {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory, Position = 0, ValueFromPipelineByPropertyName)]
+        [ValidateNotNullOrEmpty()]
+        [Alias('Thumbprint')]
+        [string]$CertificateThumbprint
+    )
+
+    process {
+        $snapshot = Get-HybridDeviceTaggerTrustedCertificateSnapshot
+        if ($PSCmdlet.ShouldProcess(
+            $CertificateThumbprint,
+            'Remove Active Directory LDAPS trust certificate')) {
+            Invoke-HybridDeviceTaggerRequest `
+                -Method Delete `
+                -Path "trusted-certificates/$([uri]::EscapeDataString($CertificateThumbprint))" `
+                -ETag $snapshot.ETag
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+Replaces the complete HybridDeviceTagger tagging-rule configuration.
+
+.DESCRIPTION
+Reads the latest configuration ETag and atomically replaces all rules through the management API.
+Rules omitted from Rule are removed. The API validates the complete configuration before persisting it.
+
+.PARAMETER Rule
+Specifies the complete desired rule set. At least one and at most 100 rules are required.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject representing the persisted configuration when applied.
+
+.EXAMPLE
+$rules = @(Get-HybridDeviceTaggerRule)
+Set-HybridDeviceTaggerRuleConfiguration -Rule $rules -WhatIf
+
+Previews replacement of the complete configuration without changing it.
+
+.EXAMPLE
+Set-HybridDeviceTaggerRuleConfiguration -Rule $rules -Confirm
+
+Replaces the complete configuration after confirmation.
+#>
 function Set-HybridDeviceTaggerRuleConfiguration {
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     param(
@@ -202,6 +478,39 @@ function Set-HybridDeviceTaggerRuleConfiguration {
     }
 }
 
+<#
+.SYNOPSIS
+Adds or replaces one named HybridDeviceTagger rule.
+
+.DESCRIPTION
+Reads the latest configuration ETag and sends one complete rule to the management API. If a rule with
+the same case-insensitive name exists, that rule is completely replaced. Other rules are preserved.
+
+.PARAMETER Rule
+Specifies one complete rule object. It must contain Name, Description, BaseDn, ExtensionAttributes,
+EntraGroupIds, and AdministrativeUnitIds as required by the management API.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject representing the persisted configuration when applied.
+
+.EXAMPLE
+$rule = @{
+    name = 'Kiosk devices'
+    description = 'Tags devices located in the kiosk OU.'
+    baseDn = 'OU=Kiosks,OU=Workstations'
+    extensionAttributes = @{ extensionAttribute1 = 'Kiosk' }
+    entraGroupIds = @()
+    administrativeUnitIds = @()
+}
+Add-HybridDeviceTaggerRule -Rule $rule -WhatIf
+
+Previews adding or replacing the Kiosk devices rule.
+
+.EXAMPLE
+$rule | Add-HybridDeviceTaggerRule
+
+Adds or replaces a complete rule received from the pipeline.
+#>
 function Add-HybridDeviceTaggerRule {
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -225,6 +534,30 @@ function Add-HybridDeviceTaggerRule {
     }
 }
 
+<#
+.SYNOPSIS
+Removes one named HybridDeviceTagger rule.
+
+.DESCRIPTION
+Reads the latest configuration ETag and removes the case-insensitively matching rule through the
+management API. The API rejects a result that would leave no valid tagging rules.
+
+.PARAMETER Name
+Specifies the unique rule name to remove. Matching is case-insensitive.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject representing the persisted configuration when applied.
+
+.EXAMPLE
+Remove-HybridDeviceTaggerRule -Name 'Kiosk devices' -WhatIf
+
+Previews removal of the named rule.
+
+.EXAMPLE
+Remove-HybridDeviceTaggerRule -Name 'Kiosk devices' -Confirm
+
+Removes the named rule after confirmation.
+#>
 function Remove-HybridDeviceTaggerRule {
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     param(
@@ -240,6 +573,27 @@ function Remove-HybridDeviceTaggerRule {
     }
 }
 
+<#
+.SYNOPSIS
+Runs device tagging immediately.
+
+.DESCRIPTION
+Synchronously triggers the same device-tagging orchestration used by the timer. The command returns
+the invocation ID and aggregate result. The API returns a conflict when another tagging run is active.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject containing invocationId and result.
+
+.EXAMPLE
+Invoke-HybridDeviceTagging -WhatIf
+
+Shows the target operation without invoking device tagging.
+
+.EXAMPLE
+$result = Invoke-HybridDeviceTagging
+
+Runs device tagging immediately and stores the invocation result.
+#>
 function Invoke-HybridDeviceTagging {
     [CmdletBinding(SupportsShouldProcess)]
     param()
@@ -250,6 +604,28 @@ function Invoke-HybridDeviceTagging {
     }
 }
 
+<#
+.SYNOPSIS
+Forces an immediate Active Directory service-account password rotation.
+
+.DESCRIPTION
+Synchronously triggers password rotation and bypasses only the configured password-age threshold.
+Current credential verification, secure LDAP, Key Vault staging, changed-credential validation, and
+secret promotion remain mandatory. The operation changes the real service-account password when safe.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject containing invocationId and result.
+
+.EXAMPLE
+Invoke-HybridDeviceTaggerPasswordRotation -WhatIf
+
+Shows the target operation without changing the password.
+
+.EXAMPLE
+Invoke-HybridDeviceTaggerPasswordRotation -Confirm
+
+Forces password rotation after high-impact confirmation.
+#>
 function Invoke-HybridDeviceTaggerPasswordRotation {
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     param()
@@ -268,8 +644,11 @@ Export-ModuleMember -Function @(
     'Get-HybridDeviceTaggerLastRunStatus',
     'Get-HybridDeviceTaggerPasswordRotationStatus',
     'Get-HybridDeviceTaggerTrace',
+    'Get-HybridDeviceTaggerTrustedCertificate',
     'Add-HybridDeviceTaggerRule',
+    'Add-HybridDeviceTaggerTrustedCertificate',
     'Remove-HybridDeviceTaggerRule',
+    'Remove-HybridDeviceTaggerTrustedCertificate',
     'Set-HybridDeviceTaggerRuleConfiguration',
     'Invoke-HybridDeviceTagging',
     'Invoke-HybridDeviceTaggerPasswordRotation'

@@ -46,7 +46,7 @@ public sealed class ManagementApiFunctionTests
     {
         var configurationStore = new FakeTaggingConfigurationStore();
         var function = CreateFunction(configurationStore, new FakeStatusStore(), new FakeTraceReader());
-        var request = AuthenticatedRequest();
+        var request = AuthenticatedRequest(ManagementApiRoles.RuleAdministrator);
         request.Headers.IfMatch = "client-etag";
         request.Body = new MemoryStream(Encoding.UTF8.GetBytes(
             """[{"name":"Servers","description":"Test","baseDn":"OU=Servers,DC=example,DC=com","extensionAttributes":{"extensionAttribute1":"Managed"},"entraGroupIds":[],"administrativeUnitIds":[]}]"""));
@@ -65,7 +65,7 @@ public sealed class ManagementApiFunctionTests
         var function = CreateFunction(new FakeTaggingConfigurationStore(), new FakeStatusStore(), new FakeTraceReader());
 
         var result = await function.GetDeviceTaggingStatusAsync(
-            AuthenticatedRequest(),
+            AuthenticatedRequest(ManagementApiRoles.Reader),
             CancellationToken.None);
 
         Assert.IsType<NotFoundObjectResult>(result);
@@ -81,7 +81,7 @@ public sealed class ManagementApiFunctionTests
             new FakeTraceReader(new RunTraceDownload(content, "application/x-ndjson", "trace.jsonl")));
 
         var result = await function.DownloadLatestDeviceTaggingTraceAsync(
-            AuthenticatedRequest(),
+            AuthenticatedRequest(ManagementApiRoles.TaggingOperator),
             CancellationToken.None);
 
         var file = Assert.IsType<FileStreamResult>(result);
@@ -112,7 +112,7 @@ public sealed class ManagementApiFunctionTests
             runner);
 
         var result = await function.RunDeviceTaggingAsync(
-            AuthenticatedRequest(),
+            AuthenticatedRequest(ManagementApiRoles.TaggingOperator),
             CancellationToken.None);
 
         Assert.IsType<OkObjectResult>(result);
@@ -131,7 +131,7 @@ public sealed class ManagementApiFunctionTests
             passwordRotationRunner: runner);
 
         var result = await function.RunPasswordRotationAsync(
-            AuthenticatedRequest(),
+            AuthenticatedRequest(ManagementApiRoles.PasswordRotationAdministrator),
             CancellationToken.None);
 
         Assert.IsType<OkObjectResult>(result);
@@ -151,10 +151,99 @@ public sealed class ManagementApiFunctionTests
             runner);
 
         var result = await function.RunDeviceTaggingAsync(
-            AuthenticatedRequest(),
+            AuthenticatedRequest(ManagementApiRoles.TaggingOperator),
             CancellationToken.None);
 
         Assert.IsType<ConflictObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task GetTrustedCertificatesAsync_AllowsReaderAndReturnsETag()
+    {
+        var function = CreateFunction(new FakeTaggingConfigurationStore(), new FakeStatusStore(), new FakeTraceReader());
+        var request = AuthenticatedRequest(ManagementApiRoles.Reader);
+
+        var result = await function.GetTrustedCertificatesAsync(request, CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.Equal("certificate-etag", request.HttpContext.Response.Headers.ETag);
+    }
+
+    [Fact]
+    public async Task AddTrustedCertificateAsync_ForwardsCertificateAndETag()
+    {
+        var trustStore = new FakeTrustStore();
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            trustStore: trustStore);
+        var request = AuthenticatedRequest(ManagementApiRoles.CertificateAdministrator);
+        request.Headers.IfMatch = "certificate-etag";
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes(
+            """{"certificate":"AQID"}"""));
+
+        var result = await function.AddTrustedCertificateAsync(request, CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.Equal([1, 2, 3], trustStore.AddedCertificate);
+        Assert.Equal("certificate-etag", trustStore.LastExpectedETag);
+    }
+
+    [Fact]
+    public async Task AddTrustedCertificateAsync_RejectsReaderRole()
+    {
+        var trustStore = new FakeTrustStore();
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            trustStore: trustStore);
+        var request = AuthenticatedRequest(ManagementApiRoles.Reader);
+
+        var result = await function.AddTrustedCertificateAsync(request, CancellationToken.None);
+
+        var forbidden = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, forbidden.StatusCode);
+        Assert.Null(trustStore.AddedCertificate);
+    }
+
+    [Fact]
+    public async Task RemoveTrustedCertificateAsync_ForwardsThumbprint()
+    {
+        var trustStore = new FakeTrustStore();
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            trustStore: trustStore);
+
+        var result = await function.RemoveTrustedCertificateAsync(
+            AuthenticatedRequest(ManagementApiRoles.CertificateAdministrator),
+            "00112233445566778899AABBCCDDEEFF00112233",
+            CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.Equal("00112233445566778899AABBCCDDEEFF00112233", trustStore.RemovedThumbprint);
+    }
+
+    [Fact]
+    public async Task RunPasswordRotationAsync_RejectsReaderRole()
+    {
+        var runner = new FakePasswordRotationRunner();
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            passwordRotationRunner: runner);
+
+        var result = await function.RunPasswordRotationAsync(
+            AuthenticatedRequest(ManagementApiRoles.Reader),
+            CancellationToken.None);
+
+        var forbidden = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, forbidden.StatusCode);
+        Assert.Null(runner.InvocationId);
     }
 
     private static ManagementApiFunction CreateFunction(
@@ -162,19 +251,23 @@ public sealed class ManagementApiFunctionTests
         IOperationStatusStore statusStore,
         IRunTraceReader traceReader,
         IDeviceTaggingRunner? deviceTaggingRunner = null,
-        IPasswordRotationRunner? passwordRotationRunner = null) =>
+        IPasswordRotationRunner? passwordRotationRunner = null,
+        IActiveDirectoryTrustStore? trustStore = null) =>
         new(
             new TaggingConfigurationService(configurationStore),
             statusStore,
             traceReader,
+            trustStore ?? new FakeTrustStore(),
             deviceTaggingRunner ?? new FakeDeviceTaggingRunner(),
             passwordRotationRunner ?? new FakePasswordRotationRunner());
 
-    private static HttpRequest AuthenticatedRequest()
+    private static HttpRequest AuthenticatedRequest(params string[] roles)
     {
         var request = new DefaultHttpContext().Request;
+        var claims = new List<object> { new { typ = "oid", val = "test" } };
+        claims.AddRange(roles.Select(role => (object)new { typ = "roles", val = role }));
         request.Headers["X-MS-CLIENT-PRINCIPAL"] = Convert.ToBase64String(
-            Encoding.UTF8.GetBytes("""{"auth_typ":"aad","claims":[{"typ":"oid","val":"test"}]}"""));
+            Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { auth_typ = "aad", claims })));
         return request;
     }
 
@@ -231,6 +324,52 @@ public sealed class ManagementApiFunctionTests
     {
         public Task<RunTraceDownload?> OpenLatestAsync(CancellationToken cancellationToken) =>
             Task.FromResult(trace);
+    }
+
+    private sealed class FakeTrustStore : IActiveDirectoryTrustStore
+    {
+        private static readonly TrustedCertificateSnapshot Snapshot = new(
+            [new TrustedCertificateMetadata(
+                "00112233445566778899AABBCCDDEEFF00112233",
+                "CN=Test Root",
+                "CN=Test Root",
+                DateTimeOffset.UtcNow.AddDays(-1),
+                DateTimeOffset.UtcNow.AddDays(1))],
+            "certificate-etag",
+            DateTimeOffset.UtcNow,
+            "blob");
+
+        public byte[]? AddedCertificate { get; private set; }
+
+        public string? RemovedThumbprint { get; private set; }
+
+        public string? LastExpectedETag { get; private set; }
+
+        public IReadOnlyList<System.Security.Cryptography.X509Certificates.X509Certificate2> GetCertificates() =>
+            [];
+
+        public Task<TrustedCertificateSnapshot> GetSnapshotAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(Snapshot);
+
+        public Task<TrustedCertificateSnapshot> AddAsync(
+            byte[] certificateBytes,
+            string? expectedETag,
+            CancellationToken cancellationToken)
+        {
+            AddedCertificate = certificateBytes;
+            LastExpectedETag = expectedETag;
+            return Task.FromResult(Snapshot);
+        }
+
+        public Task<TrustedCertificateSnapshot> RemoveAsync(
+            string thumbprint,
+            string? expectedETag,
+            CancellationToken cancellationToken)
+        {
+            RemovedThumbprint = thumbprint;
+            LastExpectedETag = expectedETag;
+            return Task.FromResult(Snapshot);
+        }
     }
 
     private sealed class FakeDeviceTaggingRunner : IDeviceTaggingRunner

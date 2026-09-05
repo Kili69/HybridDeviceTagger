@@ -42,10 +42,17 @@ public sealed class PasswordRotationFunction : IPasswordRotationRunner
         [TimerTrigger("%PasswordRotationSchedule%")] TimerInfo timer,
         FunctionContext context,
         CancellationToken cancellationToken)
-        => await RunAsync(context.InvocationId, timer.IsPastDue, false, cancellationToken);
+        => await RunOperationAsync(context.InvocationId, timer.IsPastDue, false, cancellationToken);
 
     /// <inheritdoc />
-    public async Task<PasswordRotationResult> RunAsync(
+    Task<PasswordRotationResult> IPasswordRotationRunner.RunAsync(
+        string invocationId,
+        bool isPastDue,
+        bool force,
+        CancellationToken cancellationToken)
+        => RunOperationAsync(invocationId, isPastDue, force, cancellationToken);
+
+    private async Task<PasswordRotationResult> RunOperationAsync(
         string invocationId,
         bool isPastDue,
         bool force,

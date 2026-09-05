@@ -12,12 +12,22 @@ Installation uses separate Azure, Entra, Active Directory, and runtime identitie
 | Azure installation user | `Reader` plus `Microsoft.Network/virtualNetworks/subnets/join/action`, normally provided by `Network Contributor` | Existing VNet, Function integration subnet, and private-endpoint subnet. `Reader` alone is insufficient for attaching the Storage private endpoint. |
 | Azure installation user | `Microsoft.Authorization/roleAssignments/write`, normally provided by `Role Based Access Control Administrator`, `User Access Administrator`, or `Owner` | Target Storage account and existing Key Vault; assigns runtime roles to the Function managed identity. Limit the assignment to these resource scopes where possible. |
 | Azure installation user during AD bootstrap | `Key Vault Secrets Officer` | Existing Key Vault; creates or replaces the current AD password secret. This temporary assignment can be removed after installation verification. |
-| Entra administrator | `Privileged Role Administrator` or `Global Administrator` | Grants Microsoft Graph application roles `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All`. For configured restricted management administrative units, also creates and assigns the scoped custom device-extension role after explicit approval. |
+| Entra administrator | `Privileged Role Administrator` or `Global Administrator` | Configures and assigns management API application roles, requires assignment on its Enterprise Application, and grants Microsoft Graph application roles `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All`. For configured restricted management administrative units, also creates and assigns the scoped custom device-extension role after explicit approval. |
 | AD validation/runtime service account | Read access to the forest configuration partition, configured OUs and computer attributes; read access to its own account; `SELF / Change Password` | Forest-wide LDAP validation and device discovery. Password changes require LDAPS; the signed and sealed LDAP fallback is read/bind only. |
 | AD provisioning identity | Create user in the configured parent OU and enable/reset password on that account | Used only with `-PrepareActiveDirectoryAccountOnly`; it is not stored or used by the Function. Existing delegated AD permissions may be used instead of broad domain administration. |
 | DNS administrator | Create a private DNS zone and A record, or modify the existing private DNS service | Required when Storage public network access is disabled. The Function subnet must resolve `<storage-account>.blob.core.windows.net` through `<storage-account>.privatelink.blob.core.windows.net` to the Storage private endpoint IP. |
 
-The management REST API additionally requires a single-tenant Entra app registration whose Application ID URI is `api://<client-id>`. Pass its application/client ID as `ManagementApiClientId`. `ManagementApiAllowedPrincipalObjectId` accepts one to 100 Entra object IDs for users or service principals allowed to call the API; when omitted interactively, the installer restricts access to the signed-in Entra user. Easy Auth validates issuer, audience, authentication and this principal allowlist before a request reaches the Function.
+The management REST API additionally requires a single-tenant Entra app registration whose Application ID URI is `api://<client-id>`. Pass its application/client ID as `ManagementApiClientId`. The installer creates five application roles, assigns approved users, security groups, or service principals, then enables **Assignment required** on the Enterprise Application. Easy Auth validates issuer, audience, and authentication; the Function returns HTTP `403` unless the principal has a role accepted by the requested operation.
+
+`ManagementApiAllowedPrincipalObjectId` is the migration/bootstrap input. Its principals receive all five roles unless a role-specific list is supplied through `ManagementApiReaderPrincipalObjectId`, `ManagementApiRuleAdministratorPrincipalObjectId`, `ManagementApiTaggingOperatorPrincipalObjectId`, `ManagementApiPasswordRotationAdministratorPrincipalObjectId`, or `ManagementApiCertificateAdministratorPrincipalObjectId`. Prefer security-group assignments for ongoing administration. Azure subscription roles do not authorize this custom API.
+
+| Application role | Permitted operations |
+| --- | --- |
+| `HybridDeviceTagger.Reader` | Read rules, both statuses, and the latest tagging trace |
+| `HybridDeviceTagger.RuleAdministrator` | Read and change tagging rules |
+| `HybridDeviceTagger.TaggingOperator` | Read tagging status/trace and start immediate tagging |
+| `HybridDeviceTagger.PasswordRotationAdministrator` | Read rotation status and force password rotation |
+| `HybridDeviceTagger.CertificateAdministrator` | Read, add, and remove Active Directory LDAPS trust certificates |
 
 The Azure installation user also needs read access to the current Key Vault secret metadata. The signed-in identity used by Azure CLI must be able to read Microsoft Graph service principals. Assigning `Device.ReadWrite.All` requires an appropriately privileged Entra administrator; Azure subscription roles such as `Owner` do not grant this Entra permission.
 
@@ -136,190 +146,87 @@ An empty interactive required value or an unsuitable interactively selected FC1 
 
 ## Updating tagging rules after installation
 
-Use `Update-TaggingConfiguration.ps1` to change OU actions for an existing Function App, including extension attributes, Entra security groups, and administrative units. The script does not run Bicep or deploy application code. It validates the rule structure and writes the complete configuration through the Entra-authenticated management API with ETag concurrency protection. The production API URI is the default; use `ApiBaseUri` for another deployment. The rules become effective without restarting the Function App.
-
-Display the current configuration without changing it:
-
-```powershell
-./Deployment/Update-TaggingConfiguration.ps1 `
-    -ShowCurrent
-```
-
-The readable display is written to the host. The script also emits exactly one `HybridDeviceTagger.TaggingConfiguration` object on the success pipeline for `ShowCurrent`, `AddRule`, and `RemoveRuleName`:
-
-```powershell
-$configuration = ./Deployment/Update-TaggingConfiguration.ps1 `
-    <same Azure parameters> `
-    -ShowCurrent
-
-$configuration.Rules
-$configuration.RulesJson
-```
-
-The object contains `FunctionAppName`, `ResourceGroupName`, `Rules`, `RulesJson`, and `IsValid`. `Rules` is always an array. For `WhatIf`, the returned object represents the configuration currently persisted in Azure, not the unapplied proposal. After a successful add or remove, it represents the newly persisted configuration.
-
-## Reading management API data
-
-Import `HybridDeviceTagger.Management` once and connect once to reuse the API URI and delegated Azure CLI token throughout the current PowerShell session:
+Import `HybridDeviceTagger.Management` and connect once to reuse the API URI and delegated Azure CLI token throughout the current PowerShell session. The production API URI and non-secret Entra audience are defaults; pass `ApiBaseUri` or `ClientId` to `Connect-HybridDeviceTagger` for another deployment.
 
 ```powershell
 Import-Module ./Deployment/HybridDeviceTagger.Management
 Connect-HybridDeviceTagger
+
+Get-HybridDeviceTaggerRule
+```
+
+Every public cmdlet includes built-in synopsis, parameter, output, and example documentation. Use
+`Get-Help <command> -Full` or `Get-Help <command> -Examples`, for example:
+
+```powershell
+Get-Help Add-HybridDeviceTaggerRule -Full
+Get-Help Get-HybridDeviceTaggerTrace -Examples
+```
+
+Manage public LDAPS trust anchors without redeploying or restarting the Function App:
+
+```powershell
+Get-HybridDeviceTaggerTrustedCertificate
+Add-HybridDeviceTaggerTrustedCertificate -Path ./contoso-root-ca.cer
+Remove-HybridDeviceTaggerTrustedCertificate -CertificateThumbprint $oldThumbprint -Confirm
+```
+
+Certificates may be DER or PEM encoded. The private `run-traces/active-directory-trust-certificates.json` Blob stores only public DER data. Mutations use ETags, duplicate additions are idempotent, and removal of the final certificate is rejected. The certificate packaged during installation remains the fallback until the first API mutation. Every new LDAP connection uses the current Blob-backed collection.
+
+Add or replace one named rule by passing the complete rule object. The API validates it and uses the latest ETag to prevent concurrent updates:
+
+```powershell
+$rule = @{
+    name = 'Kiosk devices'
+    description = 'Tags devices located in the kiosk OU.'
+    baseDn = 'OU=Kiosks,OU=Workstations'
+    extensionAttributes = @{ extensionAttribute1 = 'Kiosk' }
+    entraGroupIds = @()
+    administrativeUnitIds = @()
+}
+
+Add-HybridDeviceTaggerRule -Rule $rule -WhatIf
+Add-HybridDeviceTaggerRule -Rule $rule
+```
+
+Remove one rule by its case-insensitive name:
+
+```powershell
+Remove-HybridDeviceTaggerRule -Name 'Kiosk devices' -WhatIf
+Remove-HybridDeviceTaggerRule -Name 'Kiosk devices'
+```
+
+Replace the complete rule configuration only when the full desired set is available. Omitted rules are removed:
+
+```powershell
+$rules = @(Get-HybridDeviceTaggerRule)
+Set-HybridDeviceTaggerRuleConfiguration -Rule $rules -WhatIf
+Set-HybridDeviceTaggerRuleConfiguration -Rule $rules -Confirm
+```
+
+Changes become effective without restarting the Function App. Rule names are case-insensitive and limited to 128 characters. Each rule requires a name, description, valid OU or domain Base DN, and at least one extension attribute, Entra group, or administrative unit. A configuration supports at most 100 rules. Each rule supports up to 15 extension attributes and 50 unique IDs per membership target type.
+
+## Reading management API data
+
+All read operations return structured PowerShell objects:
+
+```powershell
 Get-HybridDeviceTaggerRule
 Get-HybridDeviceTaggerLastRunStatus
 Get-HybridDeviceTaggerPasswordRotationStatus
-Get-HybridDeviceTaggerTrace
-Add-HybridDeviceTaggerRule -Rule $rule -WhatIf
+$trace = @(Get-HybridDeviceTaggerTrace)
+```
+
+`Get-HybridDeviceTaggerTrace` displays each event as one logical `<time>,<severity>,<phase>,<status>,<action>,<details>` line while emitting complete `HybridDeviceTagger.TraceEvent` objects. Assignment, filtering, property selection, JSON conversion, and CSV export therefore retain all fields. Long details may wrap visually at the terminal width but contain no embedded newline.
+
+Run operational actions directly through the module:
+
+```powershell
 Invoke-HybridDeviceTagging
 Invoke-HybridDeviceTaggerPasswordRotation -Confirm
 ```
 
-The password-rotation command has high confirmation impact and forces a real service-account password change. It bypasses only the configured age threshold; current credential verification, LDAPS, staging, validation, and secret promotion still apply. Immediate operations return their invocation ID and result synchronously. A second invocation of the same operation receives HTTP `409` while the first is running.
-
-`Show-HybridDeviceTaggerApi.ps1` provides three mutually exclusive, read-only operations. It calls only the management REST API and uses the existing Azure CLI sign-in. The production API URL and its non-secret Entra token audience are built-in defaults, so normal use requires only the operation switch:
-
-```powershell
-./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowRules
-./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowLastRunStatus | Format-List
-./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowTrace
-```
-
-`ShowRules` emits one object per effective rule. `ShowLastRunStatus` emits the latest device-tagging run status; `ShowStatus` remains a compatibility alias. `ShowTrace` and `Get-HybridDeviceTaggerTrace` display each event as one logical line in the format `<time>,<severity>,<phase>,<status>,<action>,<details>`. Time uses ISO 8601, details remain compact JSON, and devices in the current AD scope include `machineName` alongside `deviceId`. Long details may wrap visually at the terminal width but contain no newline. The module cmdlet still emits complete `HybridDeviceTagger.TraceEvent` objects, so assignment, filtering, property selection, JSON conversion, and CSV export retain all fields. The active Entra identity must be included in the Function App Easy Auth principal allowlist, but it does not need Azure Resource Manager access. The production OAuth audience is internal to the client because the client ID remains technically required for token acquisition but is not a credential.
-
-For an update, always pass the complete desired rule set. Add an OU by adding an item, change a tag value in its `ExtensionAttributes`, or remove an OU by omitting its item. Preview the current and proposed configuration first:
-
-```powershell
-$taggingRules = @(
-    @{
-        Name = 'Tier 0 workstations'
-        Description = 'Tags privileged administrative workstations.'
-        BaseDn = 'OU=Tier0,OU=Admin'
-        ExtensionAttributes = @{
-            extensionAttribute1 = 'PAW'
-            extensionAttribute2 = 'Tier0'
-        }
-    },
-    @{
-        Name = 'Tier 1 servers'
-        Description = 'Tags server devices as Tier 1.'
-        BaseDn = 'OU=Server'
-        ExtensionAttributes = @{
-            extensionAttribute2 = 'Tier1'
-        }
-    }
-)
-
-./Deployment/Update-TaggingConfiguration.ps1 `
-    -FunctionAppAdministratorAccount 'function.admin@contoso.com' `
-    -SubscriptionId '00000000-0000-0000-0000-000000000000' `
-    -ResourceGroupName 'rg-hybrid-device-tagger-prod' `
-    -FunctionAppName 'func-hybrid-device-tagger-prod' `
-    -TaggingRules $taggingRules `
-    -ShowCurrent `
-    -WhatIf
-```
-
-Remove `-WhatIf` to apply the update. A complete replacement through `TaggingRules` always requires a separate interactive confirmation because omitted rules are deleted. `-Confirm:$false` does not bypass this safeguard. In an approved noninteractive pipeline, add both `-ForceTaggingRulesReplacement` and `-Confirm:$false`. The force switch is accepted only with `TaggingRules`. The signed-in Azure CLI account must match `FunctionAppAdministratorAccount` and needs permission to read and update the Function App configuration and restart the app.
-
-Add one rule while preserving all current named rules. A PowerShell object can be passed through `InputObject`:
-
-```powershell
-$newRule = @{
-    Name = 'Kiosk devices'
-    Description = 'Tags devices located in the kiosk OU.'
-    BaseDn = 'OU=Kiosks,OU=Workstations'
-    ExtensionAttributes = @{ extensionAttribute1 = 'Kiosk' }
-}
-
-./Deployment/Update-TaggingConfiguration.ps1 `
-    -FunctionAppAdministratorAccount 'function.admin@contoso.com' `
-    -SubscriptionId '00000000-0000-0000-0000-000000000000' `
-    -ResourceGroupName 'rg-hybrid-device-tagger-prod' `
-    -FunctionAppName 'func-hybrid-device-tagger-prod' `
-    -AddRule `
-    -InputObject $newRule `
-    -WhatIf
-```
-
-`InputObject` also accepts a JSON object string. It must describe exactly one rule, not an array:
-
-```powershell
-$ruleJson = @'
-{
-  "name": "Kiosk devices",
-  "description": "Tags devices located in the kiosk OU.",
-  "baseDn": "OU=Kiosks,OU=Workstations",
-  "extensionAttributes": { "extensionAttribute1": "Kiosk" }
-}
-'@
-
-./Deployment/Update-TaggingConfiguration.ps1 `
-    <same Azure parameters> `
-    -AddRule `
-    -InputObject $ruleJson `
-    -WhatIf
-```
-
-A single PSObject or JSON string can alternatively be piped into the script:
-
-```powershell
-$newRule | ./Deployment/Update-TaggingConfiguration.ps1 `
-    <same Azure parameters> `
-    -AddRule `
-    -WhatIf
-```
-
-Without `InputObject`, specify the rule fields individually. One rule can assign multiple extension attributes to the same Base DN. Attribute numbers and values are positional pairs. For a new rule, `BaseDn` is required and `RuleDescription` defaults to `Rule <RuleName>`:
-
-```powershell
-./Deployment/Update-TaggingConfiguration.ps1 `
-    <same Azure parameters> `
-    -AddRule `
-    -RuleName 'Kiosk devices' `
-    -RuleDescription 'Tags devices located in the kiosk OU.' `
-    -BaseDn 'OU=Kiosks,OU=Workstations' `
-    -ExtensionAttribute 1, 2 `
-    -Value 'Kiosk', 'Tier1' `
-    -WhatIf
-```
-
-Add membership targets by Object ID, with or without extension attributes:
-
-```powershell
-./Deployment/Update-TaggingConfiguration.ps1 `
-    <same Azure parameters> `
-    -AddRule `
-    -RuleName 'Kiosk devices' `
-    -EntraGroupId $kioskGroupId, $complianceGroupId `
-    -AdministrativeUnitId $kioskAdministrativeUnitId `
-    -WhatIf
-```
-
-When `AddRule` is called interactively without an action, the script prompts for `A` (extension attribute), `G` (Entra group), `U` (administrative unit), or a combination such as `AGU`. It then collects one or more targets of each selected type. `ExtensionAttribute` is always selected by its number from 1 through 15; for example, `-ExtensionAttribute 1,2 -Value 'Kiosk','Tier1'` maps to `extensionAttribute1=Kiosk` and `extensionAttribute2=Tier1`. Numbers must be unique, and both lists must contain the same number of entries. Supplied values are retained, so partially specified calls prompt only for the remainder. Noninteractive CI execution never prompts and requires either `InputObject` or complete action parameters.
-
-With scalar parameters, `AddRule` updates an existing case-insensitive `RuleName` instead of creating a duplicate. When `BaseDn` or `RuleDescription` is omitted, the existing values are retained. Existing extension attributes are also retained; supplied attribute numbers add new assignments or replace the values of those specific attributes. A new rule name still requires `BaseDn`.
-
-Use `-EntraGroupId` and `-AdministrativeUnitId` with Object ID arrays to replace those target sets on a scalar upsert. Omitting either parameter preserves that existing target set. Passing an empty array clears that target type. The Function records managed extension-attribute values and only memberships that HybridDeviceTagger added in its Blob ownership ledger. When a device leaves all configured OUs, or an action no longer applies through any matching rule, the next tagging run clears attributes that still equal their recorded managed value and removes owned group, AU, and RMAU memberships. Manually changed attributes and pre-existing manual memberships are preserved.
-
-Rule names are limited to 1-128 Unicode letters or numbers plus spaces, dots, underscores, hyphens, and parentheses. Base DNs must contain valid `OU=` components with an optional trailing `DC=` part, for example `OU=Tier0,OU=Admin` or `OU=Tier0,OU=Admin,DC=contoso,DC=com`. A domain root such as `DC=contoso,DC=com` is also accepted. LDAP-special characters in component values must be escaped, for example `OU=Tier0\,Privileged,OU=Admin`. The same checks run in the deployment scripts and during Function App startup validation.
-
-Input sizes are bounded before JSON parsing or Azure/LDAP calls. A configuration supports at most 100 rules and 32,768 characters of serialized rule JSON. Each rule permits a 128-character name, 1,024-character description, 2,048-character Base DN, up to 15 extension attributes, 1,024 characters per attribute value, and 50 unique IDs per membership target type. The installer also applies the documented Azure service limits to resource names and tags; AD and Key Vault settings are checked again during Function App startup.
-
-Remove one rule by its case-insensitive unique name:
-
-```powershell
-./Deployment/Update-TaggingConfiguration.ps1 `
-    -FunctionAppAdministratorAccount 'function.admin@contoso.com' `
-    -SubscriptionId '00000000-0000-0000-0000-000000000000' `
-    -ResourceGroupName 'rg-hybrid-device-tagger-prod' `
-    -FunctionAppName 'func-hybrid-device-tagger-prod' `
-    -RemoveRuleName 'Kiosk devices' `
-    -WhatIf
-```
-
-Configurations created before rule names were introduced remain readable with `-ShowCurrent`. Migrate them once by supplying the complete rule set with `-TaggingRules`, including `Name` and `Description` for every rule. Add and remove operations reject legacy unnamed rules so they cannot create a partially migrated configuration.
-
-The updater validates rule syntax but cannot verify that an OU exists in Active Directory. Run the next DeviceTagger invocation and inspect Application Insights after applying a change. Removing a rule, removing an action, or moving a computer outside all configured OUs causes the next tagging run to clean the Entra state recorded as owned by HybridDeviceTagger. Retain the previous `Tagging__RulesJson` printed after a successful update when rollback may be required.
+The password-rotation command has high confirmation impact and forces a real service-account password change. It bypasses only the configured age threshold; current credential verification, LDAPS, staging, validation, and secret promotion still apply. Immediate operations return their invocation ID and result synchronously. A second invocation of the same operation receives HTTP `409` while the first is running. The active Entra identity needs the endpoint's application role but does not require Azure Resource Manager access.
 
 For an interactive account bootstrap, either pass the provisioning credential separately or let the installer prompt for it:
 

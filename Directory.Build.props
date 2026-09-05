@@ -3,7 +3,7 @@
     <VersionMajor Condition="'$(VersionMajor)' == ''">0</VersionMajor>
     <VersionMinor Condition="'$(VersionMinor)' == ''">1</VersionMinor>
     <VersionDate Condition="'$(VersionDate)' == ''">20260905</VersionDate>
-    <VersionCounter Condition="'$(VersionCounter)' == ''">14</VersionCounter>
+    <VersionCounter Condition="'$(VersionCounter)' == ''">15</VersionCounter>
     <Version>$(VersionMajor).$(VersionMinor).$(VersionDate).$(VersionCounter)</Version>
     <InformationalVersion>$(Version)</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>

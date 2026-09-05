@@ -130,6 +130,13 @@ builder.Services.AddSingleton<IOperationStatusStore>(serviceProvider =>
         serviceProvider.GetRequiredService<BlobServiceClient>()
             .GetBlobContainerClient("run-traces"),
         serviceProvider.GetRequiredService<TimeProvider>()));
+builder.Services.AddSingleton<IActiveDirectoryTrustStore>(serviceProvider =>
+    new BlobActiveDirectoryTrustStore(
+        serviceProvider.GetRequiredService<BlobServiceClient>()
+            .GetBlobContainerClient("run-traces")
+            .GetBlobClient(BlobActiveDirectoryTrustStore.BlobName),
+        serviceProvider.GetRequiredService<
+            Microsoft.Extensions.Options.IOptions<ActiveDirectoryOptions>>()));
 builder.Services.AddSingleton<OptionsTaggingRuleProvider>();
 builder.Services.AddSingleton<BlobTaggingConfigurationStore>(serviceProvider =>
     new BlobTaggingConfigurationStore(

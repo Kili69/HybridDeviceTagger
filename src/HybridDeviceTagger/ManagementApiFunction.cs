@@ -23,6 +23,7 @@ public sealed class ManagementApiFunction
     private readonly TaggingConfigurationService _configurationService;
     private readonly IOperationStatusStore _statusStore;
     private readonly IRunTraceReader _traceReader;
+    private readonly IActiveDirectoryTrustStore _trustStore;
     private readonly IDeviceTaggingRunner _deviceTaggingRunner;
     private readonly IPasswordRotationRunner _passwordRotationRunner;
 
@@ -31,12 +32,14 @@ public sealed class ManagementApiFunction
         TaggingConfigurationService configurationService,
         IOperationStatusStore statusStore,
         IRunTraceReader traceReader,
+        IActiveDirectoryTrustStore trustStore,
         IDeviceTaggingRunner deviceTaggingRunner,
         IPasswordRotationRunner passwordRotationRunner)
     {
         _configurationService = configurationService;
         _statusStore = statusStore;
         _traceReader = traceReader;
+        _trustStore = trustStore;
         _deviceTaggingRunner = deviceTaggingRunner;
         _passwordRotationRunner = passwordRotationRunner;
     }
@@ -48,9 +51,9 @@ public sealed class ManagementApiFunction
         HttpRequest request,
         CancellationToken cancellationToken)
     {
-        if (!EasyAuthPrincipalValidator.IsAuthenticated(request))
+        if (Authorize(request, ManagementApiRoles.Reader, ManagementApiRoles.RuleAdministrator) is { } authorizationFailure)
         {
-            return Unauthorized();
+            return authorizationFailure;
         }
 
         return ConfigurationResult(
@@ -65,9 +68,9 @@ public sealed class ManagementApiFunction
         HttpRequest request,
         CancellationToken cancellationToken)
     {
-        if (!EasyAuthPrincipalValidator.IsAuthenticated(request))
+        if (Authorize(request, ManagementApiRoles.RuleAdministrator) is { } authorizationFailure)
         {
-            return Unauthorized();
+            return authorizationFailure;
         }
 
         return await ExecuteConfigurationMutationAsync(
@@ -86,9 +89,9 @@ public sealed class ManagementApiFunction
         string ruleName,
         CancellationToken cancellationToken)
     {
-        if (!EasyAuthPrincipalValidator.IsAuthenticated(request))
+        if (Authorize(request, ManagementApiRoles.RuleAdministrator) is { } authorizationFailure)
         {
-            return Unauthorized();
+            return authorizationFailure;
         }
 
         return await ExecuteConfigurationMutationAsync(request, async () =>
@@ -115,9 +118,9 @@ public sealed class ManagementApiFunction
         string ruleName,
         CancellationToken cancellationToken)
     {
-        if (!EasyAuthPrincipalValidator.IsAuthenticated(request))
+        if (Authorize(request, ManagementApiRoles.RuleAdministrator) is { } authorizationFailure)
         {
-            return Unauthorized();
+            return authorizationFailure;
         }
 
         return await ExecuteConfigurationMutationAsync(
@@ -134,7 +137,12 @@ public sealed class ManagementApiFunction
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/status/device-tagging")]
         HttpRequest request,
         CancellationToken cancellationToken) =>
-        GetStatusAsync(request, OperationNames.DeviceTagging, cancellationToken);
+        GetStatusAsync(
+            request,
+            OperationNames.DeviceTagging,
+            cancellationToken,
+            ManagementApiRoles.Reader,
+            ManagementApiRoles.TaggingOperator);
 
     /// <summary>Gets the latest password-rotation check and actual password-change time.</summary>
     [Function("GetPasswordRotationStatus")]
@@ -142,7 +150,12 @@ public sealed class ManagementApiFunction
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/status/password-rotation")]
         HttpRequest request,
         CancellationToken cancellationToken) =>
-        GetStatusAsync(request, OperationNames.PasswordRotation, cancellationToken);
+        GetStatusAsync(
+            request,
+            OperationNames.PasswordRotation,
+            cancellationToken,
+            ManagementApiRoles.Reader,
+            ManagementApiRoles.PasswordRotationAdministrator);
 
     /// <summary>Immediately runs device tagging.</summary>
     [Function("RunDeviceTagging")]
@@ -151,9 +164,9 @@ public sealed class ManagementApiFunction
         HttpRequest request,
         CancellationToken cancellationToken)
     {
-        if (!EasyAuthPrincipalValidator.IsAuthenticated(request))
+        if (Authorize(request, ManagementApiRoles.TaggingOperator) is { } authorizationFailure)
         {
-            return Unauthorized();
+            return authorizationFailure;
         }
 
         var invocationId = Guid.NewGuid().ToString("D");
@@ -169,9 +182,9 @@ public sealed class ManagementApiFunction
         HttpRequest request,
         CancellationToken cancellationToken)
     {
-        if (!EasyAuthPrincipalValidator.IsAuthenticated(request))
+        if (Authorize(request, ManagementApiRoles.PasswordRotationAdministrator) is { } authorizationFailure)
         {
-            return Unauthorized();
+            return authorizationFailure;
         }
 
         var invocationId = Guid.NewGuid().ToString("D");
@@ -187,9 +200,9 @@ public sealed class ManagementApiFunction
         HttpRequest request,
         CancellationToken cancellationToken)
     {
-        if (!EasyAuthPrincipalValidator.IsAuthenticated(request))
+        if (Authorize(request, ManagementApiRoles.Reader, ManagementApiRoles.TaggingOperator) is { } authorizationFailure)
         {
-            return Unauthorized();
+            return authorizationFailure;
         }
 
         var trace = await _traceReader.OpenLatestAsync(cancellationToken);
@@ -201,14 +214,95 @@ public sealed class ManagementApiFunction
             };
     }
 
+    /// <summary>Gets metadata for the effective Active Directory LDAPS trust certificates.</summary>
+    [Function("GetTrustedCertificates")]
+    public async Task<IActionResult> GetTrustedCertificatesAsync(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/trusted-certificates")]
+        HttpRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (Authorize(
+            request,
+            ManagementApiRoles.Reader,
+            ManagementApiRoles.CertificateAdministrator) is { } authorizationFailure)
+        {
+            return authorizationFailure;
+        }
+
+        return TrustedCertificateResult(
+            request,
+            await _trustStore.GetSnapshotAsync(cancellationToken));
+    }
+
+    /// <summary>Adds one public Active Directory LDAPS trust certificate.</summary>
+    [Function("AddTrustedCertificate")]
+    public async Task<IActionResult> AddTrustedCertificateAsync(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/trusted-certificates")]
+        HttpRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (Authorize(request, ManagementApiRoles.CertificateAdministrator) is { } authorizationFailure)
+        {
+            return authorizationFailure;
+        }
+
+        return await ExecuteTrustedCertificateMutationAsync(request, async () =>
+        {
+            var input = await ReadJsonAsync<AddTrustedCertificateRequest>(request, cancellationToken);
+            if (string.IsNullOrWhiteSpace(input.Certificate))
+            {
+                throw new TrustedCertificateValidationException(
+                    "Certificate must contain base64-encoded DER or PEM data.");
+            }
+            byte[] certificateBytes;
+            try
+            {
+                certificateBytes = Convert.FromBase64String(input.Certificate);
+            }
+            catch (FormatException exception)
+            {
+                throw new TrustedCertificateValidationException(
+                    "Certificate must be a base64-encoded DER or PEM X.509 certificate.",
+                    exception);
+            }
+
+            return await _trustStore.AddAsync(
+                certificateBytes,
+                GetExpectedETag(request),
+                cancellationToken);
+        });
+    }
+
+    /// <summary>Removes one Active Directory LDAPS trust certificate.</summary>
+    [Function("RemoveTrustedCertificate")]
+    public async Task<IActionResult> RemoveTrustedCertificateAsync(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "management/trusted-certificates/{thumbprint}")]
+        HttpRequest request,
+        string thumbprint,
+        CancellationToken cancellationToken)
+    {
+        if (Authorize(request, ManagementApiRoles.CertificateAdministrator) is { } authorizationFailure)
+        {
+            return authorizationFailure;
+        }
+
+        return await ExecuteTrustedCertificateMutationAsync(
+            request,
+            () => _trustStore.RemoveAsync(
+                thumbprint,
+                GetExpectedETag(request),
+                cancellationToken));
+    }
+
     private async Task<IActionResult> GetStatusAsync(
         HttpRequest request,
         string operation,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        params string[] requiredRoles)
     {
-        if (!EasyAuthPrincipalValidator.IsAuthenticated(request))
+        if (Authorize(request, requiredRoles) is { } authorizationFailure)
         {
-            return Unauthorized();
+            return authorizationFailure;
         }
 
         var status = await _statusStore.GetAsync(operation, cancellationToken);
@@ -276,6 +370,43 @@ public sealed class ManagementApiFunction
         }
     }
 
+    private async Task<IActionResult> ExecuteTrustedCertificateMutationAsync(
+        HttpRequest request,
+        Func<Task<TrustedCertificateSnapshot>> mutation)
+    {
+        try
+        {
+            return TrustedCertificateResult(request, await mutation());
+        }
+        catch (TrustedCertificateValidationException exception)
+        {
+            return new BadRequestObjectResult(new { error = exception.Message });
+        }
+        catch (JsonException exception)
+        {
+            return new BadRequestObjectResult(new
+            {
+                error = "The request body is not valid JSON.",
+                detail = exception.Message
+            });
+        }
+        catch (RequestBodyTooLargeException)
+        {
+            return new ObjectResult(new { error = $"The request body cannot exceed {MaximumRequestBytes} bytes." })
+            {
+                StatusCode = StatusCodes.Status413PayloadTooLarge
+            };
+        }
+        catch (TrustedCertificateConflictException exception)
+        {
+            return new ConflictObjectResult(new { error = exception.Message });
+        }
+        catch (KeyNotFoundException exception)
+        {
+            return new NotFoundObjectResult(new { error = exception.Message });
+        }
+    }
+
     private static IActionResult ConfigurationResult(
         HttpRequest request,
         TaggingConfigurationSnapshot snapshot)
@@ -288,6 +419,24 @@ public sealed class ManagementApiFunction
         return new OkObjectResult(new
         {
             snapshot.Rules,
+            snapshot.ETag,
+            snapshot.LastModifiedUtc,
+            snapshot.Source
+        });
+    }
+
+    private static IActionResult TrustedCertificateResult(
+        HttpRequest request,
+        TrustedCertificateSnapshot snapshot)
+    {
+        if (snapshot.ETag is not null)
+        {
+            request.HttpContext.Response.Headers.ETag = snapshot.ETag;
+        }
+
+        return new OkObjectResult(new
+        {
+            snapshot.Certificates,
             snapshot.ETag,
             snapshot.LastModifiedUtc,
             snapshot.Source
@@ -330,6 +479,20 @@ public sealed class ManagementApiFunction
     private static UnauthorizedObjectResult Unauthorized() =>
         new(new { error = "Microsoft Entra authentication is required." });
 
+    private static ObjectResult Forbidden() =>
+        new(new { error = "The authenticated principal lacks the required management API role." })
+        {
+            StatusCode = StatusCodes.Status403Forbidden
+        };
+
+    private static IActionResult? Authorize(HttpRequest request, params string[] requiredRoles) =>
+        EasyAuthPrincipalValidator.Authorize(request, requiredRoles) switch
+        {
+            EasyAuthAuthorizationResult.Authorized => null,
+            EasyAuthAuthorizationResult.Forbidden => Forbidden(),
+            _ => Unauthorized()
+        };
+
     private static string? GetExpectedETag(HttpRequest request)
     {
         var values = request.Headers.IfMatch;
@@ -343,4 +506,6 @@ public sealed class ManagementApiFunction
     }
 
     private sealed class RequestBodyTooLargeException : Exception;
+
+    private sealed record AddTrustedCertificateRequest(string Certificate);
 }

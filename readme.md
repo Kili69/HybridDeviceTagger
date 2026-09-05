@@ -76,15 +76,9 @@ Jede konkrete OU wird mit LDAP `SearchScope.Subtree` durchsucht und erfasst dami
 
 ## Tagging-Regeln nach der Installation ändern
 
-Mit `Deployment/Update-TaggingConfiguration.ps1` lässt sich der vollständige gewünschte Regelsatz einer bestehenden Function App aktualisieren, ohne Infrastruktur oder Anwendungscode erneut bereitzustellen. `-ShowCurrent` zeigt die aktuelle Konfiguration auch ohne `-TaggingRules` an. `-AddRule` akzeptiert eine Regel als PSObject oder JSON über `-InputObject`, ein einzelnes Pipelineobjekt oder die Parameter `RuleName`, `BaseDn`, `ExtensionAttribute` und `Value`; `RuleDescription` ist optional. Bei `-ShowCurrent`, `-AddRule` und `-RemoveRuleName` bleibt die lesbare Host-Anzeige erhalten und zusätzlich wird genau ein strukturiertes Konfigurationsobjekt ausgegeben. Bei `-WhatIf` enthält es den tatsächlich gespeicherten Iststand, nach einer erfolgreichen Änderung den neuen Stand. Das Skript validiert neue Regeln und schreibt sie atomar mit ETag-Schutz über die Entra-authentifizierte REST API in Blob Storage; ein Function-App-Neustart ist nicht erforderlich. Beispiele für Anzeigen, Hinzufügen, Ändern und Entfernen stehen in der [Installationsanleitung](Deployment/README.md#updating-tagging-rules-after-installation).
+Das PowerShell-Modul `Deployment/HybridDeviceTagger.Management` liest und ändert Regeln direkt über die Entra-authentifizierte REST API. `Connect-HybridDeviceTagger` verwendet die bestehende Anmeldung von `az login` und hält API-URI sowie Token für nachfolgende Cmdlets. `Get-HybridDeviceTaggerRule` liest Regeln, `Add-HybridDeviceTaggerRule` fügt eine vollständige Regel hinzu oder ersetzt sie case-insensitiv anhand ihres Namens, und `Remove-HybridDeviceTaggerRule` entfernt eine Regel. `Set-HybridDeviceTaggerRuleConfiguration` ersetzt den vollständigen Regelsatz und hat deshalb eine hohe Bestätigungsstufe. Alle Änderungen unterstützen `-WhatIf` und verwenden ETag-Schutz gegen parallele Schreibzugriffe. Ein Function-App-Neustart ist nicht erforderlich. Beispiele stehen in der [Installationsanleitung](Deployment/README.md#updating-tagging-rules-after-installation).
 
-`-TaggingRules` ersetzt den vollständigen Regelsatz und verlangt deshalb zusätzlich zur normalen PowerShell-Bestätigung eine ausdrückliche Sicherheitsabfrage. `-Confirm:$false` umgeht diese Abfrage nicht. Nichtinteraktive, genehmigte Pipelines müssen `-ForceTaggingRulesReplacement` explizit angeben; `-WhatIf` benötigt keine Bestätigung.
-
-Wird `-AddRule` interaktiv ohne `InputObject` und ohne vollständige Einzelparameter aufgerufen, fragt das Skript die fehlenden Werte direkt im Terminal ab. Die Aktionsauswahl `A`, `G` und `U` erlaubt Extension-Attribute, Gruppen, administrative Einheiten oder Kombinationen davon. Eine Regel kann mehrere Ziele jeder Art enthalten. Nichtinteraktiv werden korrespondierende Listen verwendet, beispielsweise `-ExtensionAttribute 1,2 -Value 'Server','Tier1' -EntraGroupId $groupId -AdministrativeUnitId $auId`. Attributnummern müssen eindeutig zwischen 1 und 15 liegen und beide Attributlisten gleich lang sein. In CI gibt es keine Prompts; dort müssen ein Inputobjekt oder alle Pflichtwerte übergeben werden.
-
-Bei skalaren Parametern aktualisiert `-AddRule` einen bereits vorhandenen, case-insensitiven `RuleName`, statt eine doppelte Regel anzulegen. Ohne `-BaseDn` und `-RuleDescription` bleiben die vorhandenen Werte erhalten. Bestehende Extension-Attribute bleiben ebenfalls bestehen; angegebene Nummern werden ergänzt oder gezielt überschrieben. Nur ein neuer Regelname benötigt zwingend einen Base DN.
-
-Mit `-EntraGroupId` und `-AdministrativeUnitId` lassen sich jeweils bis zu 50 eindeutige Object IDs setzen. Bei einem vorhandenen Regelname bleiben nicht angegebene Zielarten unverändert; eine ausdrücklich angegebene Liste ersetzt die bisherige Liste dieser Zielart. Eine leere Liste entfernt alle Ziele dieser Art und löst im nächsten Lauf nur für vom Tagger selbst erzeugte Mitgliedschaften eine Entfernung aus.
+Alle öffentlichen Modul-Cmdlets enthalten integrierte Beschreibungen für Parameter, Ausgaben und Beispiele, beispielsweise `Get-Help Add-HybridDeviceTaggerRule -Full` oder `Get-Help Get-HybridDeviceTaggerTrace -Examples`.
 
 Regelnamen dürfen 1 bis 128 Unicode-Buchstaben oder Ziffern sowie Leerzeichen, Punkte, Unterstriche, Bindestriche und Klammern enthalten. Ein Base DN besteht aus gültigen `OU=`-Komponenten und optional einem nachfolgenden `DC=`-Teil; auch ein reiner Domain-DN ist zulässig. Sonderzeichen in DN-Werten müssen LDAP-konform maskiert werden. Deployment-Skripte und Function-Startup prüfen dieselben Regeln.
 
@@ -94,19 +88,24 @@ Entfernte Regeln oder geänderte Tagwerte wirken nur auf künftige Synchronisier
 
 ## Management REST API
 
-Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unter `/api/management` bereit. App Service Easy Auth lehnt nicht authentifizierte Aufrufe mit HTTP `401` ab und akzeptiert nur die bei der Installation explizit angegebenen Benutzer- oder Service-Principal-Objekt-IDs. Zusätzlich validiert die Function den von Easy Auth erzeugten Principal Header. Es werden keine Function Keys oder Client Secrets benötigt.
+Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unter `/api/management` bereit. App Service Easy Auth lehnt nicht authentifizierte Aufrufe mit HTTP `401` ab. Die Function validiert zusätzlich den Principal Header und antwortet mit HTTP `403`, wenn keine für den Endpunkt zugelassene Entra-Anwendungsrolle enthalten ist. Für die Enterprise Application ist **Assignment required** aktiviert; zugelassen werden gezielt zugewiesene Benutzer, Sicherheitsgruppen oder Service Principals. Azure-Subscription-Rollen berechtigen nicht zum Aufruf dieser API. Es werden keine Function Keys oder Client Secrets benötigt.
 
-| Methode und Pfad | Funktion |
-| --- | --- |
-| `GET /api/management/tagging-rules` | Aktuelle Regeln, ETag, Änderungszeit und Quelle lesen |
-| `PUT /api/management/tagging-rules` | Den vollständigen validierten Regelsatz ersetzen |
-| `PUT /api/management/tagging-rules/{ruleName}` | Eine vollständige Regel hinzufügen oder case-insensitiv ersetzen |
-| `DELETE /api/management/tagging-rules/{ruleName}` | Eine Regel entfernen; mindestens eine Regel muss verbleiben |
-| `GET /api/management/status/device-tagging` | Status und Ergebniszähler des letzten Tagging-Laufs lesen |
-| `GET /api/management/status/password-rotation` | Status des letzten Checks und Zeitpunkt des letzten tatsächlichen Kennwortwechsels lesen |
-| `GET /api/management/traces/device-tagging/latest` | Letzten JSONL-Trace als Download abrufen |
-| `POST /api/management/actions/device-tagging` | Einen Tagging-Lauf sofort ausführen |
-| `POST /api/management/actions/password-rotation` | Das AD-Servicekonto-Kennwort sofort und unabhängig vom Alter sicher rotieren |
+| Methode und Pfad | Funktion | Erforderliche Rolle |
+| --- | --- | --- |
+| `GET /api/management/tagging-rules` | Aktuelle Regeln, ETag, Änderungszeit und Quelle lesen | `Reader` oder `RuleAdministrator` |
+| `PUT /api/management/tagging-rules` | Den vollständigen validierten Regelsatz ersetzen | `RuleAdministrator` |
+| `PUT /api/management/tagging-rules/{ruleName}` | Eine vollständige Regel hinzufügen oder case-insensitiv ersetzen | `RuleAdministrator` |
+| `DELETE /api/management/tagging-rules/{ruleName}` | Eine Regel entfernen; mindestens eine Regel muss verbleiben | `RuleAdministrator` |
+| `GET /api/management/status/device-tagging` | Status und Ergebniszähler des letzten Tagging-Laufs lesen | `Reader` oder `TaggingOperator` |
+| `GET /api/management/status/password-rotation` | Status des letzten Checks und Zeitpunkt des letzten tatsächlichen Kennwortwechsels lesen | `Reader` oder `PasswordRotationAdministrator` |
+| `GET /api/management/traces/device-tagging/latest` | Letzten JSONL-Trace als Download abrufen | `Reader` oder `TaggingOperator` |
+| `POST /api/management/actions/device-tagging` | Einen Tagging-Lauf sofort ausführen | `TaggingOperator` |
+| `POST /api/management/actions/password-rotation` | Das AD-Servicekonto-Kennwort sofort und unabhängig vom Alter sicher rotieren | `PasswordRotationAdministrator` |
+| `GET /api/management/trusted-certificates` | Metadaten der aktuellen LDAPS-Vertrauenszertifikate lesen | `Reader` oder `CertificateAdministrator` |
+| `POST /api/management/trusted-certificates` | Ein öffentliches DER-/PEM-Zertifikat hinzufügen | `CertificateAdministrator` |
+| `DELETE /api/management/trusted-certificates/{thumbprint}` | Ein Zertifikat entfernen; mindestens eines muss verbleiben | `CertificateAdministrator` |
+
+Die vollständigen Rollenwerte beginnen jeweils mit `HybridDeviceTagger.`, beispielsweise `HybridDeviceTagger.Reader`. Der Installer weist die bisherige Bootstrap-Liste standardmäßig allen fünf Rollen zu; für Least Privilege stehen fünf rollenbezogene Principal-Parameter zur Verfügung. Sicherheitsgruppen sind für die laufende Administration vorzuziehen.
 
 Die API speichert dynamische Regeln als `tagging-configuration.json` im privaten Container `run-traces`. Solange die API noch keine Änderung gespeichert hat, verwendet sie `Tagging__RulesJson` als Fallback. Jeder Tagging-Lauf liest zu Beginn genau einen aktuellen Snapshot; ein Function-Restart ist nach Änderungen nicht erforderlich. ETags verhindern, dass parallele Änderungen unbemerkt überschrieben werden. Die vollständige OpenAPI-3.0-Spezifikation steht in [docs/management-api.openapi.yaml](docs/management-api.openapi.yaml).
 
@@ -120,21 +119,25 @@ Get-HybridDeviceTaggerLastRunStatus
 Add-HybridDeviceTaggerRule -Rule $rule -WhatIf
 Invoke-HybridDeviceTagging
 Invoke-HybridDeviceTaggerPasswordRotation -Confirm
+Get-HybridDeviceTaggerTrustedCertificate
+Add-HybridDeviceTaggerTrustedCertificate -Path ./contoso-root-ca.cer
+Remove-HybridDeviceTaggerTrustedCertificate -CertificateThumbprint $oldThumbprint -Confirm
 ```
 
 `Invoke-HybridDeviceTaggerPasswordRotation` umgeht ausschließlich die Altersprüfung. Aktueller Bind, LDAPS, Staging, Validierung und Promotion bleiben verpflichtend. Beide Aktionen laufen synchron, schreiben denselben Status wie die Timer und antworten mit HTTP `409`, wenn die jeweilige Operation bereits läuft.
 
-Für die drei häufigsten Leseoperationen steht `Deployment/Show-HybridDeviceTaggerApi.ps1` bereit. Das Skript verwendet ausschließlich die REST API und die bestehende Anmeldung von `az login`. Die produktive API-URL und ihre nicht geheime Client-ID sind als Standardwerte hinterlegt. Eine Subscription ID, Resource Group, ARM-Berechtigung oder weitere Eingabe ist nicht erforderlich:
+Die Leseoperationen stehen direkt im Modul zur Verfügung:
 
 ```powershell
-./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowRules
-./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowLastRunStatus | Format-List
-./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowTrace
+Get-HybridDeviceTaggerRule
+Get-HybridDeviceTaggerLastRunStatus | Format-List
+Get-HybridDeviceTaggerPasswordRotationStatus | Format-List
+Get-HybridDeviceTaggerTrace
 ```
 
-`ShowTrace` gibt jedes Trace-Ereignis als eine logische Zeile im Format `<Zeit>,<Severity>,<Phase>,<Status>,<Action>,<Details>` aus. Der Zeitstempel verwendet ISO 8601 und `Details` bleibt kompaktes JSON. Für Geräte im aktuellen AD-Scope enthalten die Details neben `deviceId` auch `machineName`. Sehr lange Details können abhängig von der Terminalbreite optisch umbrochen werden, enthalten technisch aber keinen Zeilenumbruch. Die Client-ID ist fest im Produktionsclient hinterlegt: Sie ist kein Kennwort oder Secret, wird von Azure CLI aber intern als Audience des Zugriffstokens benötigt.
+`Get-HybridDeviceTaggerTrace` zeigt jedes Trace-Ereignis als eine logische Zeile im Format `<Zeit>,<Severity>,<Phase>,<Status>,<Action>,<Details>` an, liefert in der Pipeline aber vollständige `HybridDeviceTagger.TraceEvent`-Objekte. Dadurch funktionieren beispielsweise Zuweisung, `Where-Object`, `Select-Object`, `ConvertTo-Json` und `Export-Csv` ohne Informationsverlust.
 
-`Get-HybridDeviceTaggerTrace` verwendet dieselbe lesbare Standarddarstellung, liefert in der Pipeline aber weiterhin vollständige `HybridDeviceTagger.TraceEvent`-Objekte. Dadurch funktionieren beispielsweise `$trace = @(Get-HybridDeviceTaggerTrace)`, `Where-Object`, `Select-Object`, `ConvertTo-Json` und `Export-Csv` ohne Informationsverlust.
+Die Zertifikatsverwaltung speichert ausschließlich öffentliche DER-Daten im privaten Blob `run-traces/active-directory-trust-certificates.json`. Bis zur ersten API-Änderung dient das bei der Installation paketierte Zertifikat als Fallback. Jede neue LDAP-Verbindung verwendet den aktuellen Satz; doppelte Ergänzungen sind idempotent, parallele Änderungen ETag-geschützt und das Löschen des letzten Trust-Ankers ist gesperrt.
 
 Ein Bearer-Token muss als Audience die konfigurierte API-App-ID oder `api://<client-id>` besitzen:
 
