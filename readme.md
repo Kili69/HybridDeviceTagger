@@ -107,6 +107,79 @@ Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unt
 
 Die vollständigen Rollenwerte beginnen jeweils mit `HybridDeviceTagger.`, beispielsweise `HybridDeviceTagger.Reader`. Der Installer weist die bisherige Bootstrap-Liste standardmäßig allen fünf Rollen zu; für Least Privilege stehen fünf rollenbezogene Principal-Parameter zur Verfügung. Sicherheitsgruppen sind für die laufende Administration vorzuziehen.
 
+### API-Rollen nach der Installation verwalten
+
+Für Benutzer und Sicherheitsgruppen können Rollen im Entra Admin Center zugewiesen werden:
+
+1. **Identität** > **Anwendungen** > **Unternehmensanwendungen** öffnen.
+2. Die Enterprise Application der HybridDeviceTagger Management API auswählen.
+3. **Benutzer und Gruppen** > **Benutzer/Gruppe hinzufügen** wählen.
+4. Benutzer oder Sicherheitsgruppe und anschließend genau die benötigte Rolle auswählen.
+5. Die Zuweisung bestätigen. Mehrere Rollen werden als einzelne Zuweisungen angelegt.
+
+Für skriptbare Verwaltung und Service Principals kann Microsoft Graph PowerShell verwendet werden. Die ausführende Entra-Identität benötigt eine Rolle wie `Privileged Role Administrator` und muss den angeforderten Graph-Berechtigungen zustimmen können:
+
+```powershell
+Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
+Connect-MgGraph -Scopes 'Application.Read.All', 'AppRoleAssignment.ReadWrite.All'
+
+$apiClientId = '5e324803-5aed-4e5d-b49f-a4bfceddcda8'
+$principalObjectId = '<Objekt-ID des Benutzers, der Gruppe oder des Service Principals>'
+$roleValue = 'HybridDeviceTagger.CertificateAdministrator'
+
+$api = Invoke-MgGraphRequest -Method GET -Uri (
+	"https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$apiClientId'&`$select=id,appRoles"
+)
+$apiServicePrincipal = @($api.value)[0]
+$appRole = @($apiServicePrincipal.appRoles | Where-Object value -eq $roleValue)[0]
+
+$assignmentUri = "https://graph.microsoft.com/v1.0/servicePrincipals/$($apiServicePrincipal.id)/appRoleAssignedTo"
+$assignments = @(Invoke-MgGraphRequest -Method GET -Uri $assignmentUri).value
+$assignment = @($assignments | Where-Object {
+	$_.principalId -eq $principalObjectId -and $_.appRoleId -eq $appRole.id
+})[0]
+
+if (-not $assignment) {
+	$assignment = Invoke-MgGraphRequest -Method POST -Uri $assignmentUri -Body (@{
+		principalId = $principalObjectId
+		resourceId = $apiServicePrincipal.id
+		appRoleId = $appRole.id
+	} | ConvertTo-Json)
+}
+```
+
+Vorhandene Zuweisungen anzeigen und eine konkrete Zuweisung wieder entfernen:
+
+```powershell
+$assignments = @(Invoke-MgGraphRequest -Method GET -Uri $assignmentUri).value
+
+$assignments |
+	Where-Object principalId -eq $principalObjectId |
+	Select-Object id, principalDisplayName, principalType, appRoleId
+
+$assignmentToRemove = @($assignments | Where-Object {
+	$_.principalId -eq $principalObjectId -and $_.appRoleId -eq $appRole.id
+})[0]
+if (-not $assignmentToRemove) {
+	throw "The selected principal does not have role '$roleValue'."
+}
+
+Invoke-MgGraphRequest -Method DELETE -Uri (
+	"$assignmentUri/$($assignmentToRemove.id)"
+)
+```
+
+Nach einer Rollenänderung muss ein bereits ausgestelltes Zugriffstoken erneuert werden. Für das Management-Modul dazu die Verbindung neu aufbauen; bei einem weiterhin zwischengespeicherten Azure-CLI-Token ist eine erneute Anmeldung erforderlich:
+
+```powershell
+Disconnect-MgGraph
+az logout
+az login --tenant d89a354d-2bce-44ed-b802-8f8600689247
+Connect-HybridDeviceTagger
+```
+
+`Assignment required` muss auf der Enterprise Application aktiviert bleiben. Azure-RBAC-Rollen auf Subscription oder Resource Group ersetzen keine dieser API-Anwendungsrollen.
+
 Die API speichert dynamische Regeln als `tagging-configuration.json` im privaten Container `run-traces`. Solange die API noch keine Änderung gespeichert hat, verwendet sie `Tagging__RulesJson` als Fallback. Jeder Tagging-Lauf liest zu Beginn genau einen aktuellen Snapshot; ein Function-Restart ist nach Änderungen nicht erforderlich. ETags verhindern, dass parallele Änderungen unbemerkt überschrieben werden. Die vollständige OpenAPI-3.0-Spezifikation steht in [docs/management-api.openapi.yaml](docs/management-api.openapi.yaml).
 
 Das Modul `Deployment/HybridDeviceTagger.Management` hält die mit `Connect-HybridDeviceTagger` aufgebaute REST-Verbindung für nachfolgende Cmdlets. Es verwendet die bestehende Anmeldung von `az login`; Subscription, Resource Group und ARM-Abfragen sind nicht erforderlich:

@@ -4,6 +4,13 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260905.16] - 2026-09-05
+
+### Added
+
+- Document post-deployment management API role assignment, listing, and removal for users, security groups, and service principals through the Entra admin center and Microsoft Graph PowerShell.
+- Document token renewal after role changes and the distinction between API application roles and Azure RBAC.
+
 ## [0.1.20260905.15] - 2026-09-05
 
 ### Added

@@ -29,6 +29,64 @@ The management REST API additionally requires a single-tenant Entra app registra
 | `HybridDeviceTagger.PasswordRotationAdministrator` | Read rotation status and force password rotation |
 | `HybridDeviceTagger.CertificateAdministrator` | Read, add, and remove Active Directory LDAPS trust certificates |
 
+### Managing API role assignments after deployment
+
+For users and security groups, open **Microsoft Entra admin center** > **Enterprise applications** > the HybridDeviceTagger management API > **Users and groups** > **Add user/group**. Select the principal and one role, then repeat for each additional role. Use security groups for ongoing administration where practical.
+
+Microsoft Graph PowerShell supports users, security groups, and service principals. The signed-in Entra administrator needs sufficient directory privileges, such as `Privileged Role Administrator`, and consent for the requested Graph scopes:
+
+```powershell
+Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
+Connect-MgGraph -Scopes 'Application.Read.All', 'AppRoleAssignment.ReadWrite.All'
+
+$apiClientId = '5e324803-5aed-4e5d-b49f-a4bfceddcda8'
+$principalObjectId = '<user, group, or service-principal object ID>'
+$roleValue = 'HybridDeviceTagger.CertificateAdministrator'
+
+$api = Invoke-MgGraphRequest -Method GET -Uri (
+    "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$apiClientId'&`$select=id,appRoles"
+)
+$apiServicePrincipal = @($api.value)[0]
+$appRole = @($apiServicePrincipal.appRoles | Where-Object value -eq $roleValue)[0]
+
+$assignmentUri = "https://graph.microsoft.com/v1.0/servicePrincipals/$($apiServicePrincipal.id)/appRoleAssignedTo"
+$assignments = @(Invoke-MgGraphRequest -Method GET -Uri $assignmentUri).value
+$assignment = @($assignments | Where-Object {
+    $_.principalId -eq $principalObjectId -and $_.appRoleId -eq $appRole.id
+})[0]
+
+if (-not $assignment) {
+    $assignment = Invoke-MgGraphRequest -Method POST -Uri $assignmentUri -Body (@{
+        principalId = $principalObjectId
+        resourceId = $apiServicePrincipal.id
+        appRoleId = $appRole.id
+    } | ConvertTo-Json)
+}
+```
+
+List assignments for a principal and remove the assignment returned by the preceding command:
+
+```powershell
+$assignments = @(Invoke-MgGraphRequest -Method GET -Uri $assignmentUri).value
+
+$assignments |
+    Where-Object principalId -eq $principalObjectId |
+    Select-Object id, principalDisplayName, principalType, appRoleId
+
+$assignmentToRemove = @($assignments | Where-Object {
+    $_.principalId -eq $principalObjectId -and $_.appRoleId -eq $appRole.id
+})[0]
+if (-not $assignmentToRemove) {
+    throw "The selected principal does not have role '$roleValue'."
+}
+
+Invoke-MgGraphRequest -Method DELETE -Uri (
+    "$assignmentUri/$($assignmentToRemove.id)"
+)
+```
+
+Acquire a new management API token after changing assignments. Reconnect the module and, if Azure CLI still returns a cached token, sign in again. Keep **Assignment required** enabled; Azure subscription or resource-group RBAC does not replace these API application roles.
+
 The Azure installation user also needs read access to the current Key Vault secret metadata. The signed-in identity used by Azure CLI must be able to read Microsoft Graph service principals. Assigning `Device.ReadWrite.All` requires an appropriately privileged Entra administrator; Azure subscription roles such as `Owner` do not grant this Entra permission.
 
 After deployment, Bicep grants the Function App's system-assigned managed identity:
