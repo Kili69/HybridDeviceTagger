@@ -4,6 +4,12 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260905.1] - 2026-09-05
+
+### Fixed
+
+- Resolve the managed-identity storage account setting through the normalized .NET configuration key so tagging runs and latest-run trace writes can access Azure Blob Storage.
+
 ## [0.1.20260904.3] - 2026-09-04
 
 ### Added

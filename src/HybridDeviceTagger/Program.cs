@@ -98,7 +98,7 @@ builder.Services.AddSingleton(serviceProvider =>
         return new BlobServiceClient(connectionString);
     }
 
-    var accountName = builder.Configuration["AzureWebJobsStorage__accountName"];
+    var accountName = builder.Configuration["AzureWebJobsStorage:accountName"];
     if (string.IsNullOrWhiteSpace(accountName))
     {
         throw new InvalidOperationException(
