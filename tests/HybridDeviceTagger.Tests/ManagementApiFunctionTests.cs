@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using HybridDeviceTagger.Models;
 using HybridDeviceTagger.Options;
 using HybridDeviceTagger.Services;
@@ -9,6 +10,25 @@ namespace HybridDeviceTagger.Tests;
 
 public sealed class ManagementApiFunctionTests
 {
+    [Fact]
+    public void OperationRunStatus_SerializesStateAsReadableName()
+    {
+        var status = new OperationRunStatus(
+            OperationNames.DeviceTagging,
+            "invocation",
+            OperationRunState.Succeeded,
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            null,
+            null,
+            null,
+            null);
+
+        var json = JsonSerializer.Serialize(status, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.Contains("\"state\":\"Succeeded\"", json, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task GetTaggingConfigurationAsync_RejectsMissingEasyAuthPrincipal()
     {

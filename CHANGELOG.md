@@ -4,6 +4,12 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260905.4] - 2026-09-05
+
+### Fixed
+
+- Serialize management API operation states as readable `Running`, `Succeeded`, and `Failed` values while continuing to read status Blobs written with numeric enum values.
+
 ## [0.1.20260905.3] - 2026-09-05
 
 ### Fixed
