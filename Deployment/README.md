@@ -136,7 +136,7 @@ An empty interactive required value or an unsuitable interactively selected FC1 
 
 ## Updating tagging rules after installation
 
-Use `Update-TaggingConfiguration.ps1` to change OU actions for an existing Function App, including extension attributes, Entra security groups, and administrative units. The script does not run Bicep or deploy application code. It validates the rule structure, replaces the single `Tagging__RulesJson` app setting atomically, and restarts the Function App so the new configuration is loaded.
+Use `Update-TaggingConfiguration.ps1` to change OU actions for an existing Function App, including extension attributes, Entra security groups, and administrative units. The script does not run Bicep or deploy application code. It validates the rule structure and writes the complete configuration through the Entra-authenticated management API with ETag concurrency protection. The rules become effective without restarting the Function App.
 
 Display the current configuration without changing it:
 
@@ -161,6 +161,26 @@ $configuration.RulesJson
 ```
 
 The object contains `FunctionAppName`, `ResourceGroupName`, `Rules`, `RulesJson`, and `IsValid`. `Rules` is always an array. For `WhatIf`, the returned object represents the configuration currently persisted in Azure, not the unapplied proposal. After a successful add or remove, it represents the newly persisted configuration.
+
+## Reading management API data
+
+`Show-HybridDeviceTaggerApi.ps1` provides three mutually exclusive, read-only operations. It obtains an Entra token from the active Azure CLI session and emits structured PowerShell objects:
+
+```powershell
+$common = @{
+    FunctionAppAdministratorAccount = 'function.admin@contoso.com'
+    SubscriptionId = '00000000-0000-0000-0000-000000000000'
+    ResourceGroupName = 'rg-hybrid-device-tagger-prod'
+    FunctionAppName = 'func-hybrid-device-tagger-prod'
+}
+
+./Deployment/Show-HybridDeviceTaggerApi.ps1 @common -ShowRules
+./Deployment/Show-HybridDeviceTaggerApi.ps1 @common -ShowStatus | Format-List
+./Deployment/Show-HybridDeviceTaggerApi.ps1 @common -ShowTrace |
+    Format-Table timestampUtc, level, phase, action, outcome
+```
+
+`ShowRules` emits one object per effective rule. `ShowStatus` emits the latest device-tagging status. `ShowTrace` parses the latest JSONL trace and emits one object per trace event. The active Entra identity must be included in the Function App Easy Auth principal allowlist.
 
 For an update, always pass the complete desired rule set. Add an OU by adding an item, change a tag value in its `ExtensionAttributes`, or remove an OU by omitting its item. Preview the current and proposed configuration first:
 

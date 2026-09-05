@@ -4,6 +4,16 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260905.5] - 2026-09-05
+
+### Added
+
+- Add `Show-HybridDeviceTaggerApi.ps1` for displaying current rules, the latest device-tagging status, and parsed latest-run trace events through the Entra-authenticated REST API.
+
+### Changed
+
+- Update operational documentation to describe Blob-backed rule changes without Function App restarts and include examples for all read-only API client modes.
+
 ## [0.1.20260905.4] - 2026-09-05
 
 ### Fixed

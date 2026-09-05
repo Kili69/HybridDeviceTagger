@@ -76,7 +76,7 @@ Jede konkrete OU wird mit LDAP `SearchScope.Subtree` durchsucht und erfasst dami
 
 ## Tagging-Regeln nach der Installation ändern
 
-Mit `Deployment/Update-TaggingConfiguration.ps1` lässt sich der vollständige gewünschte Regelsatz einer bestehenden Function App aktualisieren, ohne Infrastruktur oder Anwendungscode erneut bereitzustellen. `-ShowCurrent` zeigt die aktuelle Konfiguration auch ohne `-TaggingRules` an. `-AddRule` akzeptiert eine Regel als PSObject oder JSON über `-InputObject`, ein einzelnes Pipelineobjekt oder die Parameter `RuleName`, `BaseDn`, `ExtensionAttribute` und `Value`; `RuleDescription` ist optional. Bei `-ShowCurrent`, `-AddRule` und `-RemoveRuleName` bleibt die lesbare Host-Anzeige erhalten und zusätzlich wird genau ein strukturiertes Konfigurationsobjekt ausgegeben. Bei `-WhatIf` enthält es den tatsächlich gespeicherten Iststand, nach einer erfolgreichen Änderung den neuen Stand. Das Skript validiert neue Regeln, ersetzt atomar nur `Tagging__RulesJson` und startet die Function App neu. Beispiele für Anzeigen, Hinzufügen, Ändern und Entfernen stehen in der [Installationsanleitung](Deployment/README.md#updating-tagging-rules-after-installation).
+Mit `Deployment/Update-TaggingConfiguration.ps1` lässt sich der vollständige gewünschte Regelsatz einer bestehenden Function App aktualisieren, ohne Infrastruktur oder Anwendungscode erneut bereitzustellen. `-ShowCurrent` zeigt die aktuelle Konfiguration auch ohne `-TaggingRules` an. `-AddRule` akzeptiert eine Regel als PSObject oder JSON über `-InputObject`, ein einzelnes Pipelineobjekt oder die Parameter `RuleName`, `BaseDn`, `ExtensionAttribute` und `Value`; `RuleDescription` ist optional. Bei `-ShowCurrent`, `-AddRule` und `-RemoveRuleName` bleibt die lesbare Host-Anzeige erhalten und zusätzlich wird genau ein strukturiertes Konfigurationsobjekt ausgegeben. Bei `-WhatIf` enthält es den tatsächlich gespeicherten Iststand, nach einer erfolgreichen Änderung den neuen Stand. Das Skript validiert neue Regeln und schreibt sie atomar mit ETag-Schutz über die Entra-authentifizierte REST API in Blob Storage; ein Function-App-Neustart ist nicht erforderlich. Beispiele für Anzeigen, Hinzufügen, Ändern und Entfernen stehen in der [Installationsanleitung](Deployment/README.md#updating-tagging-rules-after-installation).
 
 `-TaggingRules` ersetzt den vollständigen Regelsatz und verlangt deshalb zusätzlich zur normalen PowerShell-Bestätigung eine ausdrückliche Sicherheitsabfrage. `-Confirm:$false` umgeht diese Abfrage nicht. Nichtinteraktive, genehmigte Pipelines müssen `-ForceTaggingRulesReplacement` explizit angeben; `-WhatIf` benötigt keine Bestätigung.
 
@@ -107,6 +107,22 @@ Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unt
 | `GET /api/management/traces/device-tagging/latest` | Letzten JSONL-Trace als Download abrufen |
 
 Die API speichert dynamische Regeln als `tagging-configuration.json` im privaten Container `run-traces`. Solange die API noch keine Änderung gespeichert hat, verwendet sie `Tagging__RulesJson` als Fallback. Jeder Tagging-Lauf liest zu Beginn genau einen aktuellen Snapshot; ein Function-Restart ist nach Änderungen nicht erforderlich. ETags verhindern, dass parallele Änderungen unbemerkt überschrieben werden. Die vollständige OpenAPI-3.0-Spezifikation steht in [docs/management-api.openapi.yaml](docs/management-api.openapi.yaml).
+
+Für die drei häufigsten Leseoperationen steht `Deployment/Show-HybridDeviceTaggerApi.ps1` bereit. Das Skript prüft das aktive Azure-CLI-Konto, ermittelt Audience und Hostname aus der Function App, bezieht ein Entra-Token und gibt pipeline-fähige PowerShell-Objekte aus:
+
+```powershell
+$common = @{
+	FunctionAppAdministratorAccount = 'kili@bloedgelaber.de'
+	SubscriptionId = '23ca129f-1e1c-4a56-bc51-e3ec2c874a73'
+	ResourceGroupName = 'RG-HybridDeviceTagger'
+	FunctionAppName = 'func-hybriddevicetagger'
+}
+
+./Deployment/Show-HybridDeviceTaggerApi.ps1 @common -ShowRules
+./Deployment/Show-HybridDeviceTaggerApi.ps1 @common -ShowStatus | Format-List
+./Deployment/Show-HybridDeviceTaggerApi.ps1 @common -ShowTrace |
+	Format-Table timestampUtc, level, phase, action, outcome
+```
 
 Ein Bearer-Token muss als Audience die konfigurierte API-App-ID oder `api://<client-id>` besitzen:
 
@@ -166,7 +182,7 @@ Die Unit-Tests prüfen Geräteabgleich, Fälligkeit, reguläre Rotation, Recover
 
 ## Versionierung und Autor
 
-Das Projekt verwendet die Produktversion `<major>.<minor>.<yyyyMMdd>.<counter>`, aktuell `0.1.20260905.4`. Der Zähler beginnt für jede Veröffentlichung am selben Datum bei `1` und wird bei weiteren Veröffentlichungen an diesem Tag erhöht. Die zentrale Definition steht in `Directory.Build.props` und wird als Paket- und Informational-Version in die Build-Ausgabe übernommen.
+Das Projekt verwendet die Produktversion `<major>.<minor>.<yyyyMMdd>.<counter>`, aktuell `0.1.20260905.5`. Der Zähler beginnt für jede Veröffentlichung am selben Datum bei `1` und wird bei weiteren Veröffentlichungen an diesem Tag erhöht. Die zentrale Definition steht in `Directory.Build.props` und wird als Paket- und Informational-Version in die Build-Ausgabe übernommen.
 
 Vor jedem Commit müssen die Version in `Directory.Build.props` erhöht und ein datierter Abschnitt für exakt diese Version in [CHANGELOG.md](CHANGELOG.md) ergänzt werden. Das eingecheckte Prüfskript validiert beide Bedingungen gegen `HEAD`. Der Repository-Hook wird einmalig pro Clone aktiviert:
 
