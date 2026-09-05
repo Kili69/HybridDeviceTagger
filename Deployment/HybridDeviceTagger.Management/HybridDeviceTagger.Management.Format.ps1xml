@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Configuration>
+  <ViewDefinitions>
+    <View>
+      <Name>HybridDeviceTagger.TraceEvent</Name>
+      <ViewSelectedBy>
+        <TypeName>HybridDeviceTagger.TraceEvent</TypeName>
+      </ViewSelectedBy>
+      <CustomControl>
+        <CustomEntries>
+          <CustomEntry>
+            <CustomItem>
+              <ExpressionBinding>
+                <ScriptBlock>
+                  $details = if ($null -eq $_.details) {
+                      'null'
+                  }
+                  else {
+                      $_.details | ConvertTo-Json -Compress -Depth 100
+                  }
+                  $timestamp = ([DateTimeOffset]$_.timestampUtc).ToString(
+                      'o',
+                      [Globalization.CultureInfo]::InvariantCulture)
+                  '{0},{1},{2},{3},{4},{5}' -f `
+                      $timestamp,
+                      $_.level,
+                      $_.phase,
+                      $_.outcome,
+                      $_.action,
+                      $details
+                </ScriptBlock>
+              </ExpressionBinding>
+              <NewLine />
+            </CustomItem>
+          </CustomEntry>
+        </CustomEntries>
+      </CustomControl>
+    </View>
+  </ViewDefinitions>
+</Configuration>

@@ -133,6 +133,8 @@ Für die drei häufigsten Leseoperationen steht `Deployment/Show-HybridDeviceTag
 
 `ShowTrace` gibt jedes Trace-Ereignis als eine logische Zeile im Format `<Zeit>,<Severity>,<Phase>,<Status>,<Action>,<Details>` aus. Der Zeitstempel verwendet ISO 8601 und `Details` bleibt kompaktes JSON. Für Geräte im aktuellen AD-Scope enthalten die Details neben `deviceId` auch `machineName`. Sehr lange Details können abhängig von der Terminalbreite optisch umbrochen werden, enthalten technisch aber keinen Zeilenumbruch. Die Client-ID ist fest im Produktionsclient hinterlegt: Sie ist kein Kennwort oder Secret, wird von Azure CLI aber intern als Audience des Zugriffstokens benötigt.
 
+`Get-HybridDeviceTaggerTrace` verwendet dieselbe lesbare Standarddarstellung, liefert in der Pipeline aber weiterhin vollständige `HybridDeviceTagger.TraceEvent`-Objekte. Dadurch funktionieren beispielsweise `$trace = @(Get-HybridDeviceTaggerTrace)`, `Where-Object`, `Select-Object`, `ConvertTo-Json` und `Export-Csv` ohne Informationsverlust.
+
 Ein Bearer-Token muss als Audience die konfigurierte API-App-ID oder `api://<client-id>` besitzen:
 
 ```powershell

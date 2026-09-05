@@ -4,6 +4,13 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260905.13] - 2026-09-05
+
+### Changed
+
+- Return structured `HybridDeviceTagger.TraceEvent` objects from `Get-HybridDeviceTaggerTrace` while displaying each event by default as one readable `<time>,<severity>,<phase>,<status>,<action>,<details>` line.
+- Reuse the module's trace-object formatting in `Show-HybridDeviceTaggerApi.ps1` instead of converting trace events to strings in the wrapper.
+
 ## [0.1.20260905.12] - 2026-09-05
 
 ### Added

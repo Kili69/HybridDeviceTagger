@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.12
+# Project-Version: 0.1.20260905.13
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -73,20 +73,5 @@ elseif ($ShowLastRunStatus) {
     Get-HybridDeviceTaggerLastRunStatus
 }
 elseif ($ShowTrace) {
-    foreach ($traceEvent in Get-HybridDeviceTaggerTrace) {
-        $details = if ($null -eq $traceEvent.details) {
-            'null'
-        }
-        else {
-            $traceEvent.details | ConvertTo-Json -Compress -Depth 100
-        }
-        $timestamp = ([DateTimeOffset]$traceEvent.timestampUtc).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
-        '{0},{1},{2},{3},{4},{5}' -f `
-            $timestamp,
-            $traceEvent.level,
-            $traceEvent.phase,
-            $traceEvent.outcome,
-            $traceEvent.action,
-            $details
-    }
+    Get-HybridDeviceTaggerTrace
 }

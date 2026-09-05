@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.12
+# Project-Version: 0.1.20260905.13
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -179,7 +179,9 @@ function Get-HybridDeviceTaggerTrace {
     $content = Invoke-HybridDeviceTaggerRequest -Method Get -Path 'traces/device-tagging/latest'
     foreach ($line in $content -split "`r?`n") {
         if (-not [string]::IsNullOrWhiteSpace($line)) {
-            $line | ConvertFrom-Json
+            $traceEvent = $line | ConvertFrom-Json
+            $traceEvent.PSObject.TypeNames.Insert(0, 'HybridDeviceTagger.TraceEvent')
+            $traceEvent
         }
     }
 }

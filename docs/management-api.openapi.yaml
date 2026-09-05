@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: HybridDeviceTagger Management API
-  version: 0.1.20260905.12
+  version: 0.1.20260905.13
   description: Entra-authenticated API for tagging configuration, operational actions, run status, and trace retrieval.
 servers:
   - url: https://func-hybriddevicetagger.azurewebsites.net/api/management
