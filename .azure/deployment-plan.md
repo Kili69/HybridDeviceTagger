@@ -65,6 +65,7 @@ Management API release validation completed: `2026-09-05`.
 - Single-tenant Entra API registration `5e324803-5aed-4e5d-b49f-a4bfceddcda8` exposes `api://5e324803-5aed-4e5d-b49f-a4bfceddcda8/user_impersonation`, has an associated service principal, preauthorizes Azure CLI, and has no client secret.
 - Easy Auth access is restricted to Entra object ID `43542018-427b-4143-b6c6-ca66d72e77bd` for `kili@bloedgelaber.de`.
 - ARM validation passed. Detailed What-if reported 0 creates, 9 modifies, 0 deletes, 3 no-change, 1 unsupported, and 5 ignored resources. Existing Plan, Application Insights, Log Analytics, Storage, and private endpoint names are preserved without duplicate infrastructure.
+- Post-deployment checks discovered all nine functions, rejected anonymous API access with HTTP 401, and returned both production rules and the latest JSONL trace with an Entra token. Rule2 and its app-setting fallback were restored to `DC=bloedgelaber,DC=de` after stale historical deployment parameters briefly reintroduced the old spelling.
 
 Membership release validation completed: `2026-09-04`.
 

@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.2
+# Project-Version: 0.1.20260905.3
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -567,9 +567,9 @@ if ($LASTEXITCODE -ne 0 -or $null -eq $functionApp) {
     throw "Function App '$FunctionAppName' was not found in resource group '$ResourceGroupName'."
 }
 
-$authSettingsUrl = "https://management.azure.com$($functionApp.id)/config/authsettingsV2/list?api-version=2022-09-01"
+$authSettingsUrl = "https://management.azure.com$($functionApp.id)/config/authsettingsV2?api-version=2022-09-01"
 $authSettings = az rest `
-    --method post `
+    --method get `
     --url $authSettingsUrl `
     --output json `
     --only-show-errors | ConvertFrom-Json
@@ -590,7 +590,19 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$tokenResponse.
     throw "Unable to obtain an Entra access token for api://$managementApiClientId. Run 'az login --scope api://$managementApiClientId/.default' and try again."
 }
 
-$managementApiBaseUri = "https://$($functionApp.defaultHostName)/api/management"
+$defaultHostName = if ($functionApp.PSObject.Properties['defaultHostName']) {
+    [string]$functionApp.defaultHostName
+}
+elseif ($functionApp.PSObject.Properties['properties']) {
+    [string]$functionApp.properties.defaultHostName
+}
+else {
+    $null
+}
+if ([string]::IsNullOrWhiteSpace($defaultHostName)) {
+    throw "Function App '$FunctionAppName' does not expose a default host name."
+}
+$managementApiBaseUri = "https://$defaultHostName/api/management"
 $requestHeaders = @{ Authorization = "Bearer $($tokenResponse.accessToken)" }
 try {
     $currentApiConfiguration = Invoke-RestMethod `
@@ -606,7 +618,7 @@ catch {
 $currentRules = @($currentApiConfiguration.rules)
 $currentRulesJson = ConvertTo-Json -InputObject $currentRules -Depth 10 -Compress
 $currentRulesParseError = $null
-$currentETag = [string]$responseHeaders.ETag
+$currentETag = [string]$responseHeaders['ETag']
 
 $currentConfiguration = ConvertTo-TaggingConfigurationOutput `
     -Rules $currentRules `
