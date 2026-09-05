@@ -34,11 +34,11 @@ public sealed class DeviceTaggingServiceTests
             entraClient,
             CreateMembershipService(ledger),
             ledger,
-            Microsoft.Extensions.Options.Options.Create(CreateOptions(
+            new OptionsTaggingRuleProvider(Microsoft.Extensions.Options.Options.Create(CreateOptions(
                 ("OU=Computers,DC=example,DC=com", new Dictionary<string, string>
                 {
                     ["extensionAttribute1"] = "Tier 0"
-                }))),
+                })))),
             NullLogger<DeviceTaggingService>.Instance);
         var trace = new RecordingRunTraceSession();
 
@@ -98,7 +98,7 @@ public sealed class DeviceTaggingServiceTests
             entraClient,
             CreateMembershipService(ledger),
             ledger,
-            Microsoft.Extensions.Options.Options.Create(CreateOptions(
+            new OptionsTaggingRuleProvider(Microsoft.Extensions.Options.Options.Create(CreateOptions(
                 (tier0Ou, new Dictionary<string, string>
                 {
                     ["extensionAttribute1"] = "PAW",
@@ -107,7 +107,7 @@ public sealed class DeviceTaggingServiceTests
                 (serverOu, new Dictionary<string, string>
                 {
                     ["extensionAttribute2"] = "Tier1"
-                }))),
+                })))),
             NullLogger<DeviceTaggingService>.Instance);
 
         var result = await service.TagDevicesAsync(CancellationToken.None);
@@ -141,7 +141,7 @@ public sealed class DeviceTaggingServiceTests
             new StubEntraDeviceClient(new Dictionary<Guid, EntraDevice>()),
             CreateMembershipService(ledger),
             ledger,
-            Microsoft.Extensions.Options.Options.Create(CreateOptions(
+            new OptionsTaggingRuleProvider(Microsoft.Extensions.Options.Options.Create(CreateOptions(
                 ("OU=Parent,DC=example,DC=com", new Dictionary<string, string>
                 {
                     ["extensionAttribute2"] = "Tier1"
@@ -149,7 +149,7 @@ public sealed class DeviceTaggingServiceTests
                 ("OU=Child,OU=Parent,DC=example,DC=com", new Dictionary<string, string>
                 {
                     ["extensionAttribute2"] = "Tier0"
-                }))),
+                })))),
             NullLogger<DeviceTaggingService>.Instance);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
@@ -184,7 +184,7 @@ public sealed class DeviceTaggingServiceTests
             entraClient,
             CreateMembershipService(ledger),
             ledger,
-            Microsoft.Extensions.Options.Options.Create(options),
+            new OptionsTaggingRuleProvider(Microsoft.Extensions.Options.Options.Create(options)),
             NullLogger<DeviceTaggingService>.Instance);
 
         await service.TagDevicesAsync(CancellationToken.None);
@@ -226,11 +226,11 @@ public sealed class DeviceTaggingServiceTests
             entraClient,
             new DeviceMembershipReconciliationService(membershipClient, ledger),
             ledger,
-            Microsoft.Extensions.Options.Options.Create(CreateOptions(
+            new OptionsTaggingRuleProvider(Microsoft.Extensions.Options.Options.Create(CreateOptions(
                 ("OU=Computers,DC=example,DC=com", new Dictionary<string, string>
                 {
                     ["extensionAttribute1"] = "Tier 0"
-                }))),
+                })))),
             NullLogger<DeviceTaggingService>.Instance);
 
         var result = await service.TagDevicesAsync(CancellationToken.None);
@@ -270,11 +270,11 @@ public sealed class DeviceTaggingServiceTests
             entraClient,
             new DeviceMembershipReconciliationService(new StubEntraMembershipClient(), ledger),
             ledger,
-            Microsoft.Extensions.Options.Options.Create(CreateOptions(
+            new OptionsTaggingRuleProvider(Microsoft.Extensions.Options.Options.Create(CreateOptions(
                 ("OU=Computers,DC=example,DC=com", new Dictionary<string, string>
                 {
                     ["extensionAttribute1"] = "Tier 0"
-                }))),
+                })))),
             NullLogger<DeviceTaggingService>.Instance);
 
         var result = await service.TagDevicesAsync(CancellationToken.None);

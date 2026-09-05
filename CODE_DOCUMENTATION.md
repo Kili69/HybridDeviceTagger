@@ -7,7 +7,7 @@ HybridDeviceTagger is a .NET 8 Azure Functions v4 isolated-worker application. I
 1. **Device tagging** discovers computers in configured Active Directory OU subtrees and writes configured `extensionAttribute1` through `extensionAttribute15` values to matching hybrid-joined Entra devices.
 2. **Password rotation** rotates the Active Directory service-account password and keeps the Active Directory and Azure Key Vault states recoverable if a run is interrupted.
 
-The application separates trigger, orchestration, directory, Graph, and credential-storage concerns. Interfaces isolate external systems so the orchestration services can be tested without Active Directory, Key Vault, or Microsoft Graph.
+The application separates trigger, management API, orchestration, directory, Graph, credential-storage, and operational-state concerns. Interfaces isolate external systems so the orchestration services can be tested without Active Directory, Key Vault, Microsoft Graph, or App Service Authentication.
 
 ## Runtime Architecture
 
@@ -24,6 +24,13 @@ flowchart LR
     DTS --> DML[IDeviceMembershipLedger]
     DMR --> DML
     DML --> BDML[BlobDeviceMembershipLedger]
+
+    API[ManagementApiFunction] --> TCS[TaggingConfigurationService]
+    API --> OSS[IOperationStatusStore]
+    API --> RTR[IRunTraceReader]
+    TCS --> BTC[BlobTaggingConfigurationStore]
+    OSS --> BOS[BlobOperationStatusStore]
+    RTR --> BRT
 
     RT[PasswordRotationFunction] --> PRS[PasswordRotationService]
     PRS --> CS[IActiveDirectoryCredentialStore]
@@ -53,7 +60,15 @@ flowchart LR
 - configures the Graph `HttpClient` with `https://graph.microsoft.com/v1.0/` as its base address.
 - creates Blob clients for the private membership ledger and latest-run trace containers.
 
-The Azure clients, LDAP adapters, credential store, password generator, and `TimeProvider` are singletons. The two workflow orchestrators are transient. `MicrosoftGraphDeviceClient` is created through `HttpClientFactory`.
+The Azure clients, LDAP adapters, credential store, dynamic rule provider, operation status store, password generator, and `TimeProvider` are singletons. The workflow orchestrators and management API are transient. `MicrosoftGraphDeviceClient` is created through `HttpClientFactory`.
+
+## Management API
+
+`ManagementApiFunction` exposes seven HTTP operations for complete rule replacement, named-rule upsert and removal, current rule retrieval, both latest-run statuses, and streamed latest-trace download. The HTTP triggers are anonymous at the Functions host layer because App Service Easy Auth authenticates the Entra token first and restricts access to configured principal object IDs. `EasyAuthPrincipalValidator` then requires one valid AAD `X-MS-CLIENT-PRINCIPAL` header as defense in depth.
+
+`BlobTaggingConfigurationStore` stores `tagging-configuration.json` in the private `run-traces` container. Before its first API mutation, `OptionsTaggingRuleProvider` supplies the validated `Tagging__RulesJson` startup fallback. Mutations normalize and validate the complete result and use Blob ETags. API clients can send the ETag returned by `GET` in `If-Match`; a stale write returns HTTP `409`.
+
+`BlobOperationStatusStore` writes separate JSON documents for device tagging and password rotation. Timer entry points record `Running`, then `Succeeded` or a sanitized `Failed` state. Password status preserves the timestamp of the last actual password change across checks that do not rotate. Status persistence failures are warnings and do not fail the directory workflow.
 
 ## Device Tagging Workflow
 
@@ -195,7 +210,7 @@ Implements `IDeviceMembershipLedger` in the private `membership-ledger` containe
 
 ### `BlobRunTraceStore`
 
-Implements `IRunTraceStore` with the private `run-traces` container. Starting an invocation replaces `device-tagger-last-run.jsonl`; each event is then appended immediately as one compact JSON object and receives a UTC timestamp, sequence, invocation ID, severity, phase, action, outcome, details, and optional exception data. Append failures disable tracing for that invocation and produce a normal application warning instead of interrupting device tagging. Attribute values are represented only by SHA-256 fingerprints, and credentials or tokens are never supplied to the trace API.
+Implements `IRunTraceStore` and `IRunTraceReader` with the private `run-traces` container. Starting an invocation replaces `device-tagger-last-run.jsonl`; each event is then appended immediately as one compact JSON object and receives a UTC timestamp, sequence, invocation ID, severity, phase, action, outcome, details, and optional exception data. Append failures disable tracing for that invocation and produce a normal application warning instead of interrupting device tagging. The reader streams the private Blob through the authenticated API. Attribute values are represented only by SHA-256 fingerprints, and credentials or tokens are never supplied to the trace API.
 
 ## Service Interfaces
 

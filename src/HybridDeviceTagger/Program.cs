@@ -114,12 +114,33 @@ builder.Services.AddSingleton<IDeviceMembershipLedger>(serviceProvider =>
     new BlobDeviceMembershipLedger(
         serviceProvider.GetRequiredService<BlobServiceClient>()
             .GetBlobContainerClient("membership-ledger")));
-builder.Services.AddSingleton<IRunTraceStore>(serviceProvider =>
+builder.Services.AddSingleton<BlobRunTraceStore>(serviceProvider =>
     new BlobRunTraceStore(
         serviceProvider.GetRequiredService<BlobServiceClient>()
             .GetBlobContainerClient("run-traces")
             .GetAppendBlobClient(BlobRunTraceStore.BlobName),
         serviceProvider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<BlobRunTraceStore>>()));
+builder.Services.AddSingleton<IRunTraceStore>(serviceProvider =>
+    serviceProvider.GetRequiredService<BlobRunTraceStore>());
+builder.Services.AddSingleton<IRunTraceReader>(serviceProvider =>
+    serviceProvider.GetRequiredService<BlobRunTraceStore>());
+builder.Services.AddSingleton<IOperationStatusStore>(serviceProvider =>
+    new BlobOperationStatusStore(
+        serviceProvider.GetRequiredService<BlobServiceClient>()
+            .GetBlobContainerClient("run-traces"),
+        serviceProvider.GetRequiredService<TimeProvider>()));
+builder.Services.AddSingleton<OptionsTaggingRuleProvider>();
+builder.Services.AddSingleton<BlobTaggingConfigurationStore>(serviceProvider =>
+    new BlobTaggingConfigurationStore(
+        serviceProvider.GetRequiredService<BlobServiceClient>()
+            .GetBlobContainerClient("run-traces")
+            .GetBlobClient(BlobTaggingConfigurationStore.BlobName),
+        serviceProvider.GetRequiredService<OptionsTaggingRuleProvider>()));
+builder.Services.AddSingleton<ITaggingConfigurationStore>(serviceProvider =>
+    serviceProvider.GetRequiredService<BlobTaggingConfigurationStore>());
+builder.Services.AddSingleton<ITaggingRuleProvider>(serviceProvider =>
+    serviceProvider.GetRequiredService<BlobTaggingConfigurationStore>());
+builder.Services.AddSingleton<TaggingConfigurationService>();
 builder.Services.AddScoped<DeviceMembershipReconciliationService>();
 builder.Services.AddTransient<DeviceTaggingService>();
 

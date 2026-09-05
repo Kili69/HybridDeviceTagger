@@ -58,6 +58,14 @@ Status: Validated
 
 ## 7. Validation Proof
 
+Management API release validation completed: `2026-09-05`.
+
+- Azure extension and Azure CLI contexts both resolve to `kili@bloedgelaber.de`, tenant `d89a354d-2bce-44ed-b802-8f8600689247`, and subscription `23ca129f-1e1c-4a56-bc51-e3ec2c874a73`.
+- Release build and the complete test suite passed with 64/64 tests; Bicep build/lint, PowerShell parsing/PSScriptAnalyzer, editor diagnostics, and `git diff --check` passed.
+- Single-tenant Entra API registration `5e324803-5aed-4e5d-b49f-a4bfceddcda8` exposes `api://5e324803-5aed-4e5d-b49f-a4bfceddcda8/user_impersonation`, has an associated service principal, preauthorizes Azure CLI, and has no client secret.
+- Easy Auth access is restricted to Entra object ID `43542018-427b-4143-b6c6-ca66d72e77bd` for `kili@bloedgelaber.de`.
+- ARM validation passed. Detailed What-if reported 0 creates, 9 modifies, 0 deletes, 3 no-change, 1 unsupported, and 5 ignored resources. Existing Plan, Application Insights, Log Analytics, Storage, and private endpoint names are preserved without duplicate infrastructure.
+
 Membership release validation completed: `2026-09-04`.
 
 - Azure CLI account, tenant, and subscription match the approved production context.

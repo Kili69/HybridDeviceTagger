@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging;
 namespace HybridDeviceTagger.Services;
 
 /// <summary>Stores the latest tagging invocation as immediately persisted JSON Lines.</summary>
-public sealed class BlobRunTraceStore : IRunTraceStore
+public sealed class BlobRunTraceStore : IRunTraceStore, IRunTraceReader
 {
     /// <summary>The stable blob path containing only the latest tagging run.</summary>
     public const string BlobName = "device-tagger-last-run.jsonl";
@@ -71,6 +71,24 @@ public sealed class BlobRunTraceStore : IRunTraceStore
                 "Unable to initialize the latest-run diagnostic trace blob {TraceBlobName}",
                 BlobName);
             return RunTrace.None;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<RunTraceDownload?> OpenLatestAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = await _blobClient.DownloadStreamingAsync(
+                cancellationToken: cancellationToken);
+            return new RunTraceDownload(
+                response.Value.Content,
+                response.Value.Details.ContentType ?? "application/x-ndjson; charset=utf-8",
+                BlobName);
+        }
+        catch (Azure.RequestFailedException exception) when (exception.Status == 404)
+        {
+            return null;
         }
     }
 

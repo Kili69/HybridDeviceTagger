@@ -14,19 +14,23 @@ public class DeviceTaggerFunction
 {
     private readonly DeviceTaggingService _deviceTaggingService;
     private readonly IRunTraceStore _runTraceStore;
+    private readonly IOperationStatusStore _statusStore;
     private readonly ILogger<DeviceTaggerFunction> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="DeviceTaggerFunction"/> class.</summary>
     /// <param name="deviceTaggingService">The device-tagging orchestrator.</param>
     /// <param name="runTraceStore">The latest-run diagnostic trace store.</param>
+    /// <param name="statusStore">The latest-run status store.</param>
     /// <param name="logger">The structured logger.</param>
     public DeviceTaggerFunction(
         DeviceTaggingService deviceTaggingService,
         IRunTraceStore runTraceStore,
+        IOperationStatusStore statusStore,
         ILogger<DeviceTaggerFunction> logger)
     {
         _deviceTaggingService = deviceTaggingService;
         _runTraceStore = runTraceStore;
+        _statusStore = statusStore;
         _logger = logger;
     }
 
@@ -45,6 +49,10 @@ public class DeviceTaggerFunction
             context.InvocationId,
             timer.IsPastDue,
             cancellationToken);
+        await TryRecordStatusAsync(() => _statusStore.StartAsync(
+            OperationNames.DeviceTagging,
+            context.InvocationId,
+            cancellationToken));
         _logger.LogInformation(
             "Device tagging started. Invocation ID: {InvocationId}, Past due: {IsPastDue}",
             context.InvocationId,
@@ -72,6 +80,22 @@ public class DeviceTaggerFunction
                 },
                 null,
                 CancellationToken.None);
+            await TryRecordStatusAsync(() => _statusStore.CompleteAsync(
+                OperationNames.DeviceTagging,
+                context.InvocationId,
+                new Dictionary<string, object?>
+                {
+                    ["discovered"] = result.Discovered,
+                    ["updated"] = result.Updated,
+                    ["unchanged"] = result.Unchanged,
+                    ["notFound"] = result.NotFound,
+                    ["notHybridJoined"] = result.NotHybridJoined,
+                    ["membershipsAdded"] = result.MembershipsAdded,
+                    ["membershipsRemoved"] = result.MembershipsRemoved,
+                    ["removedFromScope"] = result.RemovedFromScope
+                },
+                false,
+                CancellationToken.None));
 
             _logger.LogInformation(
                 "Device tagging completed. Invocation ID: {InvocationId}, Discovered: {Discovered}, Updated: {Updated}, Already tagged: {Unchanged}, Not found: {NotFound}, Not hybrid joined: {NotHybridJoined}, Memberships added: {MembershipsAdded}, Memberships removed: {MembershipsRemoved}, Removed from scope: {RemovedFromScope}",
@@ -95,11 +119,28 @@ public class DeviceTaggerFunction
                 null,
                 exception,
                 CancellationToken.None);
+            await TryRecordStatusAsync(() => _statusStore.FailAsync(
+                OperationNames.DeviceTagging,
+                context.InvocationId,
+                exception,
+                CancellationToken.None));
             _logger.LogError(
                 exception,
                 "Device tagging failed. Invocation ID: {InvocationId}",
                 context.InvocationId);
             throw;
+        }
+    }
+
+    private async Task TryRecordStatusAsync(Func<Task> writeStatus)
+    {
+        try
+        {
+            await writeStatus();
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Unable to persist the device-tagging run status");
         }
     }
 }

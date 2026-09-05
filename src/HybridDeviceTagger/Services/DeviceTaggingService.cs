@@ -6,7 +6,6 @@
 using HybridDeviceTagger.Models;
 using HybridDeviceTagger.Options;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -19,7 +18,7 @@ public sealed class DeviceTaggingService
     private readonly IEntraDeviceClient _entraDeviceClient;
     private readonly DeviceMembershipReconciliationService _membershipService;
     private readonly IDeviceMembershipLedger _ledger;
-    private readonly TaggingOptions _options;
+    private readonly ITaggingRuleProvider _ruleProvider;
     private readonly ILogger<DeviceTaggingService> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="DeviceTaggingService"/> class.</summary>
@@ -27,21 +26,21 @@ public sealed class DeviceTaggingService
     /// <param name="entraDeviceClient">The Microsoft Entra device client.</param>
     /// <param name="membershipService">The Entra membership reconciler.</param>
     /// <param name="ledger">The managed Entra state ledger.</param>
-    /// <param name="options">The configured OU tagging rules.</param>
+    /// <param name="ruleProvider">The current OU tagging-rule provider.</param>
     /// <param name="logger">The structured logger.</param>
     public DeviceTaggingService(
         IActiveDirectoryDeviceSource directoryDeviceSource,
         IEntraDeviceClient entraDeviceClient,
         DeviceMembershipReconciliationService membershipService,
         IDeviceMembershipLedger ledger,
-        IOptions<TaggingOptions> options,
+        ITaggingRuleProvider ruleProvider,
         ILogger<DeviceTaggingService> logger)
     {
         _directoryDeviceSource = directoryDeviceSource;
         _entraDeviceClient = entraDeviceClient;
         _membershipService = membershipService;
         _ledger = ledger;
-        _options = options.Value;
+        _ruleProvider = ruleProvider;
         _logger = logger;
     }
 
@@ -55,15 +54,16 @@ public sealed class DeviceTaggingService
         IRunTraceSession? trace = null)
     {
         trace ??= RunTrace.None;
+        var rules = await _ruleProvider.GetRulesAsync(cancellationToken);
         await trace.WriteAsync(
             "Information",
             "Discovery",
             "LoadAssignments",
             "Started",
-            new Dictionary<string, object?> { ["configuredRuleCount"] = _options.GetRules().Count },
+            new Dictionary<string, object?> { ["configuredRuleCount"] = rules.Count },
             null,
             cancellationToken);
-        var assignments = await GetAssignmentsAsync(cancellationToken, trace);
+        var assignments = await GetAssignmentsAsync(rules, cancellationToken, trace);
         var updated = 0;
         var unchanged = 0;
         var notFound = 0;
@@ -379,11 +379,11 @@ public sealed class DeviceTaggingService
     /// values for the same attribute fail the run to avoid order-dependent updates.
     /// </remarks>
     private async Task<Dictionary<Guid, DeviceTagAssignment>> GetAssignmentsAsync(
+        IReadOnlyList<TaggingRuleOptions> rules,
         CancellationToken cancellationToken,
         IRunTraceSession trace)
     {
         var assignments = new Dictionary<Guid, DeviceTagAssignment>();
-        var rules = _options.GetRules();
         for (var ruleIndex = 0; ruleIndex < rules.Count; ruleIndex++)
         {
             var rule = rules[ruleIndex];

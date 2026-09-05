@@ -1,6 +1,6 @@
 #Requires -Version 7.2
 #Requires -Modules ActiveDirectory
-# Project-Version: 0.1.20260905.1
+# Project-Version: 0.1.20260905.2
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -286,6 +286,13 @@ param(
     [pscredential]$ActiveDirectoryProvisioningCredential,
 
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
+    [string]$ManagementApiClientId,
+
+    [ValidateNotNull()]
+    [ValidateCount(1, 100)]
+    [guid[]]$ManagementApiAllowedPrincipalObjectId,
+
+    [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$VirtualNetworkSubscriptionId,
 
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
@@ -473,14 +480,14 @@ function Write-InstallationSummary {
         return
     }
 
-    $resourceNameSuffix = Get-AppResourceNameSuffix
     Write-Host 'Planned Azure resources to create or update:'
     Write-Host "  - Function App: $FunctionAppName (.NET 8 isolated, Flex Consumption FC1)"
     Write-Host "  - Storage account: $StorageAccountName with deployment, membership-ledger, and run-traces containers"
-    Write-Host "  - Flex Consumption plan: asp-$resourceNameSuffix"
-    Write-Host "  - Log Analytics workspace: log-$resourceNameSuffix"
-    Write-Host "  - Application Insights: appi-$resourceNameSuffix"
-    Write-Host "  - Storage private endpoint: pep-$resourceNameSuffix-blob"
+    Write-Host "  - Flex Consumption plan: $FunctionAppName-plan"
+    Write-Host "  - Log Analytics workspace: $FunctionAppName-law"
+    Write-Host "  - Application Insights: $FunctionAppName-appi"
+    Write-Host "  - Storage private endpoint: pe-$StorageAccountName-blob"
+    Write-Host "  - Entra-authenticated management API: api://$ManagementApiClientId"
     Write-Host '  - Managed-identity role assignments for Storage and the existing Key Vault'
     Write-Host '  - Microsoft Graph application permissions for device, group, and administrative-unit management'
     if ($RestrictedAdministrativeUnits.Count -gt 0) {
@@ -1694,6 +1701,8 @@ function Get-DeploymentParameter {
         }
         activeDirectoryBindUsername = $ADServiceAccount
         activeDirectoryBindUserDistinguishedName = $ActiveDirectoryBindUserDistinguishedName
+        managementApiClientId = $ManagementApiClientId
+        managementApiAllowedPrincipalObjectIds = @($ManagementApiAllowedPrincipalObjectId | ForEach-Object ToString)
         taggingRules = $script:NormalizedTaggingRules
         currentPasswordSecretName = $CurrentCredentialEntryName
         nextPasswordSecretName = $StagedCredentialEntryName
@@ -2288,6 +2297,51 @@ if ($null -eq $TaggingRules -or $TaggingRules.Count -eq 0) {
     }
     Write-Step 'Creating tagging rule'
     $TaggingRules = @(Read-InteractiveTaggingRule)
+}
+
+if (-not $PrepareActiveDirectoryAccountOnly -and
+    [string]::IsNullOrWhiteSpace($ManagementApiClientId)) {
+    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'ManagementApiClientId must be supplied explicitly for noninteractive execution.'
+    }
+    $ManagementApiClientId = Read-RequiredInstallerValue `
+        -Name 'ManagementApiClientId' `
+        -Prompt 'Management API Entra application (client) ID'
+}
+if (-not $PrepareActiveDirectoryAccountOnly -and
+    $ManagementApiClientId -notmatch '^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+    throw 'ManagementApiClientId must be a valid GUID.'
+}
+if (-not $PrepareActiveDirectoryAccountOnly -and
+    ($null -eq $ManagementApiAllowedPrincipalObjectId -or
+        $ManagementApiAllowedPrincipalObjectId.Count -eq 0)) {
+    $signedInUserResult = Invoke-AzureCli -Arguments @(
+        'ad', 'signed-in-user', 'show', '--query', '{ id: id }',
+        '--only-show-errors', '--output', 'json'
+    ) -AllowFailure
+    $signedInUser = if ($signedInUserResult.ExitCode -eq 0 -and
+        -not [string]::IsNullOrWhiteSpace($signedInUserResult.Output)) {
+        $signedInUserResult.Output | ConvertFrom-Json
+    }
+    else {
+        $null
+    }
+    if ([guid]::TryParse([string]$signedInUser.id, [ref]([guid]$signedInUserId))) {
+        $ManagementApiAllowedPrincipalObjectId = @($signedInUserId)
+        Write-Host "Management API access restricted to signed-in Entra user '$signedInUserId'." -ForegroundColor Green
+    }
+    elseif ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        throw 'ManagementApiAllowedPrincipalObjectId must be supplied explicitly for noninteractive execution.'
+    }
+    else {
+        $allowedPrincipalId = Read-RequiredInstallerValue `
+            -Name 'ManagementApiAllowedPrincipalObjectId' `
+            -Prompt 'Management API allowed Entra principal object ID'
+        if (-not [guid]::TryParse($allowedPrincipalId, [ref]([guid]$parsedAllowedPrincipalId))) {
+            throw 'ManagementApiAllowedPrincipalObjectId must be a valid GUID.'
+        }
+        $ManagementApiAllowedPrincipalObjectId = @($parsedAllowedPrincipalId)
+    }
 }
 
 Write-Step 'Validating input parameters'

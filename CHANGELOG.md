@@ -4,6 +4,20 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260905.2] - 2026-09-05
+
+### Added
+
+- Add an Entra Easy Auth protected REST API for reading and changing tagging rules, reading latest tagging and password-rotation status, and downloading the latest JSONL trace.
+- Persist dynamic tagging rules and latest operation statuses in private Blob Storage with startup app-setting fallback and optimistic ETag concurrency.
+- Add an OpenAPI 3.0 contract and focused tests for configuration mutations, authentication headers, status responses, and streamed trace downloads.
+
+### Changed
+
+- Load one current tagging-rule snapshot for each device-tagging invocation without requiring a Function App restart.
+- Update the tagging-configuration PowerShell workflow to use the management API with an Entra bearer token and `If-Match` instead of modifying app settings.
+- Configure single-tenant Easy Auth with explicit allowed Entra principal object IDs during deployment.
+
 ## [0.1.20260905.1] - 2026-09-05
 
 ### Fixed

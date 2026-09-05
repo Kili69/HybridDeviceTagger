@@ -68,6 +68,15 @@ param activeDirectoryBindUsername string
 @description('Distinguished name of the Active Directory service account whose password is rotated.')
 param activeDirectoryBindUserDistinguishedName string
 
+@description('Application (client) ID of the single-tenant Entra app registration protecting the management API.')
+@minLength(36)
+@maxLength(36)
+param managementApiClientId string
+
+@description('Entra object IDs of users or service principals allowed to call the management API.')
+@minLength(1)
+param managementApiAllowedPrincipalObjectIds string[]
+
 @description('OU subtree rules and the Entra extension attributes assigned to matching devices.')
 @minLength(1)
 param taggingRules taggingRule[]
@@ -100,15 +109,11 @@ param instanceMemoryMB int = 2048
 @description('Tags applied to newly created resources.')
 param tags object = {}
 
-var normalizedFunctionAppName = toLower(functionAppName)
-var resourceNameSuffix = startsWith(normalizedFunctionAppName, 'func-')
-  ? substring(normalizedFunctionAppName, 5)
-  : normalizedFunctionAppName
-var servicePlanName = 'asp-${resourceNameSuffix}'
-var logAnalyticsWorkspaceName = 'log-${resourceNameSuffix}'
-var applicationInsightsName = 'appi-${resourceNameSuffix}'
+var servicePlanName = '${functionAppName}-plan'
+var logAnalyticsWorkspaceName = '${functionAppName}-law'
+var applicationInsightsName = '${functionAppName}-appi'
 var deploymentContainerName = 'app-package-${uniqueString(resourceGroup().id, functionAppName)}'
-var storagePrivateEndpointName = 'pep-${resourceNameSuffix}-blob'
+var storagePrivateEndpointName = 'pe-${storageAccountName}-blob'
 var keyVaultSecretsOfficerRoleDefinitionId = '/subscriptions/${keyVaultSubscriptionId}/providers/Microsoft.Authorization/roleDefinitions/b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
 var storageBlobDataOwnerRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b')
 
@@ -385,6 +390,49 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
     }
     virtualNetworkSubnetId: integrationSubnet.id
     vnetRouteAllEnabled: true
+  }
+}
+
+resource functionAppAuthentication 'Microsoft.Web/sites/config@2022-09-01' = {
+  name: 'authsettingsV2'
+  parent: functionApp
+  properties: {
+    globalValidation: {
+      requireAuthentication: true
+      unauthenticatedClientAction: 'Return401'
+    }
+    httpSettings: {
+      requireHttps: true
+    }
+    identityProviders: {
+      azureActiveDirectory: {
+        enabled: true
+        registration: {
+          clientId: managementApiClientId
+          openIdIssuer: '${environment().authentication.loginEndpoint}${tenant().tenantId}/v2.0'
+        }
+        validation: {
+          allowedAudiences: [
+            managementApiClientId
+            'api://${managementApiClientId}'
+          ]
+          defaultAuthorizationPolicy: {
+            allowedPrincipals: {
+              identities: managementApiAllowedPrincipalObjectIds
+            }
+          }
+        }
+      }
+    }
+    login: {
+      tokenStore: {
+        enabled: false
+      }
+    }
+    platform: {
+      enabled: true
+      runtimeVersion: '~1'
+    }
   }
 }
 

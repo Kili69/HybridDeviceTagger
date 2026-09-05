@@ -1,0 +1,273 @@
+openapi: 3.0.3
+info:
+  title: HybridDeviceTagger Management API
+  version: 0.1.20260905.2
+  description: Entra-authenticated API for tagging configuration, run status, and trace retrieval.
+servers:
+  - url: https://func-hybriddevicetagger.azurewebsites.net/api/management
+security:
+  - entraId: []
+paths:
+  /tagging-rules:
+    get:
+      operationId: getTaggingConfiguration
+      summary: Get the effective tagging rules
+      responses:
+        '200':
+          description: Current rules and configuration version
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaggingConfiguration'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      operationId: replaceTaggingConfiguration
+      summary: Replace all tagging rules
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              minItems: 1
+              maxItems: 100
+              items:
+                $ref: '#/components/schemas/TaggingRule'
+      responses:
+        '200':
+          description: Replaced configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaggingConfiguration'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          description: Request body exceeds 65,536 bytes
+  /tagging-rules/{ruleName}:
+    parameters:
+      - name: ruleName
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 128
+    put:
+      operationId: upsertTaggingRule
+      summary: Add or replace one named rule
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaggingRule'
+      responses:
+        '200':
+          description: Updated configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaggingConfiguration'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      operationId: removeTaggingRule
+      summary: Remove one named rule
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '200':
+          description: Updated configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaggingConfiguration'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /status/device-tagging:
+    get:
+      operationId: getDeviceTaggingStatus
+      summary: Get the latest device-tagging run status
+      responses:
+        '200':
+          description: Latest status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /status/password-rotation:
+    get:
+      operationId: getPasswordRotationStatus
+      summary: Get the latest password check and last actual password change
+      responses:
+        '200':
+          description: Latest status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /traces/device-tagging/latest:
+    get:
+      operationId: downloadLatestDeviceTaggingTrace
+      summary: Download the latest JSONL trace
+      responses:
+        '200':
+          description: Latest device-tagging trace
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  parameters:
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: ETag returned by the latest configuration read; stale values return HTTP 409.
+      schema:
+        type: string
+  securitySchemes:
+    entraId:
+      type: openIdConnect
+      openIdConnectUrl: https://login.microsoftonline.com/{tenantId}/v2.0/.well-known/openid-configuration
+  responses:
+    BadRequest:
+      description: Invalid request or tagging configuration
+    Unauthorized:
+      description: A valid token from an explicitly allowed Entra principal is required
+    NotFound:
+      description: The requested rule or operational artifact does not exist
+    Conflict:
+      description: Another request changed the configuration concurrently
+  schemas:
+    TaggingRule:
+      type: object
+      required:
+        - name
+        - description
+        - baseDn
+        - extensionAttributes
+      properties:
+        name:
+          type: string
+          maxLength: 128
+        description:
+          type: string
+          maxLength: 1024
+        baseDn:
+          type: string
+          maxLength: 2048
+        extensionAttributes:
+          type: object
+          additionalProperties:
+            type: string
+            maxLength: 1024
+        entraGroupIds:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            format: uuid
+        administrativeUnitIds:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            format: uuid
+    TaggingConfiguration:
+      type: object
+      required:
+        - rules
+        - source
+      properties:
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaggingRule'
+        eTag:
+          type: string
+          nullable: true
+        lastModifiedUtc:
+          type: string
+          format: date-time
+          nullable: true
+        source:
+          type: string
+          enum:
+            - appSetting
+            - blob
+    OperationStatus:
+      type: object
+      required:
+        - operation
+        - invocationId
+        - state
+        - startedAtUtc
+      properties:
+        operation:
+          type: string
+        invocationId:
+          type: string
+        state:
+          type: string
+          enum:
+            - running
+            - succeeded
+            - failed
+        startedAtUtc:
+          type: string
+          format: date-time
+        completedAtUtc:
+          type: string
+          format: date-time
+          nullable: true
+        lastPasswordChangeAtUtc:
+          type: string
+          format: date-time
+          nullable: true
+        result:
+          type: object
+          nullable: true
+          additionalProperties: true
+        errorType:
+          type: string
+          nullable: true
+        errorMessage:
+          type: string
+          nullable: true

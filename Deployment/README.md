@@ -17,6 +17,8 @@ Installation uses separate Azure, Entra, Active Directory, and runtime identitie
 | AD provisioning identity | Create user in the configured parent OU and enable/reset password on that account | Used only with `-PrepareActiveDirectoryAccountOnly`; it is not stored or used by the Function. Existing delegated AD permissions may be used instead of broad domain administration. |
 | DNS administrator | Create a private DNS zone and A record, or modify the existing private DNS service | Required when Storage public network access is disabled. The Function subnet must resolve `<storage-account>.blob.core.windows.net` through `<storage-account>.privatelink.blob.core.windows.net` to the Storage private endpoint IP. |
 
+The management REST API additionally requires a single-tenant Entra app registration whose Application ID URI is `api://<client-id>`. Pass its application/client ID as `ManagementApiClientId`. `ManagementApiAllowedPrincipalObjectId` accepts one to 100 Entra object IDs for users or service principals allowed to call the API; when omitted interactively, the installer restricts access to the signed-in Entra user. Easy Auth validates issuer, audience, authentication and this principal allowlist before a request reaches the Function.
+
 The Azure installation user also needs read access to the current Key Vault secret metadata. The signed-in identity used by Azure CLI must be able to read Microsoft Graph service principals. Assigning `Device.ReadWrite.All` requires an appropriately privileged Entra administrator; Azure subscription roles such as `Owner` do not grant this Entra permission.
 
 After deployment, Bicep grants the Function App's system-assigned managed identity:
@@ -77,6 +79,8 @@ $taggingRules = @(
     -ADServiceAccount 'svc-HybridDeviceTagger@contoso.com' `
     -ActiveDirectoryBindUserDistinguishedName 'CN=svc-HybridDeviceTagger,OU=Service Accounts,DC=contoso,DC=com' `
     -ActiveDirectoryCredential $credential `
+    -ManagementApiClientId '11111111-1111-1111-1111-111111111111' `
+    -ManagementApiAllowedPrincipalObjectId '22222222-2222-2222-2222-222222222222' `
     -TaggingRules $taggingRules `
     -ValidateOnly
 ```

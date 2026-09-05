@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.1
+# Project-Version: 0.1.20260905.2
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -567,40 +567,46 @@ if ($LASTEXITCODE -ne 0 -or $null -eq $functionApp) {
     throw "Function App '$FunctionAppName' was not found in resource group '$ResourceGroupName'."
 }
 
-$settings = @(az functionapp config appsettings list `
-    --subscription $SubscriptionId `
-    --resource-group $ResourceGroupName `
-    --name $FunctionAppName `
+$authSettingsUrl = "https://management.azure.com$($functionApp.id)/config/authsettingsV2/list?api-version=2022-09-01"
+$authSettings = az rest `
+    --method post `
+    --url $authSettingsUrl `
     --output json `
-    --only-show-errors | ConvertFrom-Json)
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to read configuration from Function App '$FunctionAppName'."
+    --only-show-errors | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $null -eq $authSettings) {
+    throw "Unable to read Easy Auth configuration from Function App '$FunctionAppName'."
 }
 
-$currentRulesJson = [string]($settings |
-    Where-Object name -eq 'Tagging__RulesJson' |
-    Select-Object -First 1 -ExpandProperty value)
-$currentRulesParseError = if ($currentRulesJson.Length -gt $script:MaximumRulesJsonLength) {
-    "Tagging__RulesJson exceeds the $script:MaximumRulesJsonLength-character limit."
+$managementApiClientId = [string]$authSettings.properties.identityProviders.azureActiveDirectory.registration.clientId
+if ($managementApiClientId -notmatch '^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+    throw "Function App '$FunctionAppName' does not have a valid Entra Easy Auth client ID."
 }
-else {
-    $null
+
+$tokenResponse = az account get-access-token `
+    --scope "api://$managementApiClientId/.default" `
+    --output json `
+    --only-show-errors | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$tokenResponse.accessToken)) {
+    throw "Unable to obtain an Entra access token for api://$managementApiClientId. Run 'az login --scope api://$managementApiClientId/.default' and try again."
 }
-$currentRules = if ([string]::IsNullOrWhiteSpace($currentRulesJson)) {
-    @()
+
+$managementApiBaseUri = "https://$($functionApp.defaultHostName)/api/management"
+$requestHeaders = @{ Authorization = "Bearer $($tokenResponse.accessToken)" }
+try {
+    $currentApiConfiguration = Invoke-RestMethod `
+        -Method Get `
+        -Uri "$managementApiBaseUri/tagging-rules" `
+        -Headers $requestHeaders `
+        -ResponseHeadersVariable responseHeaders
 }
-elseif ($null -ne $currentRulesParseError) {
-    @()
+catch {
+    throw "Unable to read tagging rules through the management API: $($_.Exception.Message)"
 }
-else {
-    try {
-        @($currentRulesJson | ConvertFrom-Json)
-    }
-    catch {
-        $currentRulesParseError = $_.Exception.Message
-        @()
-    }
-}
+
+$currentRules = @($currentApiConfiguration.rules)
+$currentRulesJson = ConvertTo-Json -InputObject $currentRules -Depth 10 -Compress
+$currentRulesParseError = $null
+$currentETag = [string]$responseHeaders.ETag
 
 $currentConfiguration = ConvertTo-TaggingConfigurationOutput `
     -Rules $currentRules `
@@ -614,7 +620,7 @@ if ($displayCurrent) {
         Write-Host 'No current tagging rules are configured.'
     }
     elseif ($null -ne $currentRulesParseError) {
-        Write-Warning "The current Tagging__RulesJson value is invalid JSON: $currentRulesParseError"
+        Write-Warning "The current management API rule configuration is invalid JSON: $currentRulesParseError"
         Write-Host $currentRulesJson
     }
     else {
@@ -775,51 +781,37 @@ if ($PSBoundParameters.ContainsKey('TaggingRules') -and
 
 if (-not $PSCmdlet.ShouldProcess(
     "$SubscriptionId/$ResourceGroupName/$FunctionAppName",
-    'Replace Tagging__RulesJson and restart the Function App')) {
+    'Replace tagging rules through the Entra-authenticated management API')) {
     Write-Output $currentConfiguration
     return
 }
 
-$settingsFile = Join-Path ([System.IO.Path]::GetTempPath()) "HybridDeviceTagger-settings-$([guid]::NewGuid()).json"
 try {
-    $settingsPayload = [ordered]@{ Tagging__RulesJson = $newRulesJson } | ConvertTo-Json -Compress
-    [System.IO.File]::WriteAllText(
-        $settingsFile,
-        $settingsPayload,
-        [System.Text.UTF8Encoding]::new($false))
-    az functionapp config appsettings set `
-        --subscription $SubscriptionId `
-        --resource-group $ResourceGroupName `
-        --name $FunctionAppName `
-        --settings "@$settingsFile" `
-        --output none `
-        --only-show-errors
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Updating Tagging__RulesJson failed.'
+    $updateHeaders = @{
+        Authorization = $requestHeaders.Authorization
     }
-}
-finally {
-    if ([System.IO.File]::Exists($settingsFile)) {
-        [System.IO.File]::Delete($settingsFile)
+    if (-not [string]::IsNullOrWhiteSpace($currentETag)) {
+        $updateHeaders['If-Match'] = $currentETag
     }
-}
 
-az functionapp restart `
-    --subscription $SubscriptionId `
-    --resource-group $ResourceGroupName `
-    --name $FunctionAppName `
-    --only-show-errors
-if ($LASTEXITCODE -ne 0) {
-    throw 'The tagging rules were updated, but restarting the Function App failed.'
+    $updatedConfiguration = Invoke-RestMethod `
+        -Method Put `
+        -Uri "$managementApiBaseUri/tagging-rules" `
+        -Headers $updateHeaders `
+        -ContentType 'application/json; charset=utf-8' `
+        -Body $newRulesJson
+}
+catch {
+    throw "Updating tagging rules through the management API failed: $($_.Exception.Message)"
 }
 
 Write-Host "Tagging configuration updated for Function App '$FunctionAppName'." -ForegroundColor Green
 if (-not [string]::IsNullOrWhiteSpace($currentRulesJson)) {
-    Write-Host 'Previous Tagging__RulesJson (for rollback):'
+    Write-Host 'Previous tagging-rule JSON (for rollback):'
     Write-Host $currentRulesJson
 }
 
 Write-Output (ConvertTo-TaggingConfigurationOutput `
-    -Rules $normalizedRules `
-    -RulesJson $newRulesJson `
+    -Rules @($updatedConfiguration.rules) `
+    -RulesJson (ConvertTo-Json -InputObject @($updatedConfiguration.rules) -Depth 10 -Compress) `
     -IsValid $true)
