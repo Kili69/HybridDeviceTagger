@@ -164,14 +164,12 @@ The object contains `FunctionAppName`, `ResourceGroupName`, `Rules`, `RulesJson`
 
 ## Reading management API data
 
-`Show-HybridDeviceTaggerApi.ps1` provides three mutually exclusive, read-only operations. It obtains an Entra token from the active Azure CLI session and emits structured PowerShell objects:
+`Show-HybridDeviceTaggerApi.ps1` provides three mutually exclusive, read-only operations. It calls only the management REST API, obtains an Entra token for the supplied API client ID from the active Azure CLI session, and emits structured PowerShell objects. It requires no subscription, resource-group, Function App, or ARM-discovery parameters:
 
 ```powershell
 $common = @{
-    FunctionAppAdministratorAccount = 'function.admin@contoso.com'
-    SubscriptionId = '00000000-0000-0000-0000-000000000000'
-    ResourceGroupName = 'rg-hybrid-device-tagger-prod'
-    FunctionAppName = 'func-hybrid-device-tagger-prod'
+    ApiBaseUri = 'https://func-hybrid-device-tagger-prod.azurewebsites.net/api/management'
+    ManagementApiClientId = '11111111-1111-1111-1111-111111111111'
 }
 
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 @common -ShowRules
@@ -180,7 +178,7 @@ $common = @{
     Format-Table timestampUtc, level, phase, action, outcome
 ```
 
-`ShowRules` emits one object per effective rule. `ShowStatus` emits the latest device-tagging status. `ShowTrace` parses the latest JSONL trace and emits one object per trace event. The active Entra identity must be included in the Function App Easy Auth principal allowlist.
+`ShowRules` emits one object per effective rule. `ShowStatus` emits the latest device-tagging status. `ShowTrace` parses the latest JSONL trace and emits one object per trace event. The active Entra identity must be included in the Function App Easy Auth principal allowlist, but it does not need Azure Resource Manager access.
 
 For an update, always pass the complete desired rule set. Add an OU by adding an item, change a tag value in its `ExtensionAttributes`, or remove an OU by omitting its item. Preview the current and proposed configuration first:
 

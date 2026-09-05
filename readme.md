@@ -108,14 +108,12 @@ Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unt
 
 Die API speichert dynamische Regeln als `tagging-configuration.json` im privaten Container `run-traces`. Solange die API noch keine Änderung gespeichert hat, verwendet sie `Tagging__RulesJson` als Fallback. Jeder Tagging-Lauf liest zu Beginn genau einen aktuellen Snapshot; ein Function-Restart ist nach Änderungen nicht erforderlich. ETags verhindern, dass parallele Änderungen unbemerkt überschrieben werden. Die vollständige OpenAPI-3.0-Spezifikation steht in [docs/management-api.openapi.yaml](docs/management-api.openapi.yaml).
 
-Für die drei häufigsten Leseoperationen steht `Deployment/Show-HybridDeviceTaggerApi.ps1` bereit. Das Skript prüft das aktive Azure-CLI-Konto, ermittelt Audience und Hostname aus der Function App, bezieht ein Entra-Token und gibt pipeline-fähige PowerShell-Objekte aus:
+Für die drei häufigsten Leseoperationen steht `Deployment/Show-HybridDeviceTaggerApi.ps1` bereit. Das Skript verwendet ausschließlich die REST API, bezieht über Azure CLI ein Entra-Token für die angegebene API-Client-ID und gibt pipeline-fähige PowerShell-Objekte aus. Eine Subscription ID, Resource Group oder ARM-Berechtigung ist dafür nicht erforderlich:
 
 ```powershell
 $common = @{
-	FunctionAppAdministratorAccount = 'kili@bloedgelaber.de'
-	SubscriptionId = '23ca129f-1e1c-4a56-bc51-e3ec2c874a73'
-	ResourceGroupName = 'RG-HybridDeviceTagger'
-	FunctionAppName = 'func-hybriddevicetagger'
+	ApiBaseUri = 'https://func-hybriddevicetagger.azurewebsites.net/api/management'
+	ManagementApiClientId = '5e324803-5aed-4e5d-b49f-a4bfceddcda8'
 }
 
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 @common -ShowRules
@@ -182,7 +180,7 @@ Die Unit-Tests prüfen Geräteabgleich, Fälligkeit, reguläre Rotation, Recover
 
 ## Versionierung und Autor
 
-Das Projekt verwendet die Produktversion `<major>.<minor>.<yyyyMMdd>.<counter>`, aktuell `0.1.20260905.5`. Der Zähler beginnt für jede Veröffentlichung am selben Datum bei `1` und wird bei weiteren Veröffentlichungen an diesem Tag erhöht. Die zentrale Definition steht in `Directory.Build.props` und wird als Paket- und Informational-Version in die Build-Ausgabe übernommen.
+Das Projekt verwendet die Produktversion `<major>.<minor>.<yyyyMMdd>.<counter>`, aktuell `0.1.20260905.6`. Der Zähler beginnt für jede Veröffentlichung am selben Datum bei `1` und wird bei weiteren Veröffentlichungen an diesem Tag erhöht. Die zentrale Definition steht in `Directory.Build.props` und wird als Paket- und Informational-Version in die Build-Ausgabe übernommen.
 
 Vor jedem Commit müssen die Version in `Directory.Build.props` erhöht und ein datierter Abschnitt für exakt diese Version in [CHANGELOG.md](CHANGELOG.md) ergänzt werden. Das eingecheckte Prüfskript validiert beide Bedingungen gegen `HEAD`. Der Repository-Hook wird einmalig pro Clone aktiviert:
 
