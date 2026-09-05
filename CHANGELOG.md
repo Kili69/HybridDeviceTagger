@@ -4,6 +4,12 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260905.14] - 2026-09-05
+
+### Changed
+
+- Rename the single-rule upsert cmdlet from `Set-HybridDeviceTaggerRule` to `Add-HybridDeviceTaggerRule` while retaining `ShouldProcess` support.
+
 ## [0.1.20260905.13] - 2026-09-05
 
 ### Changed

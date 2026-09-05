@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.13
+# Project-Version: 0.1.20260905.14
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -202,7 +202,7 @@ function Set-HybridDeviceTaggerRuleConfiguration {
     }
 }
 
-function Set-HybridDeviceTaggerRule {
+function Add-HybridDeviceTaggerRule {
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory, ValueFromPipeline)][ValidateNotNull()][object]$Rule
@@ -268,7 +268,7 @@ Export-ModuleMember -Function @(
     'Get-HybridDeviceTaggerLastRunStatus',
     'Get-HybridDeviceTaggerPasswordRotationStatus',
     'Get-HybridDeviceTaggerTrace',
-    'Set-HybridDeviceTaggerRule',
+    'Add-HybridDeviceTaggerRule',
     'Remove-HybridDeviceTaggerRule',
     'Set-HybridDeviceTaggerRuleConfiguration',
     'Invoke-HybridDeviceTagging',

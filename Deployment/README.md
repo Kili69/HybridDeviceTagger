@@ -169,6 +169,7 @@ Get-HybridDeviceTaggerRule
 Get-HybridDeviceTaggerLastRunStatus
 Get-HybridDeviceTaggerPasswordRotationStatus
 Get-HybridDeviceTaggerTrace
+Add-HybridDeviceTaggerRule -Rule $rule -WhatIf
 Invoke-HybridDeviceTagging
 Invoke-HybridDeviceTaggerPasswordRotation -Confirm
 ```

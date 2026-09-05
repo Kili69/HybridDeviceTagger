@@ -117,6 +117,7 @@ Import-Module ./Deployment/HybridDeviceTagger.Management
 Connect-HybridDeviceTagger
 Get-HybridDeviceTaggerRule
 Get-HybridDeviceTaggerLastRunStatus
+Add-HybridDeviceTaggerRule -Rule $rule -WhatIf
 Invoke-HybridDeviceTagging
 Invoke-HybridDeviceTaggerPasswordRotation -Confirm
 ```
