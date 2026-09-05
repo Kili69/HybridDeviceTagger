@@ -4,6 +4,12 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260905.9] - 2026-09-05
+
+### Changed
+
+- Format each `ShowTrace` event as `<time>,<severity>,<phase>,<status>,<action>,<details>` on one logical line, with an ISO-8601 timestamp and compact JSON details.
+
 ## [0.1.20260905.8] - 2026-09-05
 
 ### Changed

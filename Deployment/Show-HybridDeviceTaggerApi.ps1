@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.8
+# Project-Version: 0.1.20260905.9
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -27,7 +27,8 @@ The client ID identifies the token audience and is not a credential or secret.
 Emits the current effective tagging rules.
 
 .PARAMETER ShowTrace
-Downloads the latest device-tagging JSONL trace in memory and emits one compact JSON string per event.
+Downloads the latest device-tagging JSONL trace in memory and emits one line per event in the
+format <time>,<severity>,<phase>,<status>,<action>,<details>.
 
 .PARAMETER ShowStatus
 Emits the status of the latest device-tagging run.
@@ -104,7 +105,21 @@ elseif ($ShowTrace) {
         -Headers $headers
     foreach ($line in $traceContent -split "`r?`n") {
         if (-not [string]::IsNullOrWhiteSpace($line)) {
-            $line | ConvertFrom-Json | ConvertTo-Json -Compress -Depth 100
+            $traceEvent = $line | ConvertFrom-Json
+            $details = if ($null -eq $traceEvent.details) {
+                'null'
+            }
+            else {
+                $traceEvent.details | ConvertTo-Json -Compress -Depth 100
+            }
+            $timestamp = ([DateTimeOffset]$traceEvent.timestampUtc).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+            '{0},{1},{2},{3},{4},{5}' -f `
+                $timestamp,
+                $traceEvent.level,
+                $traceEvent.phase,
+                $traceEvent.outcome,
+                $traceEvent.action,
+                $details
         }
     }
 }
