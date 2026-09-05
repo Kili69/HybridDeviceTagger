@@ -61,7 +61,11 @@ public sealed class DeviceTaggingServiceTests
         Assert.Contains(trace.Events, traceEvent =>
             traceEvent.Phase == "Device" &&
             traceEvent.Action == "PatchExtensionAttributes" &&
-            traceEvent.Outcome == "Succeeded");
+            traceEvent.Outcome == "Succeeded" &&
+            Equals(traceEvent.Details?["machineName"], $"Computer-{updateDeviceId:N}"));
+        Assert.Contains(trace.Events, traceEvent =>
+            traceEvent.Phase == "Membership" &&
+            Equals(traceEvent.Details?["machineName"], $"Computer-{updateDeviceId:N}"));
         Assert.DoesNotContain("Tier 0", trace.SerializedDetails, StringComparison.Ordinal);
     }
 

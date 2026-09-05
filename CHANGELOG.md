@@ -4,6 +4,14 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260905.10] - 2026-09-05
+
+### Changed
+
+- Add the Active Directory machine name to trace details alongside the device ID for devices discovered in the current scope.
+- Rename the read client's latest-run operation to `ShowLastRunStatus`, retaining `ShowStatus` as a compatibility alias.
+- Internalize the production Entra API client ID while continuing to use it as the required OAuth token audience.
+
 ## [0.1.20260905.9] - 2026-09-05
 
 ### Changed

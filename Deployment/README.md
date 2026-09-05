@@ -168,11 +168,11 @@ The object contains `FunctionAppName`, `ResourceGroupName`, `Rules`, `RulesJson`
 
 ```powershell
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowRules
-./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowStatus | Format-List
+./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowLastRunStatus | Format-List
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowTrace
 ```
 
-`ShowRules` emits one object per effective rule. `ShowStatus` emits the latest device-tagging status. `ShowTrace` emits each event as one logical line in the format `<time>,<severity>,<phase>,<status>,<action>,<details>`. Time uses ISO 8601 and details remain compact JSON. Long details may wrap visually at the terminal width but contain no newline. The active Entra identity must be included in the Function App Easy Auth principal allowlist, but it does not need Azure Resource Manager access. `ApiBaseUri` and `ManagementApiClientId` remain optional overrides for another deployment; the client ID is an OAuth audience identifier, not a credential.
+`ShowRules` emits one object per effective rule. `ShowLastRunStatus` emits the latest device-tagging run status; `ShowStatus` remains a compatibility alias. `ShowTrace` emits each event as one logical line in the format `<time>,<severity>,<phase>,<status>,<action>,<details>`. Time uses ISO 8601, details remain compact JSON, and devices in the current AD scope include `machineName` alongside `deviceId`. Long details may wrap visually at the terminal width but contain no newline. The active Entra identity must be included in the Function App Easy Auth principal allowlist, but it does not need Azure Resource Manager access. The production OAuth audience is internal to the client because the client ID remains technically required for token acquisition but is not a credential.
 
 For an update, always pass the complete desired rule set. Add an OU by adding an item, change a tag value in its `ExtensionAttributes`, or remove an OU by omitting its item. Preview the current and proposed configuration first:
 

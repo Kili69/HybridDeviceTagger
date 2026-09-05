@@ -96,7 +96,7 @@ public sealed class DeviceTaggingService
                 "Device",
                 "FindEntraDevice",
                 "Started",
-                DeviceDetails(directoryDevice.DeviceId, null),
+                DeviceDetails(directoryDevice.DeviceId, null, directoryDevice.Name),
                 null,
                 cancellationToken);
             var entraDevice = await _entraDeviceClient.FindByDeviceIdAsync(
@@ -114,7 +114,7 @@ public sealed class DeviceTaggingService
                     "Device",
                     "FindEntraDevice",
                     "NotFound",
-                    DeviceDetails(directoryDevice.DeviceId, null),
+                    DeviceDetails(directoryDevice.DeviceId, null, directoryDevice.Name),
                     null,
                     cancellationToken);
                 continue;
@@ -125,7 +125,7 @@ public sealed class DeviceTaggingService
                 "Device",
                 "FindEntraDevice",
                 "Succeeded",
-                DeviceDetails(directoryDevice.DeviceId, entraDevice.Id),
+                DeviceDetails(directoryDevice.DeviceId, entraDevice.Id, directoryDevice.Name),
                 null,
                 cancellationToken);
 
@@ -136,7 +136,7 @@ public sealed class DeviceTaggingService
                     "Entra device {DeviceId} has trust type {TrustType}; expected ServerAd",
                     directoryDevice.DeviceId,
                     entraDevice.TrustType);
-                var details = DeviceDetails(directoryDevice.DeviceId, entraDevice.Id);
+                var details = DeviceDetails(directoryDevice.DeviceId, entraDevice.Id, directoryDevice.Name);
                 details["trustType"] = entraDevice.TrustType;
                 details["expectedTrustType"] = "ServerAd";
                 await trace.WriteAsync(
@@ -178,7 +178,7 @@ public sealed class DeviceTaggingService
                 managedState.ExtensionAttributes.Remove(attributeName);
             }
 
-            var attributeDetails = DeviceDetails(directoryDevice.DeviceId, entraDevice.Id);
+            var attributeDetails = DeviceDetails(directoryDevice.DeviceId, entraDevice.Id, directoryDevice.Name);
             attributeDetails["desiredAttributes"] = assignment.ExtensionAttributes
                 .OrderBy(attribute => attribute.Key, StringComparer.OrdinalIgnoreCase)
                 .Select(attribute => new
@@ -225,6 +225,7 @@ public sealed class DeviceTaggingService
                     new Dictionary<string, object?>
                     {
                         ["deviceId"] = directoryDevice.DeviceId,
+                        ["machineName"] = directoryDevice.Name,
                         ["entraObjectId"] = entraDevice.Id,
                         ["attributeNames"] = changedAttributes.Keys
                             .Order(StringComparer.OrdinalIgnoreCase)
@@ -248,6 +249,7 @@ public sealed class DeviceTaggingService
                 new Dictionary<string, object?>
                 {
                     ["deviceId"] = directoryDevice.DeviceId,
+                    ["machineName"] = directoryDevice.Name,
                     ["entraObjectId"] = entraDevice.Id,
                     ["managedAttributeNames"] = managedState.ExtensionAttributes.Keys
                         .Order(StringComparer.OrdinalIgnoreCase)
@@ -262,7 +264,8 @@ public sealed class DeviceTaggingService
                 assignment.EntraGroupIds,
                 assignment.AdministrativeUnitIds,
                 cancellationToken,
-                trace);
+                trace,
+                directoryDevice.Name);
             membershipsAdded += membershipResult.Added;
             membershipsRemoved += membershipResult.Removed;
             if (changedAttributes.Count > 0 || membershipResult.Changed)
@@ -424,7 +427,13 @@ public sealed class DeviceTaggingService
                     ["ruleName"] = rule.Name,
                     ["baseDn"] = rule.BaseDn,
                     ["deviceCount"] = devices.Count,
-                    ["deviceIds"] = devices.Select(device => device.DeviceId).ToArray()
+                    ["deviceIds"] = devices.Select(device => device.DeviceId).ToArray(),
+                    ["machineNames"] = devices.Select(device => device.Name).ToArray(),
+                    ["devices"] = devices.Select(device => new
+                    {
+                        deviceId = device.DeviceId,
+                        machineName = device.Name
+                    }).ToArray()
                 },
                 null,
                 cancellationToken);
@@ -457,10 +466,14 @@ public sealed class DeviceTaggingService
         return assignments;
     }
 
-    private static Dictionary<string, object?> DeviceDetails(Guid deviceId, string? entraObjectId) =>
+    private static Dictionary<string, object?> DeviceDetails(
+        Guid deviceId,
+        string? entraObjectId,
+        string? machineName = null) =>
         new()
         {
             ["deviceId"] = deviceId,
+            ["machineName"] = machineName,
             ["entraObjectId"] = entraObjectId
         };
 

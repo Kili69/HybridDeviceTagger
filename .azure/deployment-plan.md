@@ -58,6 +58,15 @@ Status: Validated
 
 ## 7. Validation Proof
 
+Machine-name trace release validation completed: `2026-09-05`.
+
+- Azure CLI and Azure MCP resolve to `kili@bloedgelaber.de`, tenant `d89a354d-2bce-44ed-b802-8f8600689247`, and confirmed subscription `23ca129f-1e1c-4a56-bc51-e3ec2c874a73`.
+- Release build completed without warnings; the complete test suite passed with 65/65 tests, including focused assertions for `machineName` in device and membership trace details.
+- `ShowLastRunStatus` and its compatibility alias `ShowStatus` both returned the production `device-tagging` run status through the Easy Auth protected REST API.
+- The read client exposes no `ManagementApiClientId` parameter; the fixed non-secret API audience remains internal and is used only for Azure CLI token acquisition.
+- Bicep build and lint, PowerShell parsing and PSScriptAnalyzer, commit metadata validation, editor diagnostics, and `git diff --check` passed.
+- Infrastructure and RBAC definitions are unchanged. Existing resource-scoped Storage and Key Vault roles and the three documented Microsoft Graph application roles remain sufficient.
+
 Management API release validation completed: `2026-09-05`.
 
 - Azure extension and Azure CLI contexts both resolve to `kili@bloedgelaber.de`, tenant `d89a354d-2bce-44ed-b802-8f8600689247`, and subscription `23ca129f-1e1c-4a56-bc51-e3ec2c874a73`.

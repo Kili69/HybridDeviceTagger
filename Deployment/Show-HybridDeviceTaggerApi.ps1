@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.9
+# Project-Version: 0.1.20260905.10
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -14,14 +14,10 @@ Displays operational data from the HybridDeviceTagger management REST API.
 Uses the existing Azure CLI sign-in to obtain an Entra bearer token without a client secret and
 emits rules, the latest device-tagging status, or parsed latest-run JSONL trace events.
 The script calls only the HybridDeviceTagger REST API and does not query Azure Resource Manager.
-The production API URL and client ID are defaults and need to be supplied only for another deployment.
+The production API URL and token audience are built in.
 
 .PARAMETER ApiBaseUri
 Optional base URI of the HybridDeviceTagger management API, including the /api/management path.
-
-.PARAMETER ManagementApiClientId
-Optional application client ID of the Entra app registration protecting the management API.
-The client ID identifies the token audience and is not a credential or secret.
 
 .PARAMETER ShowRules
 Emits the current effective tagging rules.
@@ -30,7 +26,7 @@ Emits the current effective tagging rules.
 Downloads the latest device-tagging JSONL trace in memory and emits one line per event in the
 format <time>,<severity>,<phase>,<status>,<action>,<details>.
 
-.PARAMETER ShowStatus
+.PARAMETER ShowLastRunStatus
 Emits the status of the latest device-tagging run.
 
 .EXAMPLE
@@ -43,14 +39,12 @@ Emits the status of the latest device-tagging run.
 
 .EXAMPLE
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 `
-    -ShowStatus | Format-List
+    -ShowLastRunStatus | Format-List
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'Rules')]
 param(
     [uri]$ApiBaseUri = 'https://func-hybriddevicetagger.azurewebsites.net/api/management',
-
-    [guid]$ManagementApiClientId = '5e324803-5aed-4e5d-b49f-a4bfceddcda8',
 
     [Parameter(Mandatory, ParameterSetName = 'Rules')]
     [switch]$ShowRules,
@@ -58,13 +52,15 @@ param(
     [Parameter(Mandatory, ParameterSetName = 'Trace')]
     [switch]$ShowTrace,
 
-    [Parameter(Mandatory, ParameterSetName = 'Status')]
-    [switch]$ShowStatus
+    [Parameter(Mandatory, ParameterSetName = 'LastRunStatus')]
+    [Alias('ShowStatus')]
+    [switch]$ShowLastRunStatus
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$managementApiClientId = [guid]'5e324803-5aed-4e5d-b49f-a4bfceddcda8'
 
 if (-not (Get-Command az -CommandType Application -ErrorAction SilentlyContinue)) {
     throw 'Azure CLI is required. Install Azure CLI, run az login, and try again.'
@@ -74,11 +70,11 @@ if (-not $ApiBaseUri.IsAbsoluteUri -or $ApiBaseUri.Scheme -ne 'https') {
 }
 
 $tokenResponse = az account get-access-token `
-    --scope "api://$ManagementApiClientId/.default" `
+    --scope "api://$managementApiClientId/.default" `
     --output json `
     --only-show-errors | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$tokenResponse.accessToken)) {
-    throw "Unable to obtain an Entra access token for api://$ManagementApiClientId. Run 'az login --scope api://$ManagementApiClientId/.default' and try again."
+    throw "Unable to obtain an Entra access token for api://$managementApiClientId. Run 'az login --scope api://$managementApiClientId/.default' and try again."
 }
 
 $headers = @{ Authorization = "Bearer $($tokenResponse.accessToken)" }
@@ -92,7 +88,7 @@ if ($ShowRules) {
     Write-Verbose "Rule source: $($configuration.source); ETag: $($configuration.eTag)"
     $configuration.rules
 }
-elseif ($ShowStatus) {
+elseif ($ShowLastRunStatus) {
     Invoke-RestMethod `
         -Method Get `
         -Uri "$managementApiBaseUri/status/device-tagging" `

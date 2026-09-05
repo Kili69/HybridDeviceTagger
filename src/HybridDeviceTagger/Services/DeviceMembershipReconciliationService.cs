@@ -23,13 +23,22 @@ public sealed class DeviceMembershipReconciliationService
     }
 
     /// <summary>Applies desired memberships and removes only memberships recorded in the ledger.</summary>
+    /// <param name="deviceId">The device identifier shared by Active Directory and Entra.</param>
+    /// <param name="entraObjectId">The Entra directory object identifier.</param>
+    /// <param name="desiredGroupIds">The desired Entra security-group identifiers.</param>
+    /// <param name="desiredAdministrativeUnitIds">The desired administrative-unit identifiers.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <param name="trace">The optional structured diagnostic trace for this run.</param>
+    /// <param name="machineName">The optional Active Directory computer name for trace correlation.</param>
+    /// <returns>The number of memberships added and removed.</returns>
     public async Task<MembershipReconciliationResult> ReconcileAsync(
         Guid deviceId,
         string entraObjectId,
         IReadOnlySet<Guid> desiredGroupIds,
         IReadOnlySet<Guid> desiredAdministrativeUnitIds,
         CancellationToken cancellationToken,
-        IRunTraceSession? trace = null)
+        IRunTraceSession? trace = null,
+        string? machineName = null)
     {
         trace ??= RunTrace.None;
         var memberships = await _ledger.GetAsync(deviceId, cancellationToken);
@@ -49,7 +58,8 @@ public sealed class DeviceMembershipReconciliationService
                 entraObjectId,
                 "Ledger",
                 null,
-                memberships.EntraGroupIds.Count + memberships.AdministrativeUnitIds.Count),
+                memberships.EntraGroupIds.Count + memberships.AdministrativeUnitIds.Count,
+                machineName),
             null,
             cancellationToken);
 
@@ -62,7 +72,8 @@ public sealed class DeviceMembershipReconciliationService
                 entraObjectId,
                 "Group",
                 groupId,
-                memberships.EntraGroupIds.Contains(groupId) ? 1 : 0);
+                memberships.EntraGroupIds.Contains(groupId) ? 1 : 0,
+                machineName);
             await trace.WriteAsync(
                 "Information",
                 "Membership",
@@ -116,7 +127,7 @@ public sealed class DeviceMembershipReconciliationService
 
         foreach (var groupId in memberships.EntraGroupIds.Except(desiredGroupIds).ToArray())
         {
-            var groupDetails = MembershipDetails(deviceId, entraObjectId, "Group", groupId, 1);
+            var groupDetails = MembershipDetails(deviceId, entraObjectId, "Group", groupId, 1, machineName);
             await trace.WriteAsync(
                 "Information",
                 "Membership",
@@ -156,7 +167,8 @@ public sealed class DeviceMembershipReconciliationService
                 entraObjectId,
                 "AdministrativeUnitOrRestrictedAdministrativeUnit",
                 administrativeUnitId,
-                memberships.AdministrativeUnitIds.Contains(administrativeUnitId) ? 1 : 0);
+                memberships.AdministrativeUnitIds.Contains(administrativeUnitId) ? 1 : 0,
+                machineName);
             await trace.WriteAsync(
                 "Information",
                 "Membership",
@@ -217,7 +229,8 @@ public sealed class DeviceMembershipReconciliationService
                 entraObjectId,
                 "AdministrativeUnitOrRestrictedAdministrativeUnit",
                 administrativeUnitId,
-                1);
+                1,
+                machineName);
             await trace.WriteAsync(
                 "Information",
                 "Membership",
@@ -258,10 +271,12 @@ public sealed class DeviceMembershipReconciliationService
         string entraObjectId,
         string targetType,
         Guid? targetId,
-        int ownedCount) =>
+        int ownedCount,
+        string? machineName) =>
         new()
         {
             ["deviceId"] = deviceId,
+            ["machineName"] = machineName,
             ["entraObjectId"] = entraObjectId,
             ["targetType"] = targetType,
             ["targetId"] = targetId,
