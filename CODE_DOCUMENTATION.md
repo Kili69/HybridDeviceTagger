@@ -70,7 +70,7 @@ The Azure clients, LDAP adapters, credential store, dynamic rule provider, opera
 
 `BlobOperationStatusStore` writes separate JSON documents for device tagging and password rotation. Timer entry points record `Running`, then `Succeeded` or a sanitized `Failed` state. Password status preserves the timestamp of the last actual password change across checks that do not rotate. Status persistence failures are warnings and do not fail the directory workflow.
 
-`Deployment/Show-HybridDeviceTaggerApi.ps1` is the read-only operational client. Its mutually exclusive `ShowRules`, `ShowStatus`, and `ShowTrace` parameter sets accept the REST API base URI and Entra API client ID directly, obtain a delegated token through Azure CLI, and emit structured PowerShell objects. It does not query Azure Resource Manager or require subscription metadata. Trace mode parses each JSONL record independently rather than returning an opaque download.
+`Deployment/Show-HybridDeviceTaggerApi.ps1` is the read-only operational client. Its mutually exclusive `ShowRules`, `ShowStatus`, and `ShowTrace` parameter sets use production defaults for the REST API base URI and non-secret Entra audience, obtain a delegated token from the existing Azure CLI sign-in, and emit structured PowerShell objects. Both connection values remain optional overrides for other deployments. It does not query Azure Resource Manager or require subscription metadata. Trace mode parses each JSONL record independently rather than returning an opaque download.
 
 ## Device Tagging Workflow
 

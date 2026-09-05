@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.6
+# Project-Version: 0.1.20260905.7
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -11,15 +11,17 @@ DISCLAIMER: This sample script is not supported under any Microsoft standard sup
 Displays operational data from the HybridDeviceTagger management REST API.
 
 .DESCRIPTION
-Obtains an Entra bearer token for the supplied API client ID without a client secret and
+Uses the existing Azure CLI sign-in to obtain an Entra bearer token without a client secret and
 emits rules, the latest device-tagging status, or parsed latest-run JSONL trace events.
 The script calls only the HybridDeviceTagger REST API and does not query Azure Resource Manager.
+The production API URL and client ID are defaults and need to be supplied only for another deployment.
 
 .PARAMETER ApiBaseUri
-Base URI of the HybridDeviceTagger management API, including the /api/management path.
+Optional base URI of the HybridDeviceTagger management API, including the /api/management path.
 
 .PARAMETER ManagementApiClientId
-Application client ID of the Entra app registration protecting the management API.
+Optional application client ID of the Entra app registration protecting the management API.
+The client ID identifies the token audience and is not a credential or secret.
 
 .PARAMETER ShowRules
 Emits the current effective tagging rules.
@@ -32,30 +34,22 @@ Emits the status of the latest device-tagging run.
 
 .EXAMPLE
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 `
-    -ApiBaseUri 'https://func-hybriddevicetagger.azurewebsites.net/api/management' `
-    -ManagementApiClientId '5e324803-5aed-4e5d-b49f-a4bfceddcda8' `
     -ShowRules
 
 .EXAMPLE
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 `
-    -ApiBaseUri 'https://func-hybriddevicetagger.azurewebsites.net/api/management' `
-    -ManagementApiClientId '5e324803-5aed-4e5d-b49f-a4bfceddcda8' `
     -ShowTrace | Format-Table timestampUtc, level, phase, action, outcome
 
 .EXAMPLE
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 `
-    -ApiBaseUri 'https://func-hybriddevicetagger.azurewebsites.net/api/management' `
-    -ManagementApiClientId '5e324803-5aed-4e5d-b49f-a4bfceddcda8' `
     -ShowStatus | Format-List
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'Rules')]
 param(
-    [Parameter(Mandatory)]
-    [uri]$ApiBaseUri,
+    [uri]$ApiBaseUri = 'https://func-hybriddevicetagger.azurewebsites.net/api/management',
 
-    [Parameter(Mandatory)]
-    [guid]$ManagementApiClientId,
+    [guid]$ManagementApiClientId = '5e324803-5aed-4e5d-b49f-a4bfceddcda8',
 
     [Parameter(Mandatory, ParameterSetName = 'Rules')]
     [switch]$ShowRules,

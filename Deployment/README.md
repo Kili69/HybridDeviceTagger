@@ -164,21 +164,16 @@ The object contains `FunctionAppName`, `ResourceGroupName`, `Rules`, `RulesJson`
 
 ## Reading management API data
 
-`Show-HybridDeviceTaggerApi.ps1` provides three mutually exclusive, read-only operations. It calls only the management REST API, obtains an Entra token for the supplied API client ID from the active Azure CLI session, and emits structured PowerShell objects. It requires no subscription, resource-group, Function App, or ARM-discovery parameters:
+`Show-HybridDeviceTaggerApi.ps1` provides three mutually exclusive, read-only operations. It calls only the management REST API and uses the existing Azure CLI sign-in. The production API URL and its non-secret Entra token audience are built-in defaults, so normal use requires only the operation switch:
 
 ```powershell
-$common = @{
-    ApiBaseUri = 'https://func-hybrid-device-tagger-prod.azurewebsites.net/api/management'
-    ManagementApiClientId = '11111111-1111-1111-1111-111111111111'
-}
-
-./Deployment/Show-HybridDeviceTaggerApi.ps1 @common -ShowRules
-./Deployment/Show-HybridDeviceTaggerApi.ps1 @common -ShowStatus | Format-List
-./Deployment/Show-HybridDeviceTaggerApi.ps1 @common -ShowTrace |
+./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowRules
+./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowStatus | Format-List
+./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowTrace |
     Format-Table timestampUtc, level, phase, action, outcome
 ```
 
-`ShowRules` emits one object per effective rule. `ShowStatus` emits the latest device-tagging status. `ShowTrace` parses the latest JSONL trace and emits one object per trace event. The active Entra identity must be included in the Function App Easy Auth principal allowlist, but it does not need Azure Resource Manager access.
+`ShowRules` emits one object per effective rule. `ShowStatus` emits the latest device-tagging status. `ShowTrace` parses the latest JSONL trace and emits one object per trace event. The active Entra identity must be included in the Function App Easy Auth principal allowlist, but it does not need Azure Resource Manager access. `ApiBaseUri` and `ManagementApiClientId` remain optional overrides for another deployment; the client ID is an OAuth audience identifier, not a credential.
 
 For an update, always pass the complete desired rule set. Add an OU by adding an item, change a tag value in its `ExtensionAttributes`, or remove an OU by omitting its item. Preview the current and proposed configuration first:
 
