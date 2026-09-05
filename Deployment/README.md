@@ -169,11 +169,10 @@ The object contains `FunctionAppName`, `ResourceGroupName`, `Rules`, `RulesJson`
 ```powershell
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowRules
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowStatus | Format-List
-./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowTrace |
-    Format-Table timestampUtc, level, phase, action, outcome
+./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowTrace
 ```
 
-`ShowRules` emits one object per effective rule. `ShowStatus` emits the latest device-tagging status. `ShowTrace` parses the latest JSONL trace and emits one object per trace event. The active Entra identity must be included in the Function App Easy Auth principal allowlist, but it does not need Azure Resource Manager access. `ApiBaseUri` and `ManagementApiClientId` remain optional overrides for another deployment; the client ID is an OAuth audience identifier, not a credential.
+`ShowRules` emits one object per effective rule. `ShowStatus` emits the latest device-tagging status. `ShowTrace` emits each event as one compact JSON line, preserving valid JSONL while keeping console events visually separate. The active Entra identity must be included in the Function App Easy Auth principal allowlist, but it does not need Azure Resource Manager access. `ApiBaseUri` and `ManagementApiClientId` remain optional overrides for another deployment; the client ID is an OAuth audience identifier, not a credential.
 
 For an update, always pass the complete desired rule set. Add an OU by adding an item, change a tag value in its `ExtensionAttributes`, or remove an OU by omitting its item. Preview the current and proposed configuration first:
 

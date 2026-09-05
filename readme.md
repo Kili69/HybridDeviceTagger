@@ -113,11 +113,10 @@ Für die drei häufigsten Leseoperationen steht `Deployment/Show-HybridDeviceTag
 ```powershell
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowRules
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowStatus | Format-List
-./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowTrace |
-	Format-Table timestampUtc, level, phase, action, outcome
+./Deployment/Show-HybridDeviceTaggerApi.ps1 -ShowTrace
 ```
 
-`ApiBaseUri` und `ManagementApiClientId` sind optionale Überschreibungen für eine andere Installation. Die Client-ID ist kein Kennwort oder Secret; Azure CLI benötigt sie intern nur als Audience des aus der bestehenden Anmeldung erzeugten Zugriffstokens.
+`ShowTrace` gibt jedes Trace-Ereignis als eine kompakte JSON-Zeile aus. Dadurch bleibt die Ausgabe gültiges JSONL und jedes Ereignis ist am Monitor einzeln lesbar. `ApiBaseUri` und `ManagementApiClientId` sind optionale Überschreibungen für eine andere Installation. Die Client-ID ist kein Kennwort oder Secret; Azure CLI benötigt sie intern nur als Audience des aus der bestehenden Anmeldung erzeugten Zugriffstokens.
 
 Ein Bearer-Token muss als Audience die konfigurierte API-App-ID oder `api://<client-id>` besitzen:
 
@@ -177,7 +176,7 @@ Die Unit-Tests prüfen Geräteabgleich, Fälligkeit, reguläre Rotation, Recover
 
 ## Versionierung und Autor
 
-Das Projekt verwendet die Produktversion `<major>.<minor>.<yyyyMMdd>.<counter>`, aktuell `0.1.20260905.7`. Der Zähler beginnt für jede Veröffentlichung am selben Datum bei `1` und wird bei weiteren Veröffentlichungen an diesem Tag erhöht. Die zentrale Definition steht in `Directory.Build.props` und wird als Paket- und Informational-Version in die Build-Ausgabe übernommen.
+Das Projekt verwendet die Produktversion `<major>.<minor>.<yyyyMMdd>.<counter>`, aktuell `0.1.20260905.8`. Der Zähler beginnt für jede Veröffentlichung am selben Datum bei `1` und wird bei weiteren Veröffentlichungen an diesem Tag erhöht. Die zentrale Definition steht in `Directory.Build.props` und wird als Paket- und Informational-Version in die Build-Ausgabe übernommen.
 
 Vor jedem Commit müssen die Version in `Directory.Build.props` erhöht und ein datierter Abschnitt für exakt diese Version in [CHANGELOG.md](CHANGELOG.md) ergänzt werden. Das eingecheckte Prüfskript validiert beide Bedingungen gegen `HEAD`. Der Repository-Hook wird einmalig pro Clone aktiviert:
 

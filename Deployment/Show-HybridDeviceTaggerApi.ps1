@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.7
+# Project-Version: 0.1.20260905.8
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -27,7 +27,7 @@ The client ID identifies the token audience and is not a credential or secret.
 Emits the current effective tagging rules.
 
 .PARAMETER ShowTrace
-Downloads the latest device-tagging JSONL trace in memory and emits one object per line.
+Downloads the latest device-tagging JSONL trace in memory and emits one compact JSON string per event.
 
 .PARAMETER ShowStatus
 Emits the status of the latest device-tagging run.
@@ -38,7 +38,7 @@ Emits the status of the latest device-tagging run.
 
 .EXAMPLE
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 `
-    -ShowTrace | Format-Table timestampUtc, level, phase, action, outcome
+    -ShowTrace
 
 .EXAMPLE
 ./Deployment/Show-HybridDeviceTaggerApi.ps1 `
@@ -104,7 +104,7 @@ elseif ($ShowTrace) {
         -Headers $headers
     foreach ($line in $traceContent -split "`r?`n") {
         if (-not [string]::IsNullOrWhiteSpace($line)) {
-            $line | ConvertFrom-Json
+            $line | ConvertFrom-Json | ConvertTo-Json -Compress -Depth 100
         }
     }
 }

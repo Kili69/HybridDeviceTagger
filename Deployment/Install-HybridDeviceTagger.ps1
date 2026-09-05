@@ -1,6 +1,6 @@
 #Requires -Version 7.2
 #Requires -Modules ActiveDirectory
-# Project-Version: 0.1.20260905.7
+# Project-Version: 0.1.20260905.8
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
