@@ -4,6 +4,18 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260905.12] - 2026-09-05
+
+### Added
+
+- Add a reusable stateful PowerShell management module for rules, statuses, traces, immediate tagging, and forced service-account password rotation.
+- Add authenticated REST actions for immediate device tagging and forced password rotation with conflict protection against overlapping runs.
+
+### Changed
+
+- Reuse the timer orchestration, status persistence, trace handling, and security checks for manually invoked operations.
+- Refactor the existing read and configuration scripts to use the shared direct REST API connection without Azure Resource Manager discovery.
+
 ## [0.1.20260905.11] - 2026-09-05
 
 ### Changed

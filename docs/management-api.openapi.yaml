@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
   title: HybridDeviceTagger Management API
-  version: 0.1.20260905.11
-  description: Entra-authenticated API for tagging configuration, run status, and trace retrieval.
+  version: 0.1.20260905.12
+  description: Entra-authenticated API for tagging configuration, operational actions, run status, and trace retrieval.
 servers:
   - url: https://func-hybriddevicetagger.azurewebsites.net/api/management
 security:
@@ -133,6 +133,36 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+  /actions/device-tagging:
+    post:
+      operationId: runDeviceTagging
+      summary: Run device tagging immediately
+      responses:
+        '200':
+          description: Completed tagging result and invocation ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceTaggingActionResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/OperationConflict'
+  /actions/password-rotation:
+    post:
+      operationId: runPasswordRotation
+      summary: Force an immediate Active Directory service-account password rotation
+      responses:
+        '200':
+          description: Completed password-rotation result and invocation ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasswordRotationActionResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/OperationConflict'
   /traces/device-tagging/latest:
     get:
       operationId: downloadLatestDeviceTaggingTrace
@@ -175,6 +205,8 @@ components:
       description: The requested rule or operational artifact does not exist
     Conflict:
       description: Another request changed the configuration concurrently
+    OperationConflict:
+      description: The requested operation is already running
   schemas:
     TaggingRule:
       type: object
@@ -271,3 +303,48 @@ components:
         errorMessage:
           type: string
           nullable: true
+    DeviceTaggingActionResult:
+      type: object
+      required:
+        - invocationId
+        - result
+      properties:
+        invocationId:
+          type: string
+          format: uuid
+        result:
+          type: object
+          required:
+            - discovered
+            - updated
+            - unchanged
+            - notFound
+            - notHybridJoined
+            - membershipsAdded
+            - membershipsRemoved
+            - removedFromScope
+          additionalProperties:
+            type: integer
+    PasswordRotationActionResult:
+      type: object
+      required:
+        - invocationId
+        - result
+      properties:
+        invocationId:
+          type: string
+          format: uuid
+        result:
+          type: object
+          required:
+            - outcome
+          properties:
+            outcome:
+              type: string
+              enum:
+                - Rotated
+                - RecoveredFromNext
+                - DeferredNoSecureConnection
+            currentPasswordAgeDays:
+              type: integer
+              nullable: true

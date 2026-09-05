@@ -25,6 +25,22 @@ public sealed class PasswordRotationServiceTests
     }
 
     [Fact]
+    public async Task RotateNowAsync_RotatesRecentPassword()
+    {
+        var store = new StubCredentialStore(CreateCredential("current", Now.AddDays(-10)), Now);
+        var passwordClient = new StubPasswordClient("current");
+        var service = CreateService(store, passwordClient);
+
+        var result = await service.RotateNowAsync(CancellationToken.None);
+
+        Assert.Equal(PasswordRotationOutcome.Rotated, result.Outcome);
+        Assert.Equal(10, result.CurrentPasswordAgeDays);
+        Assert.Equal(1, store.StageCount);
+        Assert.Equal(1, passwordClient.ChangeCount);
+        Assert.Equal("generated-password", store.Current.Password);
+    }
+
+    [Fact]
     public async Task RotateIfDueAsync_StagesChangesValidatesAndPromotesPassword()
     {
         var store = new StubCredentialStore(CreateCredential("current", Now.AddDays(-25)), Now);

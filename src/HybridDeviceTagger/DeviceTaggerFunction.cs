@@ -3,6 +3,7 @@
  * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
  */
 
+using HybridDeviceTagger.Models;
 using HybridDeviceTagger.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
@@ -10,8 +11,9 @@ using Microsoft.Extensions.Logging;
 namespace HybridDeviceTagger;
 
 /// <summary>Runs the scheduled hybrid-device tagging workflow.</summary>
-public class DeviceTaggerFunction
+public class DeviceTaggerFunction : IDeviceTaggingRunner
 {
+    private static readonly SemaphoreSlim ExecutionLock = new(1, 1);
     private readonly DeviceTaggingService _deviceTaggingService;
     private readonly IRunTraceStore _runTraceStore;
     private readonly IOperationStatusStore _statusStore;
@@ -44,19 +46,46 @@ public class DeviceTaggerFunction
         [TimerTrigger("%TaggingSchedule%")] TimerInfo timer,
         FunctionContext context,
         CancellationToken cancellationToken)
+        => await RunAsync(context.InvocationId, timer.IsPastDue, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<TaggingResult> RunAsync(
+        string invocationId,
+        bool isPastDue,
+        CancellationToken cancellationToken)
+    {
+        if (!await ExecutionLock.WaitAsync(0, cancellationToken))
+        {
+            throw new OperationAlreadyRunningException(OperationNames.DeviceTagging);
+        }
+
+        try
+        {
+            return await RunCoreAsync(invocationId, isPastDue, cancellationToken);
+        }
+        finally
+        {
+            ExecutionLock.Release();
+        }
+    }
+
+    private async Task<TaggingResult> RunCoreAsync(
+        string invocationId,
+        bool isPastDue,
+        CancellationToken cancellationToken)
     {
         var trace = await _runTraceStore.StartAsync(
-            context.InvocationId,
-            timer.IsPastDue,
+            invocationId,
+            isPastDue,
             cancellationToken);
         await TryRecordStatusAsync(() => _statusStore.StartAsync(
             OperationNames.DeviceTagging,
-            context.InvocationId,
+            invocationId,
             cancellationToken));
         _logger.LogInformation(
             "Device tagging started. Invocation ID: {InvocationId}, Past due: {IsPastDue}",
-            context.InvocationId,
-            timer.IsPastDue);
+            invocationId,
+            isPastDue);
 
         try
         {
@@ -82,7 +111,7 @@ public class DeviceTaggerFunction
                 CancellationToken.None);
             await TryRecordStatusAsync(() => _statusStore.CompleteAsync(
                 OperationNames.DeviceTagging,
-                context.InvocationId,
+                invocationId,
                 new Dictionary<string, object?>
                 {
                     ["discovered"] = result.Discovered,
@@ -99,7 +128,7 @@ public class DeviceTaggerFunction
 
             _logger.LogInformation(
                 "Device tagging completed. Invocation ID: {InvocationId}, Discovered: {Discovered}, Updated: {Updated}, Already tagged: {Unchanged}, Not found: {NotFound}, Not hybrid joined: {NotHybridJoined}, Memberships added: {MembershipsAdded}, Memberships removed: {MembershipsRemoved}, Removed from scope: {RemovedFromScope}",
-                context.InvocationId,
+                invocationId,
                 result.Discovered,
                 result.Updated,
                 result.Unchanged,
@@ -108,6 +137,7 @@ public class DeviceTaggerFunction
                 result.MembershipsAdded,
                 result.MembershipsRemoved,
                 result.RemovedFromScope);
+            return result;
         }
         catch (Exception exception)
         {
@@ -121,13 +151,13 @@ public class DeviceTaggerFunction
                 CancellationToken.None);
             await TryRecordStatusAsync(() => _statusStore.FailAsync(
                 OperationNames.DeviceTagging,
-                context.InvocationId,
+                invocationId,
                 exception,
                 CancellationToken.None));
             _logger.LogError(
                 exception,
                 "Device tagging failed. Invocation ID: {InvocationId}",
-                context.InvocationId);
+                invocationId);
             throw;
         }
     }

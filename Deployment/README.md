@@ -136,16 +136,12 @@ An empty interactive required value or an unsuitable interactively selected FC1 
 
 ## Updating tagging rules after installation
 
-Use `Update-TaggingConfiguration.ps1` to change OU actions for an existing Function App, including extension attributes, Entra security groups, and administrative units. The script does not run Bicep or deploy application code. It validates the rule structure and writes the complete configuration through the Entra-authenticated management API with ETag concurrency protection. The rules become effective without restarting the Function App.
+Use `Update-TaggingConfiguration.ps1` to change OU actions for an existing Function App, including extension attributes, Entra security groups, and administrative units. The script does not run Bicep or deploy application code. It validates the rule structure and writes the complete configuration through the Entra-authenticated management API with ETag concurrency protection. The production API URI is the default; use `ApiBaseUri` for another deployment. The rules become effective without restarting the Function App.
 
 Display the current configuration without changing it:
 
 ```powershell
 ./Deployment/Update-TaggingConfiguration.ps1 `
-    -FunctionAppAdministratorAccount 'function.admin@contoso.com' `
-    -SubscriptionId '00000000-0000-0000-0000-000000000000' `
-    -ResourceGroupName 'rg-hybrid-device-tagger-prod' `
-    -FunctionAppName 'func-hybrid-device-tagger-prod' `
     -ShowCurrent
 ```
 
@@ -163,6 +159,21 @@ $configuration.RulesJson
 The object contains `FunctionAppName`, `ResourceGroupName`, `Rules`, `RulesJson`, and `IsValid`. `Rules` is always an array. For `WhatIf`, the returned object represents the configuration currently persisted in Azure, not the unapplied proposal. After a successful add or remove, it represents the newly persisted configuration.
 
 ## Reading management API data
+
+Import `HybridDeviceTagger.Management` once and connect once to reuse the API URI and delegated Azure CLI token throughout the current PowerShell session:
+
+```powershell
+Import-Module ./Deployment/HybridDeviceTagger.Management
+Connect-HybridDeviceTagger
+Get-HybridDeviceTaggerRule
+Get-HybridDeviceTaggerLastRunStatus
+Get-HybridDeviceTaggerPasswordRotationStatus
+Get-HybridDeviceTaggerTrace
+Invoke-HybridDeviceTagging
+Invoke-HybridDeviceTaggerPasswordRotation -Confirm
+```
+
+The password-rotation command has high confirmation impact and forces a real service-account password change. It bypasses only the configured age threshold; current credential verification, LDAPS, staging, validation, and secret promotion still apply. Immediate operations return their invocation ID and result synchronously. A second invocation of the same operation receives HTTP `409` while the first is running.
 
 `Show-HybridDeviceTaggerApi.ps1` provides three mutually exclusive, read-only operations. It calls only the management REST API and uses the existing Azure CLI sign-in. The production API URL and its non-secret Entra token audience are built-in defaults, so normal use requires only the operation switch:
 

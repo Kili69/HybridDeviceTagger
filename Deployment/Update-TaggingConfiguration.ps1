@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.11
+# Project-Version: 0.1.20260905.12
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -23,24 +23,22 @@ DISCLAIMER: This sample script is not supported under any Microsoft standard sup
 )]
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 320)]
     [string]$FunctionAppAdministratorAccount,
 
-    [Parameter(Mandatory)]
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$SubscriptionId,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 90)]
     [string]$ResourceGroupName,
 
-    [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
     [ValidateLength(2, 60)]
     [string]$FunctionAppName,
+
+    [uri]$ApiBaseUri = 'https://func-hybriddevicetagger.azurewebsites.net/api/management',
 
     [ValidateNotNull()]
     [ValidateCount(1, 100)]
@@ -543,82 +541,20 @@ if ($prevalidatedRulesJson.Length -gt $script:MaximumRulesJsonLength) {
     throw "Serialized tagging configuration cannot exceed $script:MaximumRulesJsonLength characters."
 }
 
-$account = az account show --output json --only-show-errors | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0) {
-    throw 'Unable to read the active Azure CLI account.'
-}
-if ($account.user.name -ine $FunctionAppAdministratorAccount) {
-    throw "Function App administrator account mismatch. Expected '$FunctionAppAdministratorAccount', active Azure CLI account is '$($account.user.name)'."
-}
-if ($account.id -ine $SubscriptionId) {
-    az account set --subscription $SubscriptionId --only-show-errors
-    if ($LASTEXITCODE -ne 0) {
-        throw "Unable to select subscription '$SubscriptionId'."
-    }
-}
-
-$functionApp = az functionapp show `
-    --subscription $SubscriptionId `
-    --resource-group $ResourceGroupName `
-    --name $FunctionAppName `
-    --output json `
-    --only-show-errors | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or $null -eq $functionApp) {
-    throw "Function App '$FunctionAppName' was not found in resource group '$ResourceGroupName'."
-}
-
-$authSettingsUrl = "https://management.azure.com$($functionApp.id)/config/authsettingsV2?api-version=2022-09-01"
-$authSettings = az rest `
-    --method get `
-    --url $authSettingsUrl `
-    --output json `
-    --only-show-errors | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or $null -eq $authSettings) {
-    throw "Unable to read Easy Auth configuration from Function App '$FunctionAppName'."
-}
-
-$managementApiClientId = [string]$authSettings.properties.identityProviders.azureActiveDirectory.registration.clientId
-if ($managementApiClientId -notmatch '^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
-    throw "Function App '$FunctionAppName' does not have a valid Entra Easy Auth client ID."
-}
-
-$tokenResponse = az account get-access-token `
-    --scope "api://$managementApiClientId/.default" `
-    --output json `
-    --only-show-errors | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$tokenResponse.accessToken)) {
-    throw "Unable to obtain an Entra access token for api://$managementApiClientId. Run 'az login --scope api://$managementApiClientId/.default' and try again."
-}
-
-$defaultHostName = if ($functionApp.PSObject.Properties['defaultHostName']) {
-    [string]$functionApp.defaultHostName
-}
-elseif ($functionApp.PSObject.Properties['properties']) {
-    [string]$functionApp.properties.defaultHostName
-}
-else {
-    $null
-}
-if ([string]::IsNullOrWhiteSpace($defaultHostName)) {
-    throw "Function App '$FunctionAppName' does not expose a default host name."
-}
-$managementApiBaseUri = "https://$defaultHostName/api/management"
-$requestHeaders = @{ Authorization = "Bearer $($tokenResponse.accessToken)" }
+Import-Module `
+    (Join-Path $PSScriptRoot 'HybridDeviceTagger.Management/HybridDeviceTagger.Management.psd1') `
+    -Force `
+    -ErrorAction Stop
+Connect-HybridDeviceTagger -ApiBaseUri $ApiBaseUri
 try {
-    $currentApiConfiguration = Invoke-RestMethod `
-        -Method Get `
-        -Uri "$managementApiBaseUri/tagging-rules" `
-        -Headers $requestHeaders `
-        -ResponseHeadersVariable responseHeaders
+    $currentRules = @(Get-HybridDeviceTaggerRule)
 }
 catch {
     throw "Unable to read tagging rules through the management API: $($_.Exception.Message)"
 }
 
-$currentRules = @($currentApiConfiguration.rules)
 $currentRulesJson = ConvertTo-Json -InputObject $currentRules -Depth 10 -Compress
 $currentRulesParseError = $null
-$currentETag = [string]$responseHeaders['ETag']
 
 $currentConfiguration = ConvertTo-TaggingConfigurationOutput `
     -Rules $currentRules `
@@ -792,26 +728,16 @@ if ($PSBoundParameters.ContainsKey('TaggingRules') -and
 }
 
 if (-not $PSCmdlet.ShouldProcess(
-    "$SubscriptionId/$ResourceGroupName/$FunctionAppName",
+    $ApiBaseUri.AbsoluteUri,
     'Replace tagging rules through the Entra-authenticated management API')) {
     Write-Output $currentConfiguration
     return
 }
 
 try {
-    $updateHeaders = @{
-        Authorization = $requestHeaders.Authorization
-    }
-    if (-not [string]::IsNullOrWhiteSpace($currentETag)) {
-        $updateHeaders['If-Match'] = $currentETag
-    }
-
-    $updatedConfiguration = Invoke-RestMethod `
-        -Method Put `
-        -Uri "$managementApiBaseUri/tagging-rules" `
-        -Headers $updateHeaders `
-        -ContentType 'application/json; charset=utf-8' `
-        -Body $newRulesJson
+    $updatedConfiguration = Set-HybridDeviceTaggerRuleConfiguration `
+        -Rule $normalizedRules `
+        -Confirm:$false
 }
 catch {
     throw "Updating tagging rules through the management API failed: $($_.Exception.Message)"

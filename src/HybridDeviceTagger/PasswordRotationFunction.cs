@@ -11,8 +11,9 @@ using Microsoft.Extensions.Logging;
 namespace HybridDeviceTagger;
 
 /// <summary>Runs the scheduled Active Directory password-rotation check.</summary>
-public sealed class PasswordRotationFunction
+public sealed class PasswordRotationFunction : IPasswordRotationRunner
 {
+    private static readonly SemaphoreSlim ExecutionLock = new(1, 1);
     private readonly PasswordRotationService _rotationService;
     private readonly IOperationStatusStore _statusStore;
     private readonly ILogger<PasswordRotationFunction> _logger;
@@ -41,22 +42,53 @@ public sealed class PasswordRotationFunction
         [TimerTrigger("%PasswordRotationSchedule%")] TimerInfo timer,
         FunctionContext context,
         CancellationToken cancellationToken)
+        => await RunAsync(context.InvocationId, timer.IsPastDue, false, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<PasswordRotationResult> RunAsync(
+        string invocationId,
+        bool isPastDue,
+        bool force,
+        CancellationToken cancellationToken)
     {
-        await TryRecordStatusAsync(() => _statusStore.StartAsync(
-            OperationNames.PasswordRotation,
-            context.InvocationId,
-            cancellationToken));
-        _logger.LogInformation(
-            "Password rotation check started. Invocation ID: {InvocationId}, Past due: {IsPastDue}",
-            context.InvocationId,
-            timer.IsPastDue);
+        if (!await ExecutionLock.WaitAsync(0, cancellationToken))
+        {
+            throw new OperationAlreadyRunningException(OperationNames.PasswordRotation);
+        }
 
         try
         {
-            var result = await _rotationService.RotateIfDueAsync(cancellationToken);
+            return await RunCoreAsync(invocationId, isPastDue, force, cancellationToken);
+        }
+        finally
+        {
+            ExecutionLock.Release();
+        }
+    }
+
+    private async Task<PasswordRotationResult> RunCoreAsync(
+        string invocationId,
+        bool isPastDue,
+        bool force,
+        CancellationToken cancellationToken)
+    {
+        await TryRecordStatusAsync(() => _statusStore.StartAsync(
+            OperationNames.PasswordRotation,
+            invocationId,
+            cancellationToken));
+        _logger.LogInformation(
+            "Password rotation check started. Invocation ID: {InvocationId}, Past due: {IsPastDue}",
+            invocationId,
+            isPastDue);
+
+        try
+        {
+            var result = force
+                ? await _rotationService.RotateNowAsync(cancellationToken)
+                : await _rotationService.RotateIfDueAsync(cancellationToken);
             await TryRecordStatusAsync(() => _statusStore.CompleteAsync(
                 OperationNames.PasswordRotation,
-                context.InvocationId,
+                invocationId,
                 new Dictionary<string, object?>
                 {
                     ["outcome"] = result.Outcome.ToString(),
@@ -67,21 +99,22 @@ public sealed class PasswordRotationFunction
                 CancellationToken.None));
             _logger.LogInformation(
                 "Password rotation check completed. Invocation ID: {InvocationId}, Outcome: {Outcome}, Current age: {AgeDays} days",
-                context.InvocationId,
+                invocationId,
                 result.Outcome,
                 result.CurrentPasswordAgeDays);
+            return result;
         }
         catch (Exception exception)
         {
             await TryRecordStatusAsync(() => _statusStore.FailAsync(
                 OperationNames.PasswordRotation,
-                context.InvocationId,
+                invocationId,
                 exception,
                 CancellationToken.None));
             _logger.LogError(
                 exception,
                 "Password rotation check failed. Invocation ID: {InvocationId}",
-                context.InvocationId);
+                invocationId);
             throw;
         }
     }

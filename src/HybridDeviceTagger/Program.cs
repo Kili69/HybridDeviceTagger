@@ -9,6 +9,7 @@ using Azure.Monitor.OpenTelemetry.Exporter;
 using Azure.Security.KeyVault.Secrets;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Specialized;
+using HybridDeviceTagger;
 using HybridDeviceTagger.Options;
 using HybridDeviceTagger.Services;
 using Microsoft.Azure.Functions.Worker;
@@ -143,5 +144,11 @@ builder.Services.AddSingleton<ITaggingRuleProvider>(serviceProvider =>
 builder.Services.AddSingleton<TaggingConfigurationService>();
 builder.Services.AddScoped<DeviceMembershipReconciliationService>();
 builder.Services.AddTransient<DeviceTaggingService>();
+builder.Services.AddScoped<DeviceTaggerFunction>();
+builder.Services.AddScoped<IDeviceTaggingRunner>(serviceProvider =>
+    serviceProvider.GetRequiredService<DeviceTaggerFunction>());
+builder.Services.AddScoped<PasswordRotationFunction>();
+builder.Services.AddScoped<IPasswordRotationRunner>(serviceProvider =>
+    serviceProvider.GetRequiredService<PasswordRotationFunction>());
 
 builder.Build().Run();

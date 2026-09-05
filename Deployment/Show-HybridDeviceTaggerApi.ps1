@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.11
+# Project-Version: 0.1.20260905.12
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -60,62 +60,33 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$managementApiClientId = [guid]'5e324803-5aed-4e5d-b49f-a4bfceddcda8'
-
-if (-not (Get-Command az -CommandType Application -ErrorAction SilentlyContinue)) {
-    throw 'Azure CLI is required. Install Azure CLI, run az login, and try again.'
-}
-if (-not $ApiBaseUri.IsAbsoluteUri -or $ApiBaseUri.Scheme -ne 'https') {
-    throw 'ApiBaseUri must be an absolute HTTPS URI.'
-}
-
-$tokenResponse = az account get-access-token `
-    --scope "api://$managementApiClientId/.default" `
-    --output json `
-    --only-show-errors | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$tokenResponse.accessToken)) {
-    throw "Unable to obtain an Entra access token for api://$managementApiClientId. Run 'az login --scope api://$managementApiClientId/.default' and try again."
-}
-
-$headers = @{ Authorization = "Bearer $($tokenResponse.accessToken)" }
-$managementApiBaseUri = $ApiBaseUri.AbsoluteUri.TrimEnd('/')
+Import-Module `
+    (Join-Path $PSScriptRoot 'HybridDeviceTagger.Management/HybridDeviceTagger.Management.psd1') `
+    -Force `
+    -ErrorAction Stop
+Connect-HybridDeviceTagger -ApiBaseUri $ApiBaseUri
 
 if ($ShowRules) {
-    $configuration = Invoke-RestMethod `
-        -Method Get `
-        -Uri "$managementApiBaseUri/tagging-rules" `
-        -Headers $headers
-    Write-Verbose "Rule source: $($configuration.source); ETag: $($configuration.eTag)"
-    $configuration.rules
+    Get-HybridDeviceTaggerRule
 }
 elseif ($ShowLastRunStatus) {
-    Invoke-RestMethod `
-        -Method Get `
-        -Uri "$managementApiBaseUri/status/device-tagging" `
-        -Headers $headers
+    Get-HybridDeviceTaggerLastRunStatus
 }
 elseif ($ShowTrace) {
-    $traceContent = Invoke-RestMethod `
-        -Method Get `
-        -Uri "$managementApiBaseUri/traces/device-tagging/latest" `
-        -Headers $headers
-    foreach ($line in $traceContent -split "`r?`n") {
-        if (-not [string]::IsNullOrWhiteSpace($line)) {
-            $traceEvent = $line | ConvertFrom-Json
-            $details = if ($null -eq $traceEvent.details) {
-                'null'
-            }
-            else {
-                $traceEvent.details | ConvertTo-Json -Compress -Depth 100
-            }
-            $timestamp = ([DateTimeOffset]$traceEvent.timestampUtc).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
-            '{0},{1},{2},{3},{4},{5}' -f `
-                $timestamp,
-                $traceEvent.level,
-                $traceEvent.phase,
-                $traceEvent.outcome,
-                $traceEvent.action,
-                $details
+    foreach ($traceEvent in Get-HybridDeviceTaggerTrace) {
+        $details = if ($null -eq $traceEvent.details) {
+            'null'
         }
+        else {
+            $traceEvent.details | ConvertTo-Json -Compress -Depth 100
+        }
+        $timestamp = ([DateTimeOffset]$traceEvent.timestampUtc).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        '{0},{1},{2},{3},{4},{5}' -f `
+            $timestamp,
+            $traceEvent.level,
+            $traceEvent.phase,
+            $traceEvent.outcome,
+            $traceEvent.action,
+            $details
     }
 }

@@ -105,8 +105,23 @@ Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unt
 | `GET /api/management/status/device-tagging` | Status und Ergebniszähler des letzten Tagging-Laufs lesen |
 | `GET /api/management/status/password-rotation` | Status des letzten Checks und Zeitpunkt des letzten tatsächlichen Kennwortwechsels lesen |
 | `GET /api/management/traces/device-tagging/latest` | Letzten JSONL-Trace als Download abrufen |
+| `POST /api/management/actions/device-tagging` | Einen Tagging-Lauf sofort ausführen |
+| `POST /api/management/actions/password-rotation` | Das AD-Servicekonto-Kennwort sofort und unabhängig vom Alter sicher rotieren |
 
 Die API speichert dynamische Regeln als `tagging-configuration.json` im privaten Container `run-traces`. Solange die API noch keine Änderung gespeichert hat, verwendet sie `Tagging__RulesJson` als Fallback. Jeder Tagging-Lauf liest zu Beginn genau einen aktuellen Snapshot; ein Function-Restart ist nach Änderungen nicht erforderlich. ETags verhindern, dass parallele Änderungen unbemerkt überschrieben werden. Die vollständige OpenAPI-3.0-Spezifikation steht in [docs/management-api.openapi.yaml](docs/management-api.openapi.yaml).
+
+Das Modul `Deployment/HybridDeviceTagger.Management` hält die mit `Connect-HybridDeviceTagger` aufgebaute REST-Verbindung für nachfolgende Cmdlets. Es verwendet die bestehende Anmeldung von `az login`; Subscription, Resource Group und ARM-Abfragen sind nicht erforderlich:
+
+```powershell
+Import-Module ./Deployment/HybridDeviceTagger.Management
+Connect-HybridDeviceTagger
+Get-HybridDeviceTaggerRule
+Get-HybridDeviceTaggerLastRunStatus
+Invoke-HybridDeviceTagging
+Invoke-HybridDeviceTaggerPasswordRotation -Confirm
+```
+
+`Invoke-HybridDeviceTaggerPasswordRotation` umgeht ausschließlich die Altersprüfung. Aktueller Bind, LDAPS, Staging, Validierung und Promotion bleiben verpflichtend. Beide Aktionen laufen synchron, schreiben denselben Status wie die Timer und antworten mit HTTP `409`, wenn die jeweilige Operation bereits läuft.
 
 Für die drei häufigsten Leseoperationen steht `Deployment/Show-HybridDeviceTaggerApi.ps1` bereit. Das Skript verwendet ausschließlich die REST API und die bestehende Anmeldung von `az login`. Die produktive API-URL und ihre nicht geheime Client-ID sind als Standardwerte hinterlegt. Eine Subscription ID, Resource Group, ARM-Berechtigung oder weitere Eingabe ist nicht erforderlich:
 

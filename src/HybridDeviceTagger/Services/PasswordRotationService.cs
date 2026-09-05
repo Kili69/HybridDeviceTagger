@@ -51,6 +51,18 @@ public sealed class PasswordRotationService
     /// bind. If validation fails, the staged secret remains available for recovery.
     /// </remarks>
     public async Task<PasswordRotationResult> RotateIfDueAsync(
+        CancellationToken cancellationToken) =>
+        await RotateAsync(false, cancellationToken);
+
+    /// <summary>Performs a rotation immediately while preserving recovery and secure-bind checks.</summary>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The rotation outcome and known credential age.</returns>
+    public async Task<PasswordRotationResult> RotateNowAsync(
+        CancellationToken cancellationToken) =>
+        await RotateAsync(true, cancellationToken);
+
+    private async Task<PasswordRotationResult> RotateAsync(
+        bool force,
         CancellationToken cancellationToken)
     {
         var current = await _credentialStore.GetCurrentAsync(cancellationToken);
@@ -60,7 +72,7 @@ public sealed class PasswordRotationService
         }
 
         var ageDays = GetAgeDays(current.CreatedOn);
-        if (ageDays is not null && ageDays < _options.RotateAfterDays)
+        if (!force && ageDays is not null && ageDays < _options.RotateAfterDays)
         {
             return new PasswordRotationResult(PasswordRotationOutcome.NotDue, ageDays);
         }

@@ -89,11 +89,86 @@ public sealed class ManagementApiFunctionTests
         Assert.Equal("trace.jsonl", file.FileDownloadName);
     }
 
+    [Fact]
+    public async Task RunDeviceTaggingAsync_RejectsMissingEasyAuthPrincipal()
+    {
+        var function = CreateFunction(new FakeTaggingConfigurationStore(), new FakeStatusStore(), new FakeTraceReader());
+
+        var result = await function.RunDeviceTaggingAsync(
+            new DefaultHttpContext().Request,
+            CancellationToken.None);
+
+        Assert.IsType<UnauthorizedObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task RunDeviceTaggingAsync_InvokesRunner()
+    {
+        var runner = new FakeDeviceTaggingRunner();
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            runner);
+
+        var result = await function.RunDeviceTaggingAsync(
+            AuthenticatedRequest(),
+            CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.NotNull(runner.InvocationId);
+        Assert.False(runner.IsPastDue);
+    }
+
+    [Fact]
+    public async Task RunPasswordRotationAsync_ForcesRotation()
+    {
+        var runner = new FakePasswordRotationRunner();
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            passwordRotationRunner: runner);
+
+        var result = await function.RunPasswordRotationAsync(
+            AuthenticatedRequest(),
+            CancellationToken.None);
+
+        Assert.IsType<OkObjectResult>(result);
+        Assert.NotNull(runner.InvocationId);
+        Assert.False(runner.IsPastDue);
+        Assert.True(runner.Force);
+    }
+
+    [Fact]
+    public async Task RunDeviceTaggingAsync_ReturnsConflictWhenAlreadyRunning()
+    {
+        var runner = new FakeDeviceTaggingRunner { AlreadyRunning = true };
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            runner);
+
+        var result = await function.RunDeviceTaggingAsync(
+            AuthenticatedRequest(),
+            CancellationToken.None);
+
+        Assert.IsType<ConflictObjectResult>(result);
+    }
+
     private static ManagementApiFunction CreateFunction(
         ITaggingConfigurationStore configurationStore,
         IOperationStatusStore statusStore,
-        IRunTraceReader traceReader) =>
-        new(new TaggingConfigurationService(configurationStore), statusStore, traceReader);
+        IRunTraceReader traceReader,
+        IDeviceTaggingRunner? deviceTaggingRunner = null,
+        IPasswordRotationRunner? passwordRotationRunner = null) =>
+        new(
+            new TaggingConfigurationService(configurationStore),
+            statusStore,
+            traceReader,
+            deviceTaggingRunner ?? new FakeDeviceTaggingRunner(),
+            passwordRotationRunner ?? new FakePasswordRotationRunner());
 
     private static HttpRequest AuthenticatedRequest()
     {
@@ -156,6 +231,51 @@ public sealed class ManagementApiFunctionTests
     {
         public Task<RunTraceDownload?> OpenLatestAsync(CancellationToken cancellationToken) =>
             Task.FromResult(trace);
+    }
+
+    private sealed class FakeDeviceTaggingRunner : IDeviceTaggingRunner
+    {
+        public string? InvocationId { get; private set; }
+
+        public bool IsPastDue { get; private set; }
+
+        public bool AlreadyRunning { get; init; }
+
+        public Task<TaggingResult> RunAsync(
+            string invocationId,
+            bool isPastDue,
+            CancellationToken cancellationToken)
+        {
+            if (AlreadyRunning)
+            {
+                throw new OperationAlreadyRunningException(OperationNames.DeviceTagging);
+            }
+
+            InvocationId = invocationId;
+            IsPastDue = isPastDue;
+            return Task.FromResult(new TaggingResult(1, 1, 0, 0, 0));
+        }
+    }
+
+    private sealed class FakePasswordRotationRunner : IPasswordRotationRunner
+    {
+        public string? InvocationId { get; private set; }
+
+        public bool IsPastDue { get; private set; }
+
+        public bool Force { get; private set; }
+
+        public Task<PasswordRotationResult> RunAsync(
+            string invocationId,
+            bool isPastDue,
+            bool force,
+            CancellationToken cancellationToken)
+        {
+            InvocationId = invocationId;
+            IsPastDue = isPastDue;
+            Force = force;
+            return Task.FromResult(new PasswordRotationResult(PasswordRotationOutcome.Rotated, 10));
+        }
     }
 
     private static TaggingRuleOptions CreateRule() => new()

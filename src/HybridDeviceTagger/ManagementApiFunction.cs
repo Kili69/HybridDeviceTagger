@@ -4,6 +4,7 @@
  */
 
 using System.Text.Json;
+using HybridDeviceTagger.Models;
 using HybridDeviceTagger.Options;
 using HybridDeviceTagger.Services;
 using Microsoft.AspNetCore.Http;
@@ -22,16 +23,22 @@ public sealed class ManagementApiFunction
     private readonly TaggingConfigurationService _configurationService;
     private readonly IOperationStatusStore _statusStore;
     private readonly IRunTraceReader _traceReader;
+    private readonly IDeviceTaggingRunner _deviceTaggingRunner;
+    private readonly IPasswordRotationRunner _passwordRotationRunner;
 
     /// <summary>Initializes the management API.</summary>
     public ManagementApiFunction(
         TaggingConfigurationService configurationService,
         IOperationStatusStore statusStore,
-        IRunTraceReader traceReader)
+        IRunTraceReader traceReader,
+        IDeviceTaggingRunner deviceTaggingRunner,
+        IPasswordRotationRunner passwordRotationRunner)
     {
         _configurationService = configurationService;
         _statusStore = statusStore;
         _traceReader = traceReader;
+        _deviceTaggingRunner = deviceTaggingRunner;
+        _passwordRotationRunner = passwordRotationRunner;
     }
 
     /// <summary>Gets the effective tagging-rule configuration.</summary>
@@ -137,6 +144,42 @@ public sealed class ManagementApiFunction
         CancellationToken cancellationToken) =>
         GetStatusAsync(request, OperationNames.PasswordRotation, cancellationToken);
 
+    /// <summary>Immediately runs device tagging.</summary>
+    [Function("RunDeviceTagging")]
+    public async Task<IActionResult> RunDeviceTaggingAsync(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/actions/device-tagging")]
+        HttpRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!EasyAuthPrincipalValidator.IsAuthenticated(request))
+        {
+            return Unauthorized();
+        }
+
+        var invocationId = Guid.NewGuid().ToString("D");
+        return await ExecuteOperationAsync(
+            invocationId,
+            () => _deviceTaggingRunner.RunAsync(invocationId, false, cancellationToken));
+    }
+
+    /// <summary>Immediately rotates the Active Directory service-account password.</summary>
+    [Function("RunPasswordRotation")]
+    public async Task<IActionResult> RunPasswordRotationAsync(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/actions/password-rotation")]
+        HttpRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!EasyAuthPrincipalValidator.IsAuthenticated(request))
+        {
+            return Unauthorized();
+        }
+
+        var invocationId = Guid.NewGuid().ToString("D");
+        return await ExecuteOperationAsync(
+            invocationId,
+            () => _passwordRotationRunner.RunAsync(invocationId, false, true, cancellationToken));
+    }
+
     /// <summary>Downloads the latest device-tagging JSONL trace.</summary>
     [Function("DownloadLatestDeviceTaggingTrace")]
     public async Task<IActionResult> DownloadLatestDeviceTaggingTraceAsync(
@@ -172,6 +215,24 @@ public sealed class ManagementApiFunction
         return status is null
             ? new NotFoundObjectResult(new { error = $"No {operation} status is available." })
             : new OkObjectResult(status);
+    }
+
+    private static async Task<IActionResult> ExecuteOperationAsync<T>(
+        string invocationId,
+        Func<Task<T>> operation)
+    {
+        try
+        {
+            return new OkObjectResult(new
+            {
+                invocationId,
+                result = await operation()
+            });
+        }
+        catch (OperationAlreadyRunningException exception)
+        {
+            return new ConflictObjectResult(new { error = exception.Message });
+        }
     }
 
     private async Task<IActionResult> ExecuteConfigurationMutationAsync(

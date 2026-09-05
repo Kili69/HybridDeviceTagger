@@ -28,6 +28,8 @@ flowchart LR
     API[ManagementApiFunction] --> TCS[TaggingConfigurationService]
     API --> OSS[IOperationStatusStore]
     API --> RTR[IRunTraceReader]
+    API --> DTR[IDeviceTaggingRunner]
+    API --> PRR[IPasswordRotationRunner]
     TCS --> BTC[BlobTaggingConfigurationStore]
     OSS --> BOS[BlobOperationStatusStore]
     RTR --> BRT
@@ -64,13 +66,17 @@ The Azure clients, LDAP adapters, credential store, dynamic rule provider, opera
 
 ## Management API
 
-`ManagementApiFunction` exposes seven HTTP operations for complete rule replacement, named-rule upsert and removal, current rule retrieval, both latest-run statuses, and streamed latest-trace download. The HTTP triggers are anonymous at the Functions host layer because App Service Easy Auth authenticates the Entra token first and restricts access to configured principal object IDs. `EasyAuthPrincipalValidator` then requires one valid AAD `X-MS-CLIENT-PRINCIPAL` header as defense in depth.
+`ManagementApiFunction` exposes nine HTTP operations for complete rule replacement, named-rule upsert and removal, current rule retrieval, both latest-run statuses, streamed latest-trace download, immediate tagging, and forced password rotation. The HTTP triggers are anonymous at the Functions host layer because App Service Easy Auth authenticates the Entra token first and restricts access to configured principal object IDs. `EasyAuthPrincipalValidator` then requires one valid AAD `X-MS-CLIENT-PRINCIPAL` header as defense in depth.
+
+The two action endpoints reuse `IDeviceTaggingRunner` and `IPasswordRotationRunner`, so timer and HTTP execution share orchestration, status persistence, trace behavior, and non-blocking operation locks. Forced rotation bypasses only the password-age gate. Credential verification, secure LDAP, next-secret staging, changed-credential validation, and promotion remain mandatory. A concurrent invocation returns HTTP `409`.
 
 `BlobTaggingConfigurationStore` stores `tagging-configuration.json` in the private `run-traces` container. Before its first API mutation, `OptionsTaggingRuleProvider` supplies the validated `Tagging__RulesJson` startup fallback. Mutations normalize and validate the complete result and use Blob ETags. API clients can send the ETag returned by `GET` in `If-Match`; a stale write returns HTTP `409`.
 
 `BlobOperationStatusStore` writes separate JSON documents for device tagging and password rotation. Timer entry points record `Running`, then `Succeeded` or a sanitized `Failed` state. Password status preserves the timestamp of the last actual password change across checks that do not rotate. Status persistence failures are warnings and do not fail the directory workflow.
 
 `Deployment/Show-HybridDeviceTaggerApi.ps1` is the read-only operational client. Its mutually exclusive `ShowRules`, `ShowLastRunStatus`, and `ShowTrace` parameter sets use the production REST API base URI and an internal non-secret Entra audience to obtain a delegated token from the existing Azure CLI sign-in. `ShowStatus` remains an alias for compatibility. Rules and latest-run status are emitted as structured PowerShell objects. Trace mode validates each JSONL event and emits one logical display line containing ISO-8601 time, severity, phase, status, action, and compact JSON details. In-scope device events include the AD machine name alongside the device ID. It does not query Azure Resource Manager or require subscription metadata.
+
+`Deployment/HybridDeviceTagger.Management` owns the shared REST client. `Connect-HybridDeviceTagger` stores the API URI, audience, token, and expiry in module scope and refreshes the token from Azure CLI when required. Public cmdlets cover rules, both statuses, parsed trace events, immediate tagging, and forced password rotation. Mutations use `ShouldProcess`, ETag-protected writes, and high confirmation impact for destructive rule replacement, removal, and password rotation. Both wrapper scripts import this module instead of duplicating authentication and HTTP behavior.
 
 ## Device Tagging Workflow
 

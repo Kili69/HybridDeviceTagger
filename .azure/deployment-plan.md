@@ -58,6 +58,21 @@ Status: Validated
 
 ## 7. Validation Proof
 
+Management operations release validation completed: `2026-09-05`.
+
+- Azure MCP and Azure CLI resolve to `kili@bloedgelaber.de`, tenant `d89a354d-2bce-44ed-b802-8f8600689247`, and the explicitly reconfirmed subscription `23ca129f-1e1c-4a56-bc51-e3ec2c874a73`.
+- Release publish completed successfully and generated all 11 expected timer and HTTP Functions, including `RunDeviceTagging` and `RunPasswordRotation`.
+- The complete test suite passed with 70/70 tests, including immediate API operations, concurrent-run conflict handling, and forced rotation of a recent password.
+- Every production PowerShell file passed parser and PSScriptAnalyzer validation; the new module manifest imports and exports the intended 10 public commands.
+- Commit metadata validation, editor diagnostics, OpenAPI diagnostics, and `git diff --check` passed for version `0.1.20260905.12`.
+- Azure Policy assignments were reviewed through Azure MCP, and the unchanged Bicep infrastructure compiled successfully. Infrastructure and RBAC definitions are unchanged; existing scoped Storage, Key Vault, and Microsoft Graph roles remain sufficient.
+- Production verification will not invoke the forced password-rotation action because it intentionally changes the Active Directory service-account password.
+- Code package deployment to `func-hybriddevicetagger` completed successfully with the approved self-signed LDAPS trust anchor `E9C632C3ADE1CA74EBBBAF9CE114AB47FD3C619D`.
+- Azure registered all 11 Functions. Both new action routes rejected anonymous POST requests with HTTP `401`.
+- The new PowerShell module connected to the production API, read two rules and both statuses, and invoked immediate tagging as correlation ID `83f80ca2-36b3-4de1-9e46-5ae30dbf4505`.
+- The immediate run succeeded with six discovered, zero updated, and six unchanged devices; its status and 38-event trace were persisted and retrieved through the API.
+- Live RBAC verification confirmed resource-scoped Storage Blob Data Owner and Key Vault Secrets Officer assignments plus Microsoft Graph `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All` for managed identity `19346b5c-09d0-4ac5-a4fd-03b8253f7e01`.
+
 Machine-name trace release validation completed: `2026-09-05`.
 
 - Azure CLI and Azure MCP resolve to `kili@bloedgelaber.de`, tenant `d89a354d-2bce-44ed-b802-8f8600689247`, and confirmed subscription `23ca129f-1e1c-4a56-bc51-e3ec2c874a73`.
