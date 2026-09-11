@@ -6,6 +6,16 @@ namespace HybridDeviceTagger.Tests;
 public sealed class TaggingOptionsTests
 {
     [Fact]
+    public void Validate_AcceptsEmptyInitialConfiguration()
+    {
+        var options = new TaggingOptions();
+
+        var results = options.Validate(new ValidationContext(options));
+
+        Assert.Empty(results);
+    }
+
+    [Fact]
     public void Validate_AcceptsNamedDescribedRules()
     {
         var options = CreateOptions(

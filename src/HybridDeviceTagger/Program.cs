@@ -58,6 +58,12 @@ builder.Services
     .ValidateDataAnnotations()
     .ValidateOnStart();
 
+builder.Services
+    .AddOptions<ManagementApiOptions>()
+    .BindConfiguration(ManagementApiOptions.SectionName)
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
 // DefaultAzureCredential uses managed identity in Azure and the developer credential chain
 // locally; no Azure credential is stored in application configuration.
 builder.Services.AddSingleton<TokenCredential>(_ => new DefaultAzureCredential());

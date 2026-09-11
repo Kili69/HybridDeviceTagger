@@ -5,14 +5,6 @@
 
 targetScope = 'resourceGroup'
 
-type taggingRule = {
-  @description('Full domain-specific DN, or an OU-only path resolved in every forest domain.')
-  baseDn: string
-
-  @description('Map of extensionAttribute1 through extensionAttribute15 to desired values.')
-  extensionAttributes: object
-}
-
 @description('Azure region for all newly created resources. Must match the integration subnet region.')
 param location string = resourceGroup().location
 
@@ -72,10 +64,6 @@ param activeDirectoryBindUserDistinguishedName string
 @minLength(36)
 @maxLength(36)
 param managementApiClientId string
-
-@description('OU subtree rules and the Entra extension attributes assigned to matching devices.')
-@minLength(1)
-param taggingRules taggingRule[]
 
 @description('Current Active Directory password secret name.')
 param currentPasswordSecretName string = 'hybrid-device-tagger-ad-password-current'
@@ -374,8 +362,12 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           value: '35'
         }
         {
+          name: 'ManagementApi__ClientId'
+          value: managementApiClientId
+        }
+        {
           name: 'Tagging__RulesJson'
-          value: string(taggingRules)
+          value: '[]'
         }
       ]
       ftpsState: 'Disabled'
@@ -394,6 +386,9 @@ resource functionAppAuthentication 'Microsoft.Web/sites/config@2022-09-01' = {
   parent: functionApp
   properties: {
     globalValidation: {
+      excludedPaths: [
+        '/api/management/authentication'
+      ]
       requireAuthentication: true
       unauthenticatedClientAction: 'Return401'
     }

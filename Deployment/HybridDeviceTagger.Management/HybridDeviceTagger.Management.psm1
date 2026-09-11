@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20260905.16
+# Project-Version: 0.1.20260911.1
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -9,17 +9,37 @@ DISCLAIMER: This sample script is not supported under any Microsoft standard sup
 Set-StrictMode -Version Latest
 $script:Connection = $null
 
+function Get-HybridDeviceTaggerTokenScope {
+    param([Parameter(Mandatory)][uri]$ApiBaseUri)
+
+    try {
+        $metadata = Invoke-RestMethod `
+            -Method Get `
+            -Uri "$($ApiBaseUri.AbsoluteUri.TrimEnd('/'))/authentication"
+    }
+    catch {
+        throw "Unable to read HybridDeviceTagger authentication metadata: $($_.Exception.Message)"
+    }
+
+    $tokenScope = [string]$metadata.tokenScope
+    if ($tokenScope -notmatch '^api://[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}/\.default$') {
+        throw 'HybridDeviceTagger authentication metadata returned an invalid token scope.'
+    }
+
+    $tokenScope
+}
+
 function Initialize-HybridDeviceTaggerToken {
     if (-not (Get-Command az -CommandType Application -ErrorAction SilentlyContinue)) {
         throw 'Azure CLI is required. Install Azure CLI, run az login, and try again.'
     }
 
     $tokenResponse = az account get-access-token `
-        --scope "api://$($script:Connection.ClientId)/.default" `
+        --scope $script:Connection.TokenScope `
         --output json `
         --only-show-errors | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$tokenResponse.accessToken)) {
-        throw "Unable to obtain an Entra access token for api://$($script:Connection.ClientId). Run 'az login --scope api://$($script:Connection.ClientId)/.default' and try again."
+        throw "Unable to obtain an Entra access token for $($script:Connection.TokenScope). Run 'az login --scope $($script:Connection.TokenScope)' and try again."
     }
 
     $script:Connection.AccessToken = [string]$tokenResponse.accessToken
@@ -105,14 +125,11 @@ Connects the current PowerShell session to the HybridDeviceTagger management API
 
 .DESCRIPTION
 Uses the existing Azure CLI sign-in to acquire a delegated Microsoft Entra access token and stores
-the API URI, token audience, token, and expiry in module scope. All other module cmdlets reuse this
-connection. By default, the command validates the connection by reading the tagging configuration.
+the API URI, REST-discovered token scope, token, and expiry in module scope. All other module cmdlets
+reuse this connection. By default, the command validates it by reading the tagging configuration.
 
 .PARAMETER ApiBaseUri
 Specifies the absolute HTTPS URI of the management API, including the /api/management path.
-
-.PARAMETER ClientId
-Specifies the non-secret Microsoft Entra application client ID used as the access-token audience.
 
 .PARAMETER SkipValidation
 Stores the connection without making the initial tagging-configuration request.
@@ -129,7 +146,7 @@ Connect-HybridDeviceTagger
 Connects to the production management API using the existing Azure CLI sign-in.
 
 .EXAMPLE
-Connect-HybridDeviceTagger -ApiBaseUri 'https://example.azurewebsites.net/api/management' -ClientId $clientId -PassThru
+Connect-HybridDeviceTagger -ApiBaseUri 'https://example.azurewebsites.net/api/management' -PassThru
 
 Connects to another deployment and returns its non-sensitive connection information.
 #>
@@ -137,9 +154,6 @@ function Connect-HybridDeviceTagger {
     [CmdletBinding()]
     param(
         [uri]$ApiBaseUri = 'https://func-hybriddevicetagger.azurewebsites.net/api/management',
-
-        [ValidatePattern('^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')]
-        [string]$ClientId = '5e324803-5aed-4e5d-b49f-a4bfceddcda8',
 
         [switch]$SkipValidation,
 
@@ -153,7 +167,7 @@ function Connect-HybridDeviceTagger {
     $script:Connection = [pscustomobject]@{
         PSTypeName = 'HybridDeviceTagger.Management.Connection'
         ApiBaseUri = $ApiBaseUri.AbsoluteUri.TrimEnd('/')
-        ClientId = $ClientId
+        TokenScope = Get-HybridDeviceTaggerTokenScope -ApiBaseUri $ApiBaseUri
         AccessToken = $null
         ExpiresOn = [DateTimeOffset]::MinValue
     }
@@ -172,7 +186,6 @@ function Connect-HybridDeviceTagger {
         [pscustomobject]@{
             PSTypeName = 'HybridDeviceTagger.Management.ConnectionInfo'
             ApiBaseUri = $script:Connection.ApiBaseUri
-            ClientId = $script:Connection.ClientId
             ExpiresOn = $script:Connection.ExpiresOn
         }
     }
@@ -478,6 +491,91 @@ function Set-HybridDeviceTaggerRuleConfiguration {
     }
 }
 
+function Read-HybridDeviceTaggerRequiredValue {
+    param([Parameter(Mandatory)][string]$Prompt)
+
+    do {
+        $value = Read-Host $Prompt
+        if (-not [string]::IsNullOrWhiteSpace($value)) {
+            return $value.Trim()
+        }
+
+        Write-Host 'A value is required.' -ForegroundColor Yellow
+    } while ($true)
+}
+
+function Read-HybridDeviceTaggerObjectIds {
+    param([Parameter(Mandatory)][string]$Prompt)
+
+    do {
+        $inputValue = Read-Host "$Prompt (comma-separated, Enter for none)"
+        if ([string]::IsNullOrWhiteSpace($inputValue)) {
+            return @()
+        }
+
+        $objectIds = @($inputValue.Split(',') | ForEach-Object { $_.Trim() })
+        $invalidObjectIds = @($objectIds | Where-Object {
+            $parsedObjectId = [guid]::Empty
+            -not [guid]::TryParse($_, [ref]$parsedObjectId) -or
+                $parsedObjectId -eq [guid]::Empty
+        })
+        if ($invalidObjectIds.Count -eq 0 -and
+            @($objectIds | Select-Object -Unique).Count -eq $objectIds.Count) {
+            return $objectIds
+        }
+
+        Write-Host 'Enter unique, nonempty GUIDs separated by commas.' -ForegroundColor Yellow
+    } while ($true)
+}
+
+function Read-HybridDeviceTaggerRule {
+    $name = Read-HybridDeviceTaggerRequiredValue -Prompt 'Rule name'
+    $description = Read-HybridDeviceTaggerRequiredValue -Prompt 'Rule description'
+    $baseDn = Read-HybridDeviceTaggerRequiredValue -Prompt 'Active Directory base DN'
+
+    do {
+        $extensionAttributes = [System.Collections.Generic.Dictionary[string, string]]::new(
+            [StringComparer]::OrdinalIgnoreCase
+        )
+        do {
+            $attributeName = (Read-Host 'Extension attribute name (extensionAttribute1-15, Enter to finish)').Trim()
+            if ([string]::IsNullOrWhiteSpace($attributeName)) {
+                break
+            }
+            if ($attributeName -notmatch '^extensionAttribute(?:[1-9]|1[0-5])$') {
+                Write-Host 'Use extensionAttribute1 through extensionAttribute15.' -ForegroundColor Yellow
+                continue
+            }
+            if ($extensionAttributes.ContainsKey($attributeName)) {
+                Write-Host "Attribute '$attributeName' was already entered." -ForegroundColor Yellow
+                continue
+            }
+
+            $extensionAttributes[$attributeName] = Read-HybridDeviceTaggerRequiredValue `
+                -Prompt "Value for $attributeName"
+        } while ($true)
+
+        $entraGroupIds = @(Read-HybridDeviceTaggerObjectIds -Prompt 'Entra security-group object IDs')
+        $administrativeUnitIds = @(Read-HybridDeviceTaggerObjectIds -Prompt 'Administrative-unit object IDs')
+        if ($extensionAttributes.Count -eq 0 -and
+            $entraGroupIds.Count -eq 0 -and
+            $administrativeUnitIds.Count -eq 0) {
+            Write-Host 'Configure at least one extension attribute, Entra group, or administrative unit.' -ForegroundColor Yellow
+        }
+    } while ($extensionAttributes.Count -eq 0 -and
+        $entraGroupIds.Count -eq 0 -and
+        $administrativeUnitIds.Count -eq 0)
+
+    [ordered]@{
+        name = $name
+        description = $description
+        baseDn = $baseDn
+        extensionAttributes = $extensionAttributes
+        entraGroupIds = $entraGroupIds
+        administrativeUnitIds = $administrativeUnitIds
+    }
+}
+
 <#
 .SYNOPSIS
 Adds or replaces one named HybridDeviceTagger rule.
@@ -485,13 +583,22 @@ Adds or replaces one named HybridDeviceTagger rule.
 .DESCRIPTION
 Reads the latest configuration ETag and sends one complete rule to the management API. If a rule with
 the same case-insensitive name exists, that rule is completely replaced. Other rules are preserved.
+Without Rule, the cmdlet interactively collects all rule fields and actions.
 
 .PARAMETER Rule
 Specifies one complete rule object. It must contain Name, Description, BaseDn, ExtensionAttributes,
 EntraGroupIds, and AdministrativeUnitIds as required by the management API.
 
+.PARAMETER Interactive
+Starts guided rule configuration. This is the default when Rule is omitted.
+
 .OUTPUTS
 System.Management.Automation.PSCustomObject representing the persisted configuration when applied.
+
+.EXAMPLE
+Add-HybridDeviceTaggerRule
+
+Interactively collects and persists a complete tagging rule.
 
 .EXAMPLE
 $rule = @{
@@ -512,13 +619,24 @@ $rule | Add-HybridDeviceTaggerRule
 Adds or replaces a complete rule received from the pipeline.
 #>
 function Add-HybridDeviceTaggerRule {
-    [CmdletBinding(SupportsShouldProcess)]
+    [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Interactive')]
     param(
-        [Parameter(Mandatory, ValueFromPipeline)][ValidateNotNull()][object]$Rule
+        [Parameter(Mandatory, ValueFromPipeline, ParameterSetName = 'Rule')]
+        [ValidateNotNull()]
+        [object]$Rule,
+
+        [Parameter(ParameterSetName = 'Interactive')]
+        [switch]$Interactive
     )
 
     process {
-        $name = [string]$Rule.name
+        $effectiveRule = if ($PSCmdlet.ParameterSetName -eq 'Rule') {
+            $Rule
+        }
+        else {
+            Read-HybridDeviceTaggerRule
+        }
+        $name = [string]$effectiveRule.name
         if ([string]::IsNullOrWhiteSpace($name)) {
             throw 'Rule must contain a non-empty Name property.'
         }
@@ -528,7 +646,7 @@ function Add-HybridDeviceTaggerRule {
             Invoke-HybridDeviceTaggerRequest `
                 -Method Put `
                 -Path "tagging-rules/$([uri]::EscapeDataString($name))" `
-                -Body $Rule `
+                -Body $effectiveRule `
                 -ETag $snapshot.ETag
         }
     }

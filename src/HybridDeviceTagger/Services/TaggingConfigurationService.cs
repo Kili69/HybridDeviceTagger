@@ -85,6 +85,11 @@ public sealed class TaggingConfigurationService
     {
         var errors = new List<string>();
         var normalized = new List<TaggingRuleOptions>();
+        if (rules.Count == 0)
+        {
+            errors.Add("At least one tagging rule is required.");
+        }
+
         for (var ruleIndex = 0; ruleIndex < rules.Count; ruleIndex++)
         {
             var rule = rules[ruleIndex];

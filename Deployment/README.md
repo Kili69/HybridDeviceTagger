@@ -12,7 +12,7 @@ Installation uses separate Azure, Entra, Active Directory, and runtime identitie
 | Azure installation user | `Reader` plus `Microsoft.Network/virtualNetworks/subnets/join/action`, normally provided by `Network Contributor` | Existing VNet, Function integration subnet, and private-endpoint subnet. `Reader` alone is insufficient for attaching the Storage private endpoint. |
 | Azure installation user | `Microsoft.Authorization/roleAssignments/write`, normally provided by `Role Based Access Control Administrator`, `User Access Administrator`, or `Owner` | Target Storage account and existing Key Vault; assigns runtime roles to the Function managed identity. Limit the assignment to these resource scopes where possible. |
 | Azure installation user during AD bootstrap | `Key Vault Secrets Officer` | Existing Key Vault; creates or replaces the current AD password secret. This temporary assignment can be removed after installation verification. |
-| Entra administrator | `Privileged Role Administrator` or `Global Administrator` | Configures and assigns management API application roles, requires assignment on its Enterprise Application, and grants Microsoft Graph application roles `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All`. For configured restricted management administrative units, also creates and assigns the scoped custom device-extension role after explicit approval. |
+| Entra administrator | `Privileged Role Administrator` or `Global Administrator` | Configures and assigns management API application roles, requires assignment on its Enterprise Application, and grants Microsoft Graph application roles `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All`. Any scoped role required for a restricted management administrative unit is assigned separately after installation. |
 | AD validation/runtime service account | Read access to the forest configuration partition, configured OUs and computer attributes; read access to its own account; `SELF / Change Password` | Forest-wide LDAP validation and device discovery. Password changes require LDAPS; the signed and sealed LDAP fallback is read/bind only. |
 | AD provisioning identity | Create user in the configured parent OU and enable/reset password on that account | Used only with `-PrepareActiveDirectoryAccountOnly`; it is not stored or used by the Function. Existing delegated AD permissions may be used instead of broad domain administration. |
 | DNS administrator | Create a private DNS zone and A record, or modify the existing private DNS service | Required when Storage public network access is disabled. The Function subnet must resolve `<storage-account>.blob.core.windows.net` through `<storage-account>.privatelink.blob.core.windows.net` to the Storage private endpoint IP. |
@@ -39,7 +39,7 @@ Microsoft Graph PowerShell supports users, security groups, and service principa
 Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
 Connect-MgGraph -Scopes 'Application.Read.All', 'AppRoleAssignment.ReadWrite.All'
 
-$apiClientId = '5e324803-5aed-4e5d-b49f-a4bfceddcda8'
+$apiClientId = '<management API application client ID>'
 $principalObjectId = '<user, group, or service-principal object ID>'
 $roleValue = 'HybridDeviceTagger.CertificateAdministrator'
 
@@ -101,33 +101,14 @@ The script does not persist or pass the AD password to Azure Resource Manager. I
 
 Account creation and password resets are isolated in `-PrepareActiveDirectoryAccountOnly`. The script checks the configured service-account DN using a separate `ActiveDirectoryProvisioningCredential`. If the account is absent, it asks before creating and enabling it with a cryptographically randomized complex password. If the account exists, it offers a randomized complex password or secure manual entry before resetting it. The selected password is written directly to the current Key Vault secret without being displayed. If the provisioning credential parameter is omitted, the installer requests it in a local credential dialog. Both operations require LDAPS. The installer explicitly sets `pwdLastSet=-1`, so **User must change password at next logon** is never enabled. Validation, What-if, and normal deployment never create an account or reset a password.
 
-For a new service account, run once with `-PrepareActiveDirectoryAccountOnly`. This mode performs the normal prerequisite checks, creates or resets and validates the AD account, synchronizes the current Key Vault secret, and exits before ARM or code deployment. The installer prefers LDAPS. If LDAPS is unavailable and LDAP fallback is explicitly approved, bootstrap uses the installed Active Directory PowerShell module over Active Directory Web Services against the parameterized `ActiveDirectoryServer`. Then run the mandatory `-ValidateOnly`, What-if, and live installation stages. The installation identity requires temporary `Key Vault Secrets Officer` access for this bootstrap.
+For a new service account, run once with `-PrepareActiveDirectoryAccountOnly`. This mode performs the normal prerequisite checks, creates or resets and validates the AD account, synchronizes the current Key Vault secret, and exits before ARM or code deployment. The installer prefers LDAPS. If LDAPS is unavailable and LDAP fallback is explicitly approved, bootstrap uses the installed Active Directory PowerShell module over Active Directory Web Services against the parameterized `ActiveDirectoryServer`. Then run the mandatory `-ValidateOnly` stage, optionally review the changes with What-if, and perform the live installation. The installation identity requires temporary `Key Vault Secrets Officer` access for this bootstrap.
 
 ## Validation
 
-Run validation first. This checks the Azure account and subscription, CLI and SDK versions, provider registration, FC1 region support, resource names, existing app-owned resources, subnet delegation and size, Key Vault security, the current password secret, LDAPS certificate trust or LDAP fallback availability, forest identity, OU existence, service-account bind, and OU read access.
+Run validation first. This checks the Azure account and subscription, CLI and SDK versions, provider registration, FC1 region support, resource names, existing app-owned resources, subnet delegation and size, Key Vault security, the current password secret, LDAPS certificate trust or LDAP fallback availability, forest identity, and the service-account bind.
 
 ```powershell
 $credential = Get-Credential 'svc-HybridDeviceTagger@contoso.com'
-$taggingRules = @(
-    @{
-        Name = 'Tier 0 workstations'
-        Description = 'Tags privileged administrative workstations.'
-        BaseDn = 'OU=Tier0,OU=Admin'
-        ExtensionAttributes = @{
-            extensionAttribute1 = 'PAW'
-            extensionAttribute2 = 'Tier0'
-        }
-    },
-    @{
-        Name = 'Tier 1 servers'
-        Description = 'Tags server devices as Tier 1.'
-        BaseDn = 'OU=Server'
-        ExtensionAttributes = @{
-            extensionAttribute2 = 'Tier1'
-        }
-    }
-)
 
 ./Deployment/Install-HybridDeviceTagger.ps1 `
     -ResourceGroupName 'rg-hybrid-device-tagger-prod' `
@@ -149,13 +130,12 @@ $taggingRules = @(
     -ActiveDirectoryCredential $credential `
     -ManagementApiClientId '11111111-1111-1111-1111-111111111111' `
     -ManagementApiAllowedPrincipalObjectId '22222222-2222-2222-2222-222222222222' `
-    -TaggingRules $taggingRules `
     -ValidateOnly
 ```
 
 The installer uses the identity authenticated through `az login`. When `SubscriptionId` is omitted interactively, the installer proposes the active subscription shown by `az account show`; press Enter to accept it or enter a different subscription ID. The selected subscription is validated and confirmed by name and ID before any dependent installation inputs are collected or validated. Noninteractive runs must supply `SubscriptionId` explicitly. The Key Vault subscription inherits the resulting target subscription unless separately supplied.
 
-When the installer is started without a parameter splat, it asks for the subscription first and then prompts for each remaining required value in installation order. An empty interactive entry for a required value displays a short hint and repeats the same prompt until a value is entered. If `TaggingRules` is omitted, the installer guides the user through creation of the first rule instead of requesting JSON. The proposed defaults are `Rule1`, `1st Tagging Rule`, `OU=Computers,OU=Admin`, and `Tier 0` for `extensionAttribute1`. Fully parameterized calls remain noninteractive.
+When the installer is started without a parameter splat, it asks for the subscription first and then prompts for each remaining required infrastructure, Active Directory, and management API value in installation order. An empty interactive entry for a required value displays a short hint and repeats the same prompt until a value is entered. The installer never requests or creates tagging rules. Fully parameterized calls remain noninteractive.
 
 For an omitted Active Directory forest DNS name, the installer proposes the forest of the logged-on Active Directory user when Windows can resolve it; press Enter to accept it. On a workgroup system or when no logged-on-user forest can be detected, the prompt has no default and requires an explicit value.
 
@@ -182,13 +162,11 @@ Resource-name defaults follow the same workload-and-date naming scheme. For the 
 
 The interactive Storage account prompt derives its default from the selected Function App name, adds the `st` prefix, removes unsupported characters, converts it to lowercase, and truncates the suffix when required by the 24-character Storage limit. The interactive Key Vault prompt similarly adds the `kv-` prefix to the Function App suffix and truncates it to the 24-character Key Vault limit. The Key Vault resource-group prompt defaults to the selected Function App resource group. These prompts accept their defaults with Enter. The Key Vault remains an existing shared resource and is not created or renamed. Existing VNet and subnet names are supplied separately and are not renamed.
 
-The script reads all domain cross-references from the forest configuration partition. An OU-only `BaseDn`, such as `OU=Tier0,OU=Admin`, is resolved and subtree-tested in every forest domain; domains without that path are skipped, while a path absent from the entire forest fails validation. A full DN containing `DC=` remains limited to that domain. Each rule must configure at least one extension attribute, Entra group Object ID, or administrative-unit Object ID. Group and AU targets are limited to 50 unique, nonempty GUIDs per type. The script cannot prove the account's self-service `unicodePwd` change permission without actually rotating the password. Confirm `SELF / Change Password` separately before production installation.
-
-The installer resolves every configured administrative unit and detects restricted management administrative units before deployment. Interactive installation requires typing `YES` before it creates and assigns the custom `HybridDeviceTagger Restricted Device Attribute Writer` role at those exact RMAU scopes. Noninteractive installation requires `-GrantRestrictedAdministrativeUnitRole`. Validation and What-if report RMAU targets without assigning roles.
+The installer cannot prove the account's self-service `unicodePwd` change permission without actually rotating the password. Confirm `SELF / Change Password` separately before production installation. OU paths and Entra membership targets are validated when rules are created after installation.
 
 `-ActiveDirectoryTrustedCertificatePath` optionally accepts a DER or PEM public certificate. Supply the issuing root CA certificate in production, or the directly self-signed DC certificate for a lab. The installer uses it for its LDAPS preflight and writes the validated public certificate into the Function package as PEM without a private key. Runtime validation still requires Server Authentication EKU, a valid chain to that exact trust anchor, and a DNS name matching the LDAP endpoint.
 
-For an update to an existing Function App, `-SkipActiveDirectoryDirectoryChecks` may be used when the deployment identity cannot read the current Key Vault secret and no matching AD credential is available interactively. This still requires `-ActiveDirectoryTrustedCertificatePath` and performs strict LDAPS endpoint validation, but skips the repeated forest, OU, and service-account queries. It is rejected for first-time installations and service-account preparation.
+For an update to an existing Function App, `-SkipActiveDirectoryDirectoryChecks` may be used when the deployment identity cannot read the current Key Vault secret and no matching AD credential is available interactively. This still requires `-ActiveDirectoryTrustedCertificatePath` and performs strict LDAPS endpoint validation, but skips the repeated forest and service-account queries. It is rejected for first-time installations and service-account preparation.
 
 LDAPS remains the primary protocol. The installer always tests it first. If the secure bind succeeds, the deployed Function has LDAP fallback disabled, even when `-AllowLdapFallback` was supplied. If LDAPS fails with a connection, TLS, or availability error, an interactive installation explains the fallback and asks whether to continue with LDAP. The fallback uses Negotiate authentication with LDAP signing and sealing instead of Basic Bind. Declining cancels the installation.
 
@@ -198,13 +176,15 @@ For Azure DevOps or another noninteractive environment, `-AllowLdapFallback` is 
 
 Replace `-ValidateOnly` with `-WhatIf` to show the ARM changes without applying them. Remove both switches to install. Before the first Azure, Entra, Active Directory, Key Vault, or code change, the installer displays a summary of the selected mode, deployment target, resources, permissions, shared-resource references, and optional actions. It then uses standard PowerShell `ShouldProcess` confirmation for the complete plan. Use `-Confirm` to force the prompt or `-Confirm:$false` only for an already approved unattended installation. Declining exits before any installation change. Validation and What-if display the same summary but do not request approval because they do not apply changes.
 
-The central approval also covers `-RegisterProviders`, `-CreateResourceGroup`, and `-PrepareActiveDirectoryAccountOnly`, ensuring those operations cannot mutate state before the summary and confirmation. LDAP fallback, selection of a replacement AD password, and restricted administrative-unit role assignment retain their additional purpose-specific safety prompts.
+The central approval also covers `-RegisterProviders`, `-CreateResourceGroup`, and `-PrepareActiveDirectoryAccountOnly`, ensuring those operations cannot mutate state before the summary and confirmation. LDAP fallback and selection of a replacement AD password retain their additional purpose-specific safety prompts.
 
 An empty interactive required value or an unsuitable interactively selected FC1 integration subnet is requested again rather than terminating the installer. By default, specifying a missing VNet resource group, VNet, integration subnet, or private-endpoint subnet, supplying an unsuitable integration subnet, or selecting a VNet in a different region prints only its actionable exception message. Run the installer with `-Verbose` when the full PowerShell error record, source location, and stack information are needed for those validation errors. Unexpected operational, Azure, Entra, Active Directory, and deployment failures remain terminating errors in both modes so automation can detect them reliably. The installer transcript is closed correctly in both modes.
 
 ## Updating tagging rules after installation
 
-Import `HybridDeviceTagger.Management` and connect once to reuse the API URI and delegated Azure CLI token throughout the current PowerShell session. The production API URI and non-secret Entra audience are defaults; pass `ApiBaseUri` or `ClientId` to `Connect-HybridDeviceTagger` for another deployment.
+The installation provisions `Tagging__RulesJson` as an empty array. Scheduled and manually started tagging runs therefore complete without querying AD, changing Entra devices, or cleaning existing ownership state until the first rule is created.
+
+Import `HybridDeviceTagger.Management` and connect once to reuse the API URI and delegated Azure CLI token throughout the current PowerShell session. Pass only `ApiBaseUri` for another deployment. The module reads the deployment-specific token scope from the public REST endpoint `/authentication`; no client ID is configured in the module.
 
 ```powershell
 Import-Module ./Deployment/HybridDeviceTagger.Management

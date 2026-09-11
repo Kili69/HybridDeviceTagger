@@ -11,6 +11,23 @@ namespace HybridDeviceTagger.Tests;
 public sealed class ManagementApiFunctionTests
 {
     [Fact]
+    public void GetAuthentication_ReturnsConfiguredTokenScopeWithoutPrincipal()
+    {
+        var function = new ManagementApiAuthenticationFunction(
+            Microsoft.Extensions.Options.Options.Create(new ManagementApiOptions
+            {
+                ClientId = "11111111-1111-1111-1111-111111111111"
+            }));
+
+        var result = function.GetAuthentication(new DefaultHttpContext().Request);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Equal(
+            "api://11111111-1111-1111-1111-111111111111/.default",
+            ok.Value?.GetType().GetProperty("tokenScope")?.GetValue(ok.Value));
+    }
+
+    [Fact]
     public void OperationRunStatus_SerializesStateAsReadableName()
     {
         var status = new OperationRunStatus(

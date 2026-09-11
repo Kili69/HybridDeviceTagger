@@ -4,6 +4,21 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260911.1] - 2026-09-11
+
+### Added
+
+- Add a public authentication metadata endpoint so the PowerShell module can discover the deployment-specific Entra token scope without a client-ID parameter.
+- Add guided interactive tagging-rule creation while retaining object-based input for automation.
+- Add project-specific VS Code build, launch, settings, and extension recommendations.
+- Add focused tests for empty initial rule configuration, safe zero-rule execution, first-rule creation, and authentication metadata.
+
+### Changed
+
+- Separate infrastructure installation from business-rule configuration by deploying an empty rule set and removing rule and RMAU prompts from the installer.
+- Make zero-rule tagging runs safe no-ops without Active Directory, Microsoft Graph, or membership-ledger activity while retaining final-rule deletion protection for configured environments.
+- Expand the user, deployment, management API, monitoring, PowerShell command, and architecture documentation.
+
 ## [0.1.20260905.16] - 2026-09-05
 
 ### Added

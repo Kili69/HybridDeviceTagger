@@ -1,13 +1,26 @@
 openapi: 3.0.3
 info:
   title: HybridDeviceTagger Management API
-  version: 0.1.20260905.16
-  description: Entra-authenticated API for tagging configuration, operational actions, run status, and trace retrieval.
+  version: 0.1.20260911.1
+  description: REST API for authentication discovery, tagging configuration, operational actions, run status, and trace retrieval.
 servers:
   - url: https://func-hybriddevicetagger.azurewebsites.net/api/management
 security:
   - entraId: []
 paths:
+  /authentication:
+    get:
+      operationId: getManagementApiAuthentication
+      summary: Get authentication metadata for this deployment
+      description: Returns the public delegated token scope. This is the only operation that does not require an Entra token.
+      security: []
+      responses:
+        '200':
+          description: Authentication metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthenticationMetadata'
   /tagging-rules:
     get:
       operationId: getTaggingConfiguration
@@ -320,6 +333,15 @@ components:
     OperationConflict:
       description: The requested operation is already running
   schemas:
+    AuthenticationMetadata:
+      type: object
+      required:
+        - tokenScope
+      properties:
+        tokenScope:
+          type: string
+          pattern: '^api://[0-9a-fA-F-]{36}/\.default$'
+          example: api://11111111-1111-1111-1111-111111111111/.default
     TaggingRule:
       type: object
       required:

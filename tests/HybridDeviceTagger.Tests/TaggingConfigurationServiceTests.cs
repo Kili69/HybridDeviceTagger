@@ -6,6 +6,22 @@ namespace HybridDeviceTagger.Tests;
 public sealed class TaggingConfigurationServiceTests
 {
     [Fact]
+    public async Task UpsertAsync_AddsFirstRuleToEmptyConfiguration()
+    {
+        var store = new InMemoryTaggingConfigurationStore([]);
+        var service = new TaggingConfigurationService(store);
+
+        var result = await service.UpsertAsync(
+            CreateRule("Servers", "Managed"),
+            CancellationToken.None);
+
+        var rule = Assert.Single(result.Rules);
+        Assert.Equal("Servers", rule.Name);
+        Assert.Equal("Managed", rule.ExtensionAttributes["extensionAttribute1"]);
+        Assert.Equal("1", store.LastExpectedETag);
+    }
+
+    [Fact]
     public async Task UpsertAsync_ReplacesRuleByCaseInsensitiveName()
     {
         var store = new InMemoryTaggingConfigurationStore([CreateRule("Servers", "Old")]);

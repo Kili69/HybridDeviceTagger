@@ -1,6 +1,6 @@
 #Requires -Version 7.2
 #Requires -Modules ActiveDirectory
-# Project-Version: 0.1.20260905.16
+# Project-Version: 0.1.20260911.1
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -145,10 +145,6 @@ Name of the Key Vault secret containing the active AD password.
 .PARAMETER StagedCredentialEntryName
 Name of the Key Vault secret used while rotating or recovering the AD password.
 
-.PARAMETER TaggingRules
-One or more rules containing Name, Description, BaseDn, and at least one extension-attribute,
-Entra-group, or administrative-unit action.
-
 .PARAMETER TaggingSchedule
 Six-field NCRONTAB schedule for device reconciliation. The default runs every 15 minutes.
 
@@ -181,7 +177,7 @@ Creates or resets the AD service account, writes the current password secret, va
 and exits before Azure infrastructure or code deployment.
 
 .PARAMETER SkipActiveDirectoryDirectoryChecks
-Skips repeated forest, OU, and service-account directory checks for an existing installation.
+Skips repeated forest and service-account directory checks for an existing installation.
 Strict endpoint and certificate validation still runs.
 
 .PARAMETER ValidateOnly
@@ -189,10 +185,6 @@ Runs all supported prerequisite and configuration validation without changing re
 
 .PARAMETER SkipCodeDeployment
 Deploys or validates infrastructure and permissions without publishing Function App code.
-
-.PARAMETER GrantRestrictedAdministrativeUnitRole
-Explicitly approves creation and assignment of the least-privilege custom role at every configured
-restricted management administrative-unit scope.
 
 .EXAMPLE
 $credential = Get-Credential 'svc-HybridDeviceTagger@contoso.com'
@@ -348,10 +340,6 @@ param(
     [ValidateLength(1, 127)]
     [string]$StagedCredentialEntryName = 'hybrid-device-tagger-ad-password-next',
 
-    [ValidateNotNull()]
-    [ValidateCount(1, 100)]
-    [object[]]$TaggingRules,
-
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 100)]
     [string]$TaggingSchedule = '0 */15 * * * *',
@@ -380,8 +368,7 @@ param(
     [switch]$PrepareActiveDirectoryAccountOnly,
     [switch]$SkipActiveDirectoryDirectoryChecks,
     [switch]$ValidateOnly,
-    [switch]$SkipCodeDeployment,
-    [switch]$GrantRestrictedAdministrativeUnitRole
+    [switch]$SkipCodeDeployment
 )
 
 Set-StrictMode -Version Latest
@@ -493,8 +480,6 @@ function Get-AppResourceNameSuffix {
 }
 
 function Write-InstallationSummary {
-    param([Parameter()][object[]]$RestrictedAdministrativeUnits = @())
-
     Write-Step 'Installation summary'
     $mode = if ($ValidateOnly) {
         'Validation only (no changes)'
@@ -533,9 +518,6 @@ function Write-InstallationSummary {
     Write-Host '  - Five least-privilege Entra application roles with assignment required'
     Write-Host '  - Managed-identity role assignments for Storage and the existing Key Vault'
     Write-Host '  - Microsoft Graph application permissions for device, group, and administrative-unit management'
-    if ($RestrictedAdministrativeUnits.Count -gt 0) {
-        Write-Host "  - Restricted administrative-unit role assignments: $($RestrictedAdministrativeUnits.Count)"
-    }
     if ($RegisterProviders) {
         Write-Host '  - Register required Azure resource providers when missing'
     }
@@ -638,30 +620,6 @@ function Read-InstallerValueWithDefault {
     $enteredValue.Trim()
 }
 
-function Read-InteractiveTaggingRule {
-    $ruleName = Read-InstallerValueWithDefault `
-        -Prompt 'Rule name' `
-        -DefaultValue 'Rule1'
-    $ruleDescription = Read-InstallerValueWithDefault `
-        -Prompt 'Rule description' `
-        -DefaultValue '1st Tagging Rule'
-    $baseDn = Read-InstallerValueWithDefault `
-        -Prompt 'Base DN' `
-        -DefaultValue 'OU=Computers,OU=Admin'
-    $extensionAttribute1Value = Read-InstallerValueWithDefault `
-        -Prompt 'ExtensionAttribute1 value' `
-        -DefaultValue 'Tier 0'
-
-    @{
-        Name = $ruleName
-        Description = $ruleDescription
-        BaseDn = $baseDn
-        ExtensionAttributes = @{
-            extensionAttribute1 = $extensionAttribute1Value
-        }
-    }
-}
-
 function Get-LoggedOnUserForestDomain {
     try {
         $forest = Get-ADForest -Current LoggedOnUser -ErrorAction Stop
@@ -719,170 +677,12 @@ function Resolve-ADServiceAccountDistinguishedName {
     $null
 }
 
-function Convert-DnsNameToDistinguishedName {
-    param([Parameter(Mandatory)][string]$DnsName)
-    ($DnsName.Trim('.').Split('.') | ForEach-Object { "DC=$_" }) -join ','
-}
-
-function Test-ForestRelativeOuPath {
-    param([Parameter(Mandatory)][string]$Path)
-    $Path -notmatch '(?i)(?:^|(?<!\\),)\s*DC\s*='
-}
-
-function Test-ValidTaggingRuleName {
-    param([Parameter(Mandatory)][string]$Name)
-    $Name.Trim() -match '^[\p{L}\p{N}][\p{L}\p{N} ._()\-]{0,127}$'
-}
-
-function Test-ValidTaggingBaseDn {
-    param([Parameter(Mandatory)][string]$Path)
-    $valuePattern = '(?!#)(?:\\[^\x00-\x1F\x7F]|[^,+"\\<>;\x00-\x1F\x7F])+'
-    $ouPattern = "(?i:OU)\s*=$valuePattern"
-    $dcPattern = "(?i:DC)\s*=$valuePattern"
-    $Path -match "^\s*(?:$ouPattern(?:\s*,\s*$ouPattern)*(?:\s*,\s*$dcPattern)*|$dcPattern(?:\s*,\s*$dcPattern)*)\s*$"
-}
-
 function Get-DomainDnsNameFromDistinguishedName {
     param([Parameter(Mandatory)][string]$DistinguishedName)
     @([regex]::Matches(
         $DistinguishedName,
         '(?i)(?:^|(?<!\\),)\s*DC\s*=\s*([^,]+)'
     ) | ForEach-Object { $_.Groups[1].Value.Trim() }) -join '.'
-}
-
-function Get-TaggingRuleValue {
-    param(
-        [Parameter(Mandatory)][object]$InputRule,
-        [Parameter(Mandatory)][string]$PropertyName
-    )
-
-    if ($InputRule -is [System.Collections.IDictionary]) {
-        return $InputRule[$PropertyName]
-    }
-
-    $property = $InputRule.PSObject.Properties[$PropertyName]
-    if ($null -ne $property) {
-        return $property.Value
-    }
-}
-
-function ConvertTo-NormalizedTaggingRule {
-    if ($TaggingRules.Count -eq 0) {
-        throw 'At least one tagging rule is required.'
-    }
-
-    $normalizedRules = [System.Collections.Generic.List[object]]::new()
-    $ruleNames = [System.Collections.Generic.HashSet[string]]::new(
-        [StringComparer]::OrdinalIgnoreCase
-    )
-    foreach ($rule in $TaggingRules) {
-        $name = [string](Get-TaggingRuleValue -InputRule $rule -PropertyName 'Name')
-        if ([string]::IsNullOrWhiteSpace($name)) {
-            throw 'Every tagging rule requires a non-empty Name.'
-        }
-        if (-not (Test-ValidTaggingRuleName $name)) {
-            throw "Tagging rule name '$name' contains unsupported characters. Use 1-128 letters, numbers, spaces, dots, underscores, hyphens, or parentheses."
-        }
-        if (-not $ruleNames.Add($name.Trim())) {
-            throw "Tagging rule name '$name' is duplicated."
-        }
-        $description = [string](Get-TaggingRuleValue -InputRule $rule -PropertyName 'Description')
-        if ([string]::IsNullOrWhiteSpace($description)) {
-            throw "Tagging rule '$name' requires a non-empty Description."
-        }
-        if ($description.Length -gt 1024) {
-            throw "Tagging rule '$name' Description cannot exceed 1024 characters."
-        }
-        $baseDn = [string]$rule.BaseDn
-        if ([string]::IsNullOrWhiteSpace($baseDn)) {
-            throw 'Every tagging rule requires a non-empty BaseDn.'
-        }
-        if ($baseDn.Length -gt 2048) {
-            throw "Tagging rule '$name' BaseDn cannot exceed 2048 characters."
-        }
-        if (-not (Test-ValidTaggingBaseDn $baseDn)) {
-            throw "Tagging rule '$baseDn' must be a valid OU distinguished name with an optional trailing DC part."
-        }
-
-        $attributes = [System.Collections.Generic.Dictionary[string, string]]::new(
-            [StringComparer]::OrdinalIgnoreCase
-        )
-        $rawAttributes = Get-TaggingRuleValue -InputRule $rule -PropertyName 'ExtensionAttributes'
-
-        $entries = if ($null -eq $rawAttributes) {
-            @()
-        }
-        elseif ($rawAttributes -is [System.Collections.IDictionary]) {
-            $rawAttributes.GetEnumerator() | ForEach-Object {
-                [pscustomobject]@{ Name = [string]$_.Key; Value = [string]$_.Value }
-            }
-        }
-        else {
-            $rawAttributes.PSObject.Properties | ForEach-Object {
-                [pscustomobject]@{ Name = $_.Name; Value = [string]$_.Value }
-            }
-        }
-
-        foreach ($entry in @($entries)) {
-            if ($entry.Name -notmatch '^extensionAttribute(?:[1-9]|1[0-5])$') {
-                throw "Tagging rule '$baseDn' contains unsupported attribute '$($entry.Name)'."
-            }
-            if ([string]::IsNullOrWhiteSpace($entry.Value)) {
-                throw "Tagging rule '$baseDn' requires a non-empty value for '$($entry.Name)'."
-            }
-            if ($entry.Value.Length -gt 1024) {
-                throw "Tagging rule '$name' value for '$($entry.Name)' cannot exceed 1024 characters."
-            }
-            if (-not $attributes.TryAdd($entry.Name, $entry.Value)) {
-                throw "Tagging rule '$baseDn' contains duplicate attribute '$($entry.Name)'."
-            }
-        }
-        if ($attributes.Count -gt 15) {
-            throw "Tagging rule '$name' cannot contain more than 15 extension attributes."
-        }
-
-        $membershipTargets = [ordered]@{}
-        foreach ($propertyName in @('EntraGroupIds', 'AdministrativeUnitIds')) {
-            $targetIds = @(
-                Get-TaggingRuleValue -InputRule $rule -PropertyName $propertyName |
-                    Where-Object { $null -ne $_ }
-            )
-            if ($targetIds.Count -gt 50) {
-                throw "Tagging rule '$name' cannot contain more than 50 $propertyName."
-            }
-
-            $normalizedIds = [System.Collections.Generic.List[guid]]::new()
-            $uniqueIds = [System.Collections.Generic.HashSet[guid]]::new()
-            foreach ($targetId in $targetIds) {
-                $parsedId = [guid]::Empty
-                if (-not [guid]::TryParse([string]$targetId, [ref]$parsedId) -or
-                    $parsedId -eq [guid]::Empty) {
-                    throw "Tagging rule '$name' contains an invalid or empty GUID in $propertyName."
-                }
-                if (-not $uniqueIds.Add($parsedId)) {
-                    throw "Tagging rule '$name' contains duplicate ID '$parsedId' in $propertyName."
-                }
-                $normalizedIds.Add($parsedId)
-            }
-            $membershipTargets[$propertyName] = $normalizedIds.ToArray()
-        }
-        if ($attributes.Count -eq 0 -and
-            $membershipTargets.EntraGroupIds.Count -eq 0 -and
-            $membershipTargets.AdministrativeUnitIds.Count -eq 0) {
-            throw "Tagging rule '$name' requires at least one extension attribute, Entra group, or administrative unit."
-        }
-
-        $normalizedRules.Add([ordered]@{
-            name = $name.Trim()
-            description = $description.Trim()
-            baseDn = $baseDn
-            extensionAttributes = $attributes
-            entraGroupIds = $membershipTargets.EntraGroupIds
-            administrativeUnitIds = $membershipTargets.AdministrativeUnitIds
-        })
-    }
-
-    $normalizedRules
 }
 
 function Connect-LdapDirectory {
@@ -1411,77 +1211,6 @@ function Test-LdapConfiguration {
         }
     }
 
-    foreach ($configuredBaseDn in @($script:NormalizedTaggingRules.baseDn | Select-Object -Unique)) {
-        $isForestRelative = Test-ForestRelativeOuPath $configuredBaseDn
-        $searchTargets = if ($isForestRelative) {
-            @($forestDomains | ForEach-Object {
-                [pscustomobject]@{
-                    Server = Get-LdapServerForDomain $_.DnsRoot
-                    BaseDn = "$($configuredBaseDn.Trim().TrimEnd(',')),$($_.NamingContext)"
-                }
-            })
-        }
-        else {
-            @([pscustomobject]@{
-                Server = Get-LdapServerForDomain (
-                    Get-DomainDnsNameFromDistinguishedName $configuredBaseDn
-                )
-                BaseDn = $configuredBaseDn
-            })
-        }
-        $resolvedOuCount = 0
-
-        foreach ($target in $searchTargets) {
-            $domainConnection = $null
-            try {
-                $domainConnection = Connect-ValidatedLdapDirectory -Server $target.Server
-                $baseRequest = [System.DirectoryServices.Protocols.SearchRequest]::new(
-                    $target.BaseDn,
-                    '(objectClass=*)',
-                    [System.DirectoryServices.Protocols.SearchScope]::Base,
-                    [string[]]@('distinguishedName')
-                )
-                $baseResponse = [System.DirectoryServices.Protocols.SearchResponse]$domainConnection.SendRequest($baseRequest)
-                if ($baseResponse.Entries.Count -ne 1) {
-                    throw "Active Directory base DN '$($target.BaseDn)' was not found."
-                }
-                $resolvedOuCount++
-
-                $deviceRequest = [System.DirectoryServices.Protocols.SearchRequest]::new(
-                    $target.BaseDn,
-                    '(&(objectCategory=computer)(userCertificate=*))',
-                    [System.DirectoryServices.Protocols.SearchScope]::Subtree,
-                    [string[]]@('objectGUID')
-                )
-                $deviceRequest.SizeLimit = 1
-                try {
-                    $null = $domainConnection.SendRequest($deviceRequest)
-                }
-                catch [System.DirectoryServices.Protocols.DirectoryOperationException] {
-                    if ($_.Exception.Response.ResultCode -ne [System.DirectoryServices.Protocols.ResultCode]::SizeLimitExceeded) {
-                        throw
-                    }
-                }
-            }
-            catch [System.DirectoryServices.Protocols.DirectoryOperationException] {
-                if (-not $isForestRelative -or
-                    $_.Exception.Response.ResultCode -ne [System.DirectoryServices.Protocols.ResultCode]::NoSuchObject) {
-                    throw
-                }
-                Write-Host "OU path '$configuredBaseDn' is absent in domain '$($target.Server)'; skipping that domain."
-            }
-            finally {
-                if ($null -ne $domainConnection) {
-                    $domainConnection.Dispose()
-                }
-            }
-        }
-
-        if ($isForestRelative -and $resolvedOuCount -eq 0) {
-            throw "OU path '$configuredBaseDn' was not found in any domain in the forest."
-        }
-    }
-
     $accountServer = Get-DomainDnsNameFromDistinguishedName $ActiveDirectoryBindUserDistinguishedName
     $accountConnection = $null
     try {
@@ -1745,7 +1474,6 @@ function Get-DeploymentParameter {
         activeDirectoryBindUsername = $ADServiceAccount
         activeDirectoryBindUserDistinguishedName = $ActiveDirectoryBindUserDistinguishedName
         managementApiClientId = $ManagementApiClientId
-        taggingRules = $script:NormalizedTaggingRules
         currentPasswordSecretName = $CurrentCredentialEntryName
         nextPasswordSecretName = $StagedCredentialEntryName
         taggingSchedule = $TaggingSchedule
@@ -1960,97 +1688,6 @@ function Set-ManagementApiAuthorization {
             '--only-show-errors'
         )
         Write-Host 'Management API enterprise application now requires role assignment.'
-    }
-}
-
-function Get-RestrictedAdministrativeUnitTarget {
-    $administrativeUnitIds = @(
-        $script:NormalizedTaggingRules |
-            ForEach-Object {
-                @(Get-TaggingRuleValue -InputRule $_ -PropertyName 'administrativeUnitIds')
-            } |
-            Select-Object -Unique
-    )
-    $restrictedTargets = [System.Collections.Generic.List[object]]::new()
-    foreach ($administrativeUnitId in $administrativeUnitIds) {
-        $administrativeUnit = Get-AzureJson -Arguments @(
-            'rest', '--method', 'get',
-            '--url', "https://graph.microsoft.com/v1.0/directory/administrativeUnits/$administrativeUnitId`?`$select=id,displayName,isMemberManagementRestricted"
-        )
-        if ($administrativeUnit.isMemberManagementRestricted -eq $true) {
-            $restrictedTargets.Add($administrativeUnit)
-        }
-    }
-    $restrictedTargets.ToArray()
-}
-
-function Grant-RestrictedAdministrativeUnitRole {
-    param(
-        [Parameter(Mandatory)][string]$PrincipalId,
-        [Parameter(Mandatory)][object[]]$AdministrativeUnits
-    )
-
-    if ($AdministrativeUnits.Count -eq 0) {
-        return
-    }
-
-    $roleName = 'HybridDeviceTagger Restricted Device Attribute Writer'
-    $encodedRoleName = [uri]::EscapeDataString("displayName eq '$roleName'")
-    $roleDefinitions = Get-AzureJson -Arguments @(
-        'rest', '--method', 'get',
-        '--url', "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$filter=$encodedRoleName"
-    )
-    $roleDefinition = @($roleDefinitions.value)[0]
-    if (-not $roleDefinition) {
-        $roleBody = ConvertTo-AzureCliJsonArgument -Json (@{
-            displayName = $roleName
-            description = 'Updates only device extension attributes for HybridDeviceTagger-managed RMAU devices.'
-            isEnabled = $true
-            rolePermissions = @(@{
-                allowedResourceActions = @(
-                    'microsoft.directory/devices/allProperties/read',
-                    'microsoft.directory/devices/extensionAttributeSet1/update',
-                    'microsoft.directory/devices/extensionAttributeSet2/update',
-                    'microsoft.directory/devices/extensionAttributeSet3/update'
-                )
-            })
-        } | ConvertTo-Json -Depth 10 -Compress)
-        $roleDefinition = Get-AzureJson -Arguments @(
-            'rest', '--method', 'post',
-            '--url', 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions',
-            '--headers', 'Content-Type=application/json',
-            '--body', $roleBody
-        )
-    }
-
-    $encodedPrincipalFilter = [uri]::EscapeDataString("principalId eq '$PrincipalId'")
-    $roleAssignments = Get-AzureJson -Arguments @(
-        'rest', '--method', 'get',
-        '--url', "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?`$filter=$encodedPrincipalFilter"
-    )
-    foreach ($administrativeUnit in $AdministrativeUnits) {
-        $directoryScopeId = "/administrativeUnits/$($administrativeUnit.id)"
-        $existing = @($roleAssignments.value | Where-Object {
-            $_.roleDefinitionId -eq $roleDefinition.id -and
-            $_.directoryScopeId -eq $directoryScopeId
-        })
-        if ($existing.Count -gt 0) {
-            Write-Host "RMAU role is already assigned for '$($administrativeUnit.displayName)' ($($administrativeUnit.id))."
-            continue
-        }
-
-        $assignmentBody = ConvertTo-AzureCliJsonArgument -Json (@{
-            principalId = $PrincipalId
-            roleDefinitionId = $roleDefinition.id
-            directoryScopeId = $directoryScopeId
-        } | ConvertTo-Json -Compress)
-        $null = Invoke-AzureCli -Arguments @(
-            'rest', '--method', 'post',
-            '--url', 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments',
-            '--headers', 'Content-Type=application/json',
-            '--body', $assignmentBody,
-            '--only-show-errors'
-        )
     }
 }
 
@@ -2484,14 +2121,6 @@ foreach ($inputDefinition in $requiredStringInputs) {
             -Prompt $inputDefinition.Prompt
     }
 }
-if ($null -eq $TaggingRules -or $TaggingRules.Count -eq 0) {
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
-        throw 'TaggingRules must be supplied explicitly for noninteractive execution.'
-    }
-    Write-Step 'Creating tagging rule'
-    $TaggingRules = @(Read-InteractiveTaggingRule)
-}
-
 if (-not $PrepareActiveDirectoryAccountOnly -and
     [string]::IsNullOrWhiteSpace($ManagementApiClientId)) {
     if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
@@ -2587,15 +2216,6 @@ if ($KeyVaultName -notmatch '^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$') {
 if ($ActiveDirectoryForestDomain -notmatch '^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$') {
     throw 'ActiveDirectoryForestDomain must be a valid DNS domain name.'
 }
-if ($TaggingRules.Count -gt 100) {
-    throw 'TaggingRules cannot contain more than 100 rules.'
-}
-$script:NormalizedTaggingRules = @(ConvertTo-NormalizedTaggingRule)
-$normalizedTaggingRulesJson = ConvertTo-Json -InputObject $script:NormalizedTaggingRules -Depth 10 -Compress
-if ($normalizedTaggingRulesJson.Length -gt 32768) {
-    throw 'Serialized tagging configuration cannot exceed 32768 characters.'
-}
-
 foreach ($tag in $Tags.GetEnumerator()) {
     if ([string]::IsNullOrEmpty([string]$tag.Key) -or ([string]$tag.Key).Length -gt 512) {
         throw 'Azure tag keys must contain 1-512 characters.'
@@ -2644,16 +2264,7 @@ if ([string]::IsNullOrWhiteSpace($KeyVaultSubscriptionId)) {
     $KeyVaultSubscriptionId = $SubscriptionId
 }
 
-Write-Step 'Validating Entra administrative-unit targets'
-$restrictedAdministrativeUnits = @(Get-RestrictedAdministrativeUnitTarget)
-if ($restrictedAdministrativeUnits.Count -gt 0) {
-    $targetSummary = $restrictedAdministrativeUnits |
-        ForEach-Object { "  - $($_.displayName) ($($_.id))" } |
-        Out-String
-    Write-Warning "Rules target restricted management administrative units:`n$targetSummary"
-}
-
-Write-InstallationSummary -RestrictedAdministrativeUnits $restrictedAdministrativeUnits
+Write-InstallationSummary
 if (-not $ValidateOnly -and -not $WhatIfPreference) {
     if (-not $PSCmdlet.ShouldProcess(
         "$SubscriptionId/$ResourceGroupName",
@@ -2661,19 +2272,6 @@ if (-not $ValidateOnly -and -not $WhatIfPreference) {
     )) {
         Write-Host 'Installation canceled before any changes were made.' -ForegroundColor Yellow
         return
-    }
-}
-
-if ($restrictedAdministrativeUnits.Count -gt 0) {
-    if (-not $ValidateOnly -and -not $WhatIfPreference -and
-        -not $GrantRestrictedAdministrativeUnitRole) {
-        if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
-            throw 'RMAU targets require explicit approval. Re-run with -GrantRestrictedAdministrativeUnitRole.'
-        }
-        $confirmation = Read-Host 'Create and assign the least-privilege device extension-attribute role at these RMAU scopes? Type YES to continue'
-        if ($confirmation -cne 'YES') {
-            throw 'RMAU role assignment was not explicitly approved; installation stopped before deployment.'
-        }
     }
 }
 
@@ -2834,13 +2432,6 @@ try {
 
     Write-Step 'Assigning Microsoft Graph application permissions'
     Grant-GraphApplicationPermission -PrincipalId $principalId
-
-    if ($restrictedAdministrativeUnits.Count -gt 0) {
-        Write-Step 'Assigning restricted administrative-unit roles'
-        Grant-RestrictedAdministrativeUnitRole `
-            -PrincipalId $principalId `
-            -AdministrativeUnits $restrictedAdministrativeUnits
-    }
 
     if (-not $SkipCodeDeployment) {
         Write-Step 'Building and deploying Function App code'

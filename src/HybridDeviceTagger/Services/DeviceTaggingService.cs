@@ -63,6 +63,20 @@ public sealed class DeviceTaggingService
             new Dictionary<string, object?> { ["configuredRuleCount"] = rules.Count },
             null,
             cancellationToken);
+        if (rules.Count == 0)
+        {
+            await trace.WriteAsync(
+                "Information",
+                "Discovery",
+                "LoadAssignments",
+                "Skipped",
+                new Dictionary<string, object?> { ["configuredRuleCount"] = 0 },
+                null,
+                cancellationToken);
+            _logger.LogInformation("Device tagging skipped because no tagging rules are configured");
+            return new TaggingResult(0, 0, 0, 0, 0);
+        }
+
         var assignments = await GetAssignmentsAsync(rules, cancellationToken, trace);
         var updated = 0;
         var unchanged = 0;

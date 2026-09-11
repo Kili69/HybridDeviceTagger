@@ -19,6 +19,7 @@
     "PasswordRotation__RotateAfterDays": "25",
     "PasswordRotation__PasswordLength": "40",
     "PasswordRotation__SecretExpiryDays": "35",
+    "ManagementApi__ClientId": "11111111-1111-1111-1111-111111111111",
     "Tagging__Rules__0__Name": "Tier 0 workstations",
     "Tagging__Rules__0__Description": "Tags privileged administrative workstations.",
     "Tagging__Rules__0__BaseDn": "OU=Tier0,OU=Admin",

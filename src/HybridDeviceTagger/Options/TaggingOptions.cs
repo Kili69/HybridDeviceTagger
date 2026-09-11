@@ -64,13 +64,7 @@ public sealed partial class TaggingOptions : IValidatableObject
         }
 
         var validationResults = new List<ValidationResult>();
-        if (rules.Count == 0)
-        {
-            validationResults.Add(new ValidationResult(
-                "At least one tagging rule is required.",
-                [nameof(Rules), nameof(RulesJson)]));
-        }
-        else if (rules.Count > MaximumRuleCount)
+        if (rules.Count > MaximumRuleCount)
         {
             return
             [

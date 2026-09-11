@@ -9,6 +9,38 @@ namespace HybridDeviceTagger.Tests;
 public sealed class DeviceTaggingServiceTests
 {
     [Fact]
+    public async Task TagDevicesAsync_WithNoRules_DoesNotReadDirectoriesOrCleanLedger()
+    {
+        var deviceId = Guid.NewGuid();
+        var directorySource = new StubDirectoryDeviceSource([]);
+        var ledger = new StubMembershipLedger();
+        ledger.Values[deviceId] = new ManagedDeviceMemberships(
+            deviceId.ToString("D"),
+            [],
+            [])
+        {
+            ExtensionAttributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["extensionAttribute1"] = "Managed"
+            }
+        };
+        var service = new DeviceTaggingService(
+            directorySource,
+            new StubEntraDeviceClient(new Dictionary<Guid, EntraDevice>()),
+            CreateMembershipService(ledger),
+            ledger,
+            new OptionsTaggingRuleProvider(
+                Microsoft.Extensions.Options.Options.Create(new TaggingOptions())),
+            NullLogger<DeviceTaggingService>.Instance);
+
+        var result = await service.TagDevicesAsync(CancellationToken.None);
+
+        Assert.Equal(new TaggingResult(0, 0, 0, 0, 0), result);
+        Assert.Empty(directorySource.RequestedBaseDns);
+        Assert.True(ledger.Values.ContainsKey(deviceId));
+    }
+
+    [Fact]
     public async Task TagDevicesAsync_UpdatesOnlyUntaggedHybridDevice()
     {
         var updateDeviceId = Guid.NewGuid();
