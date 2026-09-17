@@ -158,6 +158,64 @@ public sealed class ManagementApiFunctionTests
     }
 
     [Fact]
+    public async Task InitializeActiveDirectoryCredentialAsync_StoresPasswordWithoutReturningIt()
+    {
+        var initializer = new FakeCredentialInitializer();
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            credentialInitializer: initializer);
+        var request = AuthenticatedRequest(ManagementApiRoles.PasswordRotationAdministrator);
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes("""{"password":"Initial!Password1"}"""));
+
+        var result = await function.InitializeActiveDirectoryCredentialAsync(request, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Equal("Initial!Password1", initializer.Password);
+        Assert.DoesNotContain("Initial!Password1", JsonSerializer.Serialize(ok.Value), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InitializeActiveDirectoryCredentialAsync_RejectsReaderRole()
+    {
+        var initializer = new FakeCredentialInitializer();
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            credentialInitializer: initializer);
+        var request = AuthenticatedRequest(ManagementApiRoles.Reader);
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes("""{"password":"Initial!Password1"}"""));
+
+        var result = await function.InitializeActiveDirectoryCredentialAsync(request, CancellationToken.None);
+
+        var forbidden = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, forbidden.StatusCode);
+        Assert.Null(initializer.Password);
+    }
+
+    [Fact]
+    public async Task InitializeActiveDirectoryCredentialAsync_ReturnsConflictWhenAlreadyInitialized()
+    {
+        var initializer = new FakeCredentialInitializer
+        {
+            Exception = new ActiveDirectoryCredentialAlreadyInitializedException()
+        };
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            credentialInitializer: initializer);
+        var request = AuthenticatedRequest(ManagementApiRoles.PasswordRotationAdministrator);
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes("""{"password":"Initial!Password1"}"""));
+
+        var result = await function.InitializeActiveDirectoryCredentialAsync(request, CancellationToken.None);
+
+        Assert.IsType<ConflictObjectResult>(result);
+    }
+
+    [Fact]
     public async Task RunDeviceTaggingAsync_ReturnsConflictWhenAlreadyRunning()
     {
         var runner = new FakeDeviceTaggingRunner { AlreadyRunning = true };
@@ -269,14 +327,16 @@ public sealed class ManagementApiFunctionTests
         IRunTraceReader traceReader,
         IDeviceTaggingRunner? deviceTaggingRunner = null,
         IPasswordRotationRunner? passwordRotationRunner = null,
-        IActiveDirectoryTrustStore? trustStore = null) =>
+        IActiveDirectoryTrustStore? trustStore = null,
+        IActiveDirectoryCredentialInitializer? credentialInitializer = null) =>
         new(
             new TaggingConfigurationService(configurationStore),
             statusStore,
             traceReader,
             trustStore ?? new FakeTrustStore(),
             deviceTaggingRunner ?? new FakeDeviceTaggingRunner(),
-            passwordRotationRunner ?? new FakePasswordRotationRunner());
+            passwordRotationRunner ?? new FakePasswordRotationRunner(),
+            credentialInitializer ?? new FakeCredentialInitializer());
 
     private static HttpRequest AuthenticatedRequest(params string[] roles)
     {
@@ -431,6 +491,19 @@ public sealed class ManagementApiFunctionTests
             IsPastDue = isPastDue;
             Force = force;
             return Task.FromResult(new PasswordRotationResult(PasswordRotationOutcome.Rotated, 10));
+        }
+    }
+
+    private sealed class FakeCredentialInitializer : IActiveDirectoryCredentialInitializer
+    {
+        public string? Password { get; private set; }
+
+        public Exception? Exception { get; init; }
+
+        public Task InitializeAsync(string password, CancellationToken cancellationToken)
+        {
+            Password = password;
+            return Exception is null ? Task.CompletedTask : Task.FromException(Exception);
         }
     }
 

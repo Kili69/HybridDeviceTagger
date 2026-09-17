@@ -4,6 +4,21 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20260917.1] - 2026-09-17
+
+### Added
+
+- Add authenticated, one-time initialization of the Active Directory service-account credential through the Function management API and managed identity.
+- Add an SDK-independent installation-package builder that nests the prebuilt Function application in the deployment package.
+- Add PowerShell management support for initializing the AD credential and importing one or multiple tagging rules.
+
+### Changed
+
+- Allow the installer to create a private Key Vault or use an existing vault and prepare the AD service account with a separate provisioning credential.
+- Remove direct Key Vault secret writes and Key Vault data-role requirements from the installation user.
+- Expand installer, deployment, management API, OpenAPI, PowerShell module, and test coverage for secure credential initialization.
+- Reorganize the German README and document all exported PowerShell management functions.
+
 ## [0.1.20260911.1] - 2026-09-11
 
 ### Added

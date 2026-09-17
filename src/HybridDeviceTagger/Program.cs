@@ -79,6 +79,7 @@ builder.Services.AddSingleton<IActiveDirectoryCredentialStore, KeyVaultActiveDir
 builder.Services.AddSingleton<ActiveDirectoryLdapConnectionFactory>();
 builder.Services.AddSingleton<IActiveDirectoryDeviceSource, LdapActiveDirectoryDeviceSource>();
 builder.Services.AddSingleton<IActiveDirectoryPasswordClient, LdapActiveDirectoryPasswordClient>();
+builder.Services.AddSingleton<IActiveDirectoryCredentialInitializer, ActiveDirectoryCredentialInitializer>();
 builder.Services.AddSingleton<IPasswordGenerator, SecurePasswordGenerator>();
 builder.Services.AddTransient<PasswordRotationService>();
 builder.Services.AddHttpClient("MicrosoftGraph", client =>

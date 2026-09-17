@@ -10,6 +10,14 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Provides active and staged Active Directory credentials without exposing storage details.</summary>
 public interface IActiveDirectoryCredentialStore
 {
+    /// <summary>Stores the initial active credential only when no current secret exists.</summary>
+    /// <param name="password">The validated initial password.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The initialized active credential including its creation metadata.</returns>
+    Task<StoredDirectoryCredential> InitializeCurrentAsync(
+        string password,
+        CancellationToken cancellationToken);
+
     /// <summary>Gets the credential currently designated as active.</summary>
     /// <param name="cancellationToken">Cancels the operation.</param>
     /// <returns>The active directory credential.</returns>
@@ -33,3 +41,7 @@ public interface IActiveDirectoryCredentialStore
     /// <param name="cancellationToken">Cancels the operation.</param>
     Task PromoteAsync(string password, CancellationToken cancellationToken);
 }
+
+/// <summary>Indicates that the active credential has already been initialized.</summary>
+public sealed class ActiveDirectoryCredentialAlreadyInitializedException()
+    : InvalidOperationException("The Active Directory credential has already been initialized.");

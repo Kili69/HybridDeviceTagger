@@ -2,7 +2,7 @@
   <PropertyGroup>
     <VersionMajor Condition="'$(VersionMajor)' == ''">0</VersionMajor>
     <VersionMinor Condition="'$(VersionMinor)' == ''">1</VersionMinor>
-    <VersionDate Condition="'$(VersionDate)' == ''">20260911</VersionDate>
+    <VersionDate Condition="'$(VersionDate)' == ''">20260917</VersionDate>
     <VersionCounter Condition="'$(VersionCounter)' == ''">1</VersionCounter>
     <Version>$(VersionMajor).$(VersionMinor).$(VersionDate).$(VersionCounter)</Version>
     <InformationalVersion>$(Version)</InformationalVersion>

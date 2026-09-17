@@ -26,6 +26,7 @@ public sealed class ManagementApiFunction
     private readonly IActiveDirectoryTrustStore _trustStore;
     private readonly IDeviceTaggingRunner _deviceTaggingRunner;
     private readonly IPasswordRotationRunner _passwordRotationRunner;
+    private readonly IActiveDirectoryCredentialInitializer _credentialInitializer;
 
     /// <summary>Initializes the management API.</summary>
     public ManagementApiFunction(
@@ -34,7 +35,8 @@ public sealed class ManagementApiFunction
         IRunTraceReader traceReader,
         IActiveDirectoryTrustStore trustStore,
         IDeviceTaggingRunner deviceTaggingRunner,
-        IPasswordRotationRunner passwordRotationRunner)
+        IPasswordRotationRunner passwordRotationRunner,
+        IActiveDirectoryCredentialInitializer credentialInitializer)
     {
         _configurationService = configurationService;
         _statusStore = statusStore;
@@ -42,6 +44,7 @@ public sealed class ManagementApiFunction
         _trustStore = trustStore;
         _deviceTaggingRunner = deviceTaggingRunner;
         _passwordRotationRunner = passwordRotationRunner;
+        _credentialInitializer = credentialInitializer;
     }
 
     /// <summary>Gets the effective tagging-rule configuration.</summary>
@@ -191,6 +194,54 @@ public sealed class ManagementApiFunction
         return await ExecuteOperationAsync(
             invocationId,
             () => _passwordRotationRunner.RunAsync(invocationId, false, true, cancellationToken));
+    }
+
+    /// <summary>Validates and stores the initial Active Directory service-account password.</summary>
+    [Function("InitializeActiveDirectoryCredential")]
+    public async Task<IActionResult> InitializeActiveDirectoryCredentialAsync(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/actions/initialize-ad-credential")]
+        HttpRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (Authorize(request, ManagementApiRoles.PasswordRotationAdministrator) is { } authorizationFailure)
+        {
+            return authorizationFailure;
+        }
+
+        try
+        {
+            var input = await ReadJsonAsync<InitializeCredentialRequest>(request, cancellationToken);
+            if (string.IsNullOrWhiteSpace(input.Password) || input.Password.Length > 256)
+            {
+                return new BadRequestObjectResult(new { error = "Password must contain between 1 and 256 characters." });
+            }
+
+            await _credentialInitializer.InitializeAsync(input.Password, cancellationToken);
+            return new OkObjectResult(new { initialized = true });
+        }
+        catch (ActiveDirectoryCredentialValidationException exception)
+        {
+            return new BadRequestObjectResult(new { error = exception.Message });
+        }
+        catch (ActiveDirectoryCredentialAlreadyInitializedException exception)
+        {
+            return new ConflictObjectResult(new { error = exception.Message });
+        }
+        catch (JsonException exception)
+        {
+            return new BadRequestObjectResult(new
+            {
+                error = "The request body is not valid JSON.",
+                detail = exception.Message
+            });
+        }
+        catch (RequestBodyTooLargeException)
+        {
+            return new ObjectResult(new { error = $"The request body cannot exceed {MaximumRequestBytes} bytes." })
+            {
+                StatusCode = StatusCodes.Status413PayloadTooLarge
+            };
+        }
     }
 
     /// <summary>Downloads the latest device-tagging JSONL trace.</summary>
@@ -508,4 +559,6 @@ public sealed class ManagementApiFunction
     private sealed class RequestBodyTooLargeException : Exception;
 
     private sealed record AddTrustedCertificateRequest(string Certificate);
+
+    private sealed record InitializeCredentialRequest(string Password);
 }

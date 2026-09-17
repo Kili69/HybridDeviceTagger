@@ -34,11 +34,17 @@ param virtualNetworkSubscriptionId string = subscription().subscriptionId
 @description('Name of the existing Key Vault.')
 param keyVaultName string
 
+@description('Create the Key Vault in this deployment instead of referencing an existing vault.')
+param createKeyVault bool = false
+
 @description('Resource group containing the existing Key Vault.')
 param keyVaultResourceGroupName string
 
 @description('Subscription containing the existing Key Vault.')
 param keyVaultSubscriptionId string = subscription().subscriptionId
+
+@description('Optional resource ID of an existing Key Vault private DNS zone linked to the virtual network.')
+param keyVaultPrivateDnsZoneResourceId string = ''
 
 @description('Forest DNS name used for discovery, or the DNS name of a specific domain controller when discovery is unavailable.')
 param activeDirectoryServer string
@@ -98,6 +104,13 @@ var logAnalyticsWorkspaceName = '${functionAppName}-law'
 var applicationInsightsName = '${functionAppName}-appi'
 var deploymentContainerName = 'app-package-${uniqueString(resourceGroup().id, functionAppName)}'
 var storagePrivateEndpointName = 'pe-${storageAccountName}-blob'
+var keyVaultPrivateEndpointName = 'pe-${keyVaultName}'
+var keyVaultPrivateDnsZoneName = 'privatelink.vaultcore.azure.net'
+var createKeyVaultPrivateDnsZone = createKeyVault && empty(keyVaultPrivateDnsZoneResourceId)
+var effectiveKeyVaultPrivateDnsZoneResourceId = empty(keyVaultPrivateDnsZoneResourceId)
+  ? resourceId('Microsoft.Network/privateDnsZones', keyVaultPrivateDnsZoneName)
+  : keyVaultPrivateDnsZoneResourceId
+var keyVaultUri = 'https://${keyVaultName}${environment().suffixes.keyvaultDns}'
 var keyVaultSecretsOfficerRoleDefinitionId = '/subscriptions/${keyVaultSubscriptionId}/providers/Microsoft.Authorization/roleDefinitions/b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
 var storageBlobDataOwnerRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b')
 
@@ -116,9 +129,88 @@ resource privateEndpointSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-0
   parent: virtualNetwork
 }
 
-resource keyVault 'Microsoft.KeyVault/vaults@2024-11-01' existing = {
+resource keyVault 'Microsoft.KeyVault/vaults@2024-11-01' = if (createKeyVault) {
   name: keyVaultName
-  scope: resourceGroup(keyVaultSubscriptionId, keyVaultResourceGroupName)
+  location: location
+  tags: tags
+  properties: {
+    accessPolicies: []
+    enablePurgeProtection: true
+    enableRbacAuthorization: true
+    enableSoftDelete: true
+    enabledForDeployment: false
+    enabledForDiskEncryption: false
+    enabledForTemplateDeployment: false
+    networkAcls: {
+      bypass: 'None'
+      defaultAction: 'Deny'
+      ipRules: []
+      virtualNetworkRules: []
+    }
+    publicNetworkAccess: 'Disabled'
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    softDeleteRetentionInDays: 90
+    tenantId: subscription().tenantId
+  }
+}
+
+resource keyVaultPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (createKeyVaultPrivateDnsZone) {
+  name: keyVaultPrivateDnsZoneName
+  location: 'global'
+  tags: tags
+}
+
+resource keyVaultPrivateDnsVnetLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (createKeyVaultPrivateDnsZone) {
+  name: '${functionAppName}-keyvault-link'
+  parent: keyVaultPrivateDnsZone
+  location: 'global'
+  tags: tags
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: virtualNetwork.id
+    }
+  }
+}
+
+resource keyVaultPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = if (createKeyVault) {
+  name: keyVaultPrivateEndpointName
+  location: location
+  tags: tags
+  properties: {
+    privateLinkServiceConnections: [
+      {
+        name: '${keyVaultPrivateEndpointName}-connection'
+        properties: {
+          groupIds: [
+            'vault'
+          ]
+          privateLinkServiceId: keyVault.id
+        }
+      }
+    ]
+    subnet: {
+      id: privateEndpointSubnet.id
+    }
+  }
+}
+
+resource keyVaultPrivateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = if (createKeyVault) {
+  name: 'default'
+  parent: keyVaultPrivateEndpoint
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'keyVaultPrivateDnsZone'
+        properties: {
+          privateDnsZoneId: effectiveKeyVaultPrivateDnsZoneResourceId
+        }
+      }
+    ]
+  }
 }
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
@@ -339,7 +431,7 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         }
         {
           name: 'KeyVault__VaultUri'
-          value: keyVault.properties.vaultUri
+          value: keyVaultUri
         }
         {
           name: 'KeyVault__CurrentPasswordSecretName'
@@ -432,17 +524,32 @@ resource deploymentStorageRoleAssignment 'Microsoft.Authorization/roleAssignment
   }
 }
 
-module keyVaultRoleAssignment 'key-vault-role-assignment.bicep' = {
+module existingKeyVaultRoleAssignment 'key-vault-role-assignment.bicep' = if (!createKeyVault) {
   scope: resourceGroup(keyVaultSubscriptionId, keyVaultResourceGroupName)
   params: {
     keyVaultName: keyVaultName
     principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
     roleDefinitionId: keyVaultSecretsOfficerRoleDefinitionId
   }
+}
+
+module newKeyVaultRoleAssignment 'key-vault-role-assignment.bicep' = if (createKeyVault) {
+  scope: resourceGroup(keyVaultSubscriptionId, keyVaultResourceGroupName)
+  params: {
+    keyVaultName: keyVaultName
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: keyVaultSecretsOfficerRoleDefinitionId
+  }
+  dependsOn: [
+    keyVault
+  ]
 }
 
 output functionAppName string = functionApp.name
 output functionAppPrincipalId string = functionApp.identity.principalId
 output functionAppResourceId string = functionApp.id
+output keyVaultUri string = keyVaultUri
 output deploymentContainerName string = deploymentContainer.name
 output storageAccountName string = storageAccount.name

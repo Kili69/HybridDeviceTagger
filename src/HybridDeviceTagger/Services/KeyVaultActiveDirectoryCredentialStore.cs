@@ -41,6 +41,28 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
     }
 
     /// <inheritdoc />
+    public async Task<StoredDirectoryCredential> InitializeCurrentAsync(
+        string password,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _secretClient.GetSecretAsync(
+                _keyVaultOptions.CurrentPasswordSecretName,
+                cancellationToken: cancellationToken);
+        }
+        catch (RequestFailedException exception) when (exception.Status == 404)
+        {
+            return await SetSecretAsync(
+                _keyVaultOptions.CurrentPasswordSecretName,
+                password,
+                cancellationToken);
+        }
+
+        throw new ActiveDirectoryCredentialAlreadyInitializedException();
+    }
+
+    /// <inheritdoc />
     public async Task<StoredDirectoryCredential> GetCurrentAsync(
         CancellationToken cancellationToken) =>
         await GetRequiredSecretAsync(

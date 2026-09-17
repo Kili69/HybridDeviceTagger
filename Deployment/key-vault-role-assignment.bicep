@@ -8,8 +8,15 @@ targetScope = 'resourceGroup'
 @description('Name of the existing Key Vault.')
 param keyVaultName string
 
-@description('Object ID of the Function App managed identity.')
+@description('Object ID of the role-assignment principal.')
 param principalId string
+
+@description('Directory object type of the role-assignment principal.')
+@allowed([
+  'ServicePrincipal'
+  'User'
+])
+param principalType string = 'ServicePrincipal'
 
 @description('Fully qualified role definition resource ID.')
 param roleDefinitionId string
@@ -23,7 +30,7 @@ resource roleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: keyVault
   properties: {
     principalId: principalId
-    principalType: 'ServicePrincipal'
+    principalType: principalType
     roleDefinitionId: roleDefinitionId
   }
 }
