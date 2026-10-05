@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20261005.2
+# Project-Version: 0.1.20261005.3
 # Author: andreas.lucas@outlook.com (aka Kili)
 
 <#
@@ -19,23 +19,75 @@ limitations under the License.
 SPDX-License-Identifier: Apache-2.0
 #>
 
+<#
+.SYNOPSIS
+PowerShell client for the Entra-protected HybridDeviceTagger management API.
+
+.DESCRIPTION
+The module maintains one connection per PowerShell module instance. Connect-HybridDeviceTagger
+initializes that connection from the current Azure CLI sign-in. All other exported commands reuse
+the connection and refresh its delegated access token shortly before expiry.
+
+Read commands return structured objects. Write and action commands use PowerShell ShouldProcess;
+destructive or security-sensitive commands additionally use high-impact confirmation. Collection
+updates send the latest API ETag in If-Match so concurrent changes fail instead of being overwritten.
+
+The module does not require direct access to Active Directory, Key Vault, Blob Storage, Microsoft
+Graph, or Azure Resource Manager. Those operations are performed by the Function App after the
+management API has authorized the caller.
+
+.NOTES
+Requires PowerShell 7.2 or later, Azure CLI, an existing az login session, and network access to the
+Function App. Importing the module does not authenticate or make a network request.
+
+The connection and access token exist only in module scope for the current PowerShell process.
+Disconnect by removing the module or closing the PowerShell session.
+
+.LINK
+https://github.com/Kili69/HybridDeviceTagger
+#>
+
 Set-StrictMode -Version Latest
+
+# Shared only by commands in this module instance; never persisted and cleared after failed validation.
 $script:Connection = $null
 
+<#
+.SYNOPSIS
+Acquires or refreshes the delegated management API access token.
+
+.DESCRIPTION
+Calls Azure CLI for the api://<client-id>/.default scope and stores the token and normalized expiry
+on the module-scoped connection. Both Azure CLI expiry formats are supported. If Azure CLI omits an
+expiry, a conservative five-minute lifetime forces an early refresh on the next request.
+
+.OUTPUTS
+None.
+
+.NOTES
+Private module function. It requires an initialized connection and never writes the token to the
+success stream.
+#>
 function Initialize-HybridDeviceTaggerToken {
+    # Fail before accessing the connection when the external authentication dependency is unavailable.
     if (-not (Get-Command az -CommandType Application -ErrorAction SilentlyContinue)) {
         throw 'Azure CLI is required. Install Azure CLI, run az login, and try again.'
     }
 
+    # The .default scope requests the delegated permissions already consented for this API audience.
     $tokenResponse = az account get-access-token `
         --scope "api://$($script:Connection.ClientId)/.default" `
         --output json `
         --only-show-errors | ConvertFrom-Json
+
+    # Azure CLI failures and malformed success responses are both unusable authentication results.
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$tokenResponse.accessToken)) {
         throw "Unable to obtain an Entra access token for api://$($script:Connection.ClientId). Run 'az login --scope api://$($script:Connection.ClientId)/.default' and try again."
     }
 
     $script:Connection.AccessToken = [string]$tokenResponse.accessToken
+
+    # Azure CLI versions expose either Unix seconds or a formatted date. Normalize both representations.
     $script:Connection.ExpiresOn = if ($tokenResponse.PSObject.Properties['expires_on']) {
         [DateTimeOffset]::FromUnixTimeSeconds([long]$tokenResponse.expires_on)
     }
@@ -45,21 +97,69 @@ function Initialize-HybridDeviceTaggerToken {
             [Globalization.CultureInfo]::InvariantCulture)
     }
     else {
+        # Unknown expiry is deliberately short-lived and never creates an indefinitely valid session.
         [DateTimeOffset]::UtcNow.AddMinutes(5)
     }
 }
 
+<#
+.SYNOPSIS
+Ensures that a usable management API connection and access token exist.
+
+.DESCRIPTION
+Rejects commands executed before Connect-HybridDeviceTagger and refreshes the delegated token when
+it is missing or expires within two minutes. The refresh margin prevents expiry during an API call.
+
+.OUTPUTS
+None.
+
+.NOTES
+Private module function.
+#>
 function Assert-HybridDeviceTaggerConnection {
+    # Public operations cannot infer the deployment or token audience without an explicit connection.
     if ($null -eq $script:Connection) {
         throw 'No HybridDeviceTagger API connection exists. Run Connect-HybridDeviceTagger first.'
     }
 
+    # Refresh two minutes early to cover request latency and synchronous management operations.
     if ([string]::IsNullOrWhiteSpace($script:Connection.AccessToken) -or
         $script:Connection.ExpiresOn -le [DateTimeOffset]::UtcNow.AddMinutes(2)) {
         Initialize-HybridDeviceTaggerToken
     }
 }
 
+<#
+.SYNOPSIS
+Sends one authenticated request to the HybridDeviceTagger management API.
+
+.DESCRIPTION
+Builds the endpoint URI from the active connection, serializes optional request bodies as JSON, adds
+an optional If-Match header, and translates REST failures into terminating errors with the method and
+relative path.
+
+.PARAMETER Method
+Specifies the supported HTTP method.
+
+.PARAMETER Path
+Specifies the API path relative to the configured base URI.
+
+.PARAMETER Body
+Specifies an optional object serialized as UTF-8 JSON with a maximum depth of 20.
+
+.PARAMETER ETag
+Specifies an optional entity tag used for optimistic concurrency through If-Match.
+
+.PARAMETER IncludeResponseHeaders
+Returns an envelope containing response content and the response ETag.
+
+.OUTPUTS
+The deserialized API response, or an object with Content and ETag when response headers are requested.
+
+.NOTES
+Private module function. API failures remain terminating errors so automation cannot interpret a
+failed operation as success.
+#>
 function Invoke-HybridDeviceTaggerRequest {
     param(
         [Parameter(Mandatory)][ValidateSet('Get', 'Put', 'Post', 'Delete')][string]$Method,
@@ -69,22 +169,27 @@ function Invoke-HybridDeviceTaggerRequest {
         [switch]$IncludeResponseHeaders
     )
 
+    # Authentication state is checked for every request, not only when the connection is created.
     Assert-HybridDeviceTaggerConnection
     $headers = @{ Authorization = "Bearer $($script:Connection.AccessToken)" }
     if (-not [string]::IsNullOrWhiteSpace($ETag)) {
+        # If-Match turns collection writes into optimistic-concurrency operations.
         $headers['If-Match'] = $ETag
     }
 
+    # Normalize the relative path to one separator without changing the configured management base path.
     $parameters = @{
         Method = $Method
         Uri = "$($script:Connection.ApiBaseUri)/$($Path.TrimStart('/'))"
         Headers = $headers
     }
     if ($PSBoundParameters.ContainsKey('Body')) {
+        # Depth 20 preserves nested rules, arrays, and extension-attribute dictionaries.
         $parameters.ContentType = 'application/json; charset=utf-8'
         $parameters.Body = ConvertTo-Json -InputObject $Body -Depth 20 -Compress
     }
     if ($IncludeResponseHeaders) {
+        # Invoke-RestMethod assigns the response headers to this local variable after completion.
         $parameters.ResponseHeadersVariable = 'responseHeaders'
     }
 
@@ -92,10 +197,12 @@ function Invoke-HybridDeviceTaggerRequest {
         $result = Invoke-RestMethod @parameters
     }
     catch {
+        # Add endpoint context and preserve a terminating failure for scripts and deployment pipelines.
         throw "HybridDeviceTagger API request '$Method $Path' failed: $($_.Exception.Message)"
     }
 
     if ($IncludeResponseHeaders) {
+        # Snapshot callers need the resource and its version from the same HTTP response.
         return [pscustomobject]@{
             Content = $result
             ETag = [string]$responseHeaders['ETag']
@@ -104,11 +211,33 @@ function Invoke-HybridDeviceTaggerRequest {
     $result
 }
 
+<#
+.SYNOPSIS
+Gets the tagging configuration and its current ETag.
+
+.OUTPUTS
+An object with Content and ETag properties.
+
+.NOTES
+Private module function used immediately before ETag-protected rule changes.
+#>
 function Get-HybridDeviceTaggerConfigurationSnapshot {
+    # Centralized snapshot acquisition ensures every rule mutation receives the current response ETag.
     Invoke-HybridDeviceTaggerRequest -Method Get -Path 'tagging-rules' -IncludeResponseHeaders
 }
 
+<#
+.SYNOPSIS
+Gets the trusted-certificate collection and its current ETag.
+
+.OUTPUTS
+An object with Content and ETag properties.
+
+.NOTES
+Private module function used immediately before ETag-protected certificate changes.
+#>
 function Get-HybridDeviceTaggerTrustedCertificateSnapshot {
+    # Certificate updates use the same optimistic-concurrency contract as rule updates.
     Invoke-HybridDeviceTaggerRequest -Method Get -Path 'trusted-certificates' -IncludeResponseHeaders
 }
 
@@ -159,10 +288,12 @@ function Connect-HybridDeviceTagger {
         [switch]$PassThru
     )
 
+    # Reject relative and unencrypted endpoints before creating authentication state.
     if (-not $ApiBaseUri.IsAbsoluteUri -or $ApiBaseUri.Scheme -ne 'https') {
         throw 'ApiBaseUri must be an absolute HTTPS URI.'
     }
 
+    # Normalize the base URI and initialize the token fields before the first acquisition.
     $script:Connection = [pscustomobject]@{
         PSTypeName = 'HybridDeviceTagger.Management.Connection'
         ApiBaseUri = $ApiBaseUri.AbsoluteUri.TrimEnd('/')
@@ -171,17 +302,21 @@ function Connect-HybridDeviceTagger {
         ExpiresOn = [DateTimeOffset]::MinValue
     }
     try {
+        # Authenticate eagerly so Connect reports authentication problems immediately.
         Initialize-HybridDeviceTaggerToken
         if (-not $SkipValidation) {
+            # This read validates reachability, token audience, Easy Auth, and caller authorization.
             $null = Get-HybridDeviceTaggerConfigurationSnapshot
         }
     }
     catch {
+        # A failed token request or validation read must not leave a partial connection behind.
         $script:Connection = $null
         throw
     }
 
     if ($PassThru) {
+        # Explicit projection guarantees that the access token cannot enter the success pipeline.
         [pscustomobject]@{
             PSTypeName = 'HybridDeviceTagger.Management.ConnectionInfo'
             ApiBaseUri = $script:Connection.ApiBaseUri
@@ -223,9 +358,13 @@ function Get-HybridDeviceTaggerRule {
         [string]$Name
     )
 
+    # The common snapshot helper also gives this read the same response-shape handling as writes.
     $snapshot = Get-HybridDeviceTaggerConfigurationSnapshot
+
+    # Array coercion provides stable zero-, one-, or many-object pipeline behavior.
     $rules = @($snapshot.Content.rules)
     if ($PSBoundParameters.ContainsKey('Name')) {
+        # Parameter presence controls filtering; ValidateLength already rejects an empty supplied name.
         $rules | Where-Object { $_.name -ieq $Name }
     }
     else {
@@ -253,6 +392,7 @@ function Get-HybridDeviceTaggerLastRunStatus {
     [CmdletBinding()]
     param()
 
+    # Return the persisted API document unchanged so future server fields remain available to callers.
     Invoke-HybridDeviceTaggerRequest -Method Get -Path 'status/device-tagging'
 }
 
@@ -276,6 +416,7 @@ function Get-HybridDeviceTaggerPasswordRotationStatus {
     [CmdletBinding()]
     param()
 
+    # The endpoint exposes operational metadata only and never returns current or staged passwords.
     Invoke-HybridDeviceTaggerRequest -Method Get -Path 'status/password-rotation'
 }
 
@@ -310,10 +451,12 @@ function Get-HybridDeviceTaggerTrace {
     [CmdletBinding()]
     param()
 
+    # JSONL contains one independent JSON object per line, rather than one enclosing JSON array.
     $content = Invoke-HybridDeviceTaggerRequest -Method Get -Path 'traces/device-tagging/latest'
     foreach ($line in $content -split "`r?`n") {
         if (-not [string]::IsNullOrWhiteSpace($line)) {
             $traceEvent = $line | ConvertFrom-Json
+            # Select the concise module view without flattening the object returned to the pipeline.
             $traceEvent.PSObject.TypeNames.Insert(0, 'HybridDeviceTagger.TraceEvent')
             $traceEvent
         }
@@ -345,6 +488,7 @@ function Get-HybridDeviceTaggerTrustedCertificate {
     [CmdletBinding()]
     param()
 
+    # Discard the snapshot ETag and emit only non-sensitive certificate metadata.
     $snapshot = Get-HybridDeviceTaggerTrustedCertificateSnapshot
     @($snapshot.Content.certificates)
 }
@@ -383,8 +527,11 @@ function Add-HybridDeviceTaggerTrustedCertificate {
     )
 
     process {
+        # Resolve LiteralPath once so wildcard characters in certificate filenames are not expanded.
         $resolvedPath = Resolve-Path -LiteralPath $Path -ErrorAction Stop
         $file = Get-Item -LiteralPath $resolvedPath -ErrorAction Stop
+
+        # Validate local constraints before any API read or confirmation prompt.
         if ($file.PSIsContainer) {
             throw "Certificate path '$Path' must identify a file."
         }
@@ -392,8 +539,10 @@ function Add-HybridDeviceTaggerTrustedCertificate {
             throw 'The certificate file cannot exceed 32,768 bytes.'
         }
 
+        # The approved write must target exactly the certificate collection version observed here.
         $snapshot = Get-HybridDeviceTaggerTrustedCertificateSnapshot
         if ($PSCmdlet.ShouldProcess($file.FullName, 'Add Active Directory LDAPS trust certificate')) {
+            # Base64 preserves both DER bytes and PEM text bytes in the JSON transport envelope.
             Invoke-HybridDeviceTaggerRequest `
                 -Method Post `
                 -Path 'trusted-certificates' `
@@ -411,7 +560,7 @@ Removes an Active Directory LDAPS trust certificate.
 Retrieves the latest collection ETag and removes one certificate by SHA-1 thumbprint. The API
 rejects removal of the final certificate so LDAPS cannot be left without an explicit trust anchor.
 
-.PARAMETER Thumbprint
+.PARAMETER CertificateThumbprint
 Specifies the 40-character SHA-1 certificate thumbprint. Spaces and separators are accepted.
 
 .OUTPUTS
@@ -438,10 +587,12 @@ function Remove-HybridDeviceTaggerTrustedCertificate {
     )
 
     process {
+        # Fetch the ETag immediately before confirmation and the conditional delete.
         $snapshot = Get-HybridDeviceTaggerTrustedCertificateSnapshot
         if ($PSCmdlet.ShouldProcess(
             $CertificateThumbprint,
             'Remove Active Directory LDAPS trust certificate')) {
+            # Escape separators and whitespace accepted by the API so they remain one route segment.
             Invoke-HybridDeviceTaggerRequest `
                 -Method Delete `
                 -Path "trusted-certificates/$([uri]::EscapeDataString($CertificateThumbprint))" `
@@ -497,14 +648,17 @@ function Add-HybridDeviceTaggerRule {
     )
 
     process {
+        # Accept one rule or an exported configuration with a case-insensitive Rules property.
         $rulesProperty = $null
         if ($Rule -is [System.Collections.IDictionary]) {
+            # Hashtable keys do not participate in PSObject property lookup, so inspect keys explicitly.
             $rulesKey = @($Rule.Keys | Where-Object { [string]$_ -ieq 'Rules' })[0]
             if ($null -ne $rulesKey) {
                 $rulesProperty = $Rule[$rulesKey]
             }
         }
         else {
+            # PSCustomObject and deserialized JSON input expose Rules through the property collection.
             $property = $Rule.PSObject.Properties |
                 Where-Object Name -IEQ 'Rules' |
                 Select-Object -First 1
@@ -513,17 +667,20 @@ function Add-HybridDeviceTaggerRule {
             }
         }
 
+        # A plain rule becomes a one-item batch; a configuration wrapper contributes its Rules collection.
         $rules = if ($null -ne $rulesProperty) { @($rulesProperty) } else { @($Rule) }
         if ($rules.Count -lt 1 -or $rules.Count -gt 100) {
             throw 'Rules must contain between 1 and 100 rule objects.'
         }
 
         foreach ($candidateRule in $rules) {
+            # Only the routing key is checked locally; the API remains authoritative for the full schema.
             $name = [string]$candidateRule.name
             if ([string]::IsNullOrWhiteSpace($name)) {
                 throw 'Each rule must contain a non-empty Name property.'
             }
 
+            # Every successful upsert changes the collection ETag, so refresh for each rule.
             $snapshot = Get-HybridDeviceTaggerConfigurationSnapshot
             if ($PSCmdlet.ShouldProcess($name, 'Add or replace HybridDeviceTagger tagging rule')) {
                 Invoke-HybridDeviceTaggerRequest `
@@ -566,8 +723,10 @@ function Remove-HybridDeviceTaggerRule {
         [Parameter(Mandatory, Position = 0)][ValidateLength(1, 128)][string]$Name
     )
 
+    # Couple the delete to the configuration version presented before user confirmation.
     $snapshot = Get-HybridDeviceTaggerConfigurationSnapshot
     if ($PSCmdlet.ShouldProcess($Name, 'Remove HybridDeviceTagger tagging rule')) {
+        # URI escaping keeps valid rule names with spaces or reserved characters in one route segment.
         Invoke-HybridDeviceTaggerRequest `
             -Method Delete `
             -Path "tagging-rules/$([uri]::EscapeDataString($Name))" `
@@ -600,8 +759,10 @@ function Invoke-HybridDeviceTagging {
     [CmdletBinding(SupportsShouldProcess)]
     param()
 
+    # Validate before ShouldProcess so the confirmation target always refers to an active connection.
     Assert-HybridDeviceTaggerConnection
     if ($PSCmdlet.ShouldProcess($script:Connection.ApiBaseUri, 'Run device tagging immediately')) {
+        # The action endpoint executes synchronously and returns its invocation ID and aggregate result.
         Invoke-HybridDeviceTaggerRequest -Method Post -Path 'actions/device-tagging'
     }
 }
@@ -633,18 +794,22 @@ function Initialize-HybridDeviceTaggerActiveDirectoryCredential {
         [Parameter(Mandatory)][ValidateNotNull()][Security.SecureString]$Password
     )
 
+    # Establish the HTTPS target before asking permission to transmit the credential.
     Assert-HybridDeviceTaggerConnection
     if ($PSCmdlet.ShouldProcess(
         $script:Connection.ApiBaseUri,
         'Validate and initialize the Active Directory service-account credential')) {
+        # Plain text exists only long enough to serialize the protected HTTPS request.
         $plainPassword = ConvertFrom-SecureString -SecureString $Password -AsPlainText
         try {
+            # The Function performs AD validation and Key Vault persistence with its own managed identity.
             Invoke-HybridDeviceTaggerRequest `
                 -Method Post `
                 -Path 'actions/initialize-ad-credential' `
                 -Body @{ password = $plainPassword }
         }
         finally {
+            # Remove the module's remaining reference even when serialization or the request fails.
             $plainPassword = $null
         }
     }
@@ -676,14 +841,17 @@ function Invoke-HybridDeviceTaggerPasswordRotation {
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     param()
 
+    # Validate before the high-impact prompt so failures cannot occur after unnecessary confirmation.
     Assert-HybridDeviceTaggerConnection
     if ($PSCmdlet.ShouldProcess(
         $script:Connection.ApiBaseUri,
         'Immediately change the Active Directory service-account password')) {
+        # Server-side safeguards still enforce LDAPS, staging, validation, and secret promotion.
         Invoke-HybridDeviceTaggerRequest -Method Post -Path 'actions/password-rotation'
     }
 }
 
+# Export only the supported management surface; authentication and HTTP helpers remain private.
 Export-ModuleMember -Function @(
     'Connect-HybridDeviceTagger',
     'Get-HybridDeviceTaggerRule',

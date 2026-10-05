@@ -1,0 +1,110 @@
+name: Publish PowerShell module
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: windows-latest
+    environment: psgallery
+
+    steps:
+      - name: Check out released source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Verify release source and module metadata
+        id: module
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $modulePath = Join-Path $PWD 'Deployment\HybridDeviceTagger.Management'
+          $manifestPath = Join-Path $modulePath 'HybridDeviceTagger.Management.psd1'
+
+          git fetch origin main --no-tags
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Unable to fetch origin/main.'
+          }
+
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) {
+              throw "Release commit '$env:GITHUB_SHA' is not contained in the main branch."
+          }
+
+          $manifest = Test-ModuleManifest -Path $manifestPath
+          $moduleVersion = $manifest.Version.ToString()
+
+          [xml]$buildProperties = Get-Content (Join-Path $PWD 'Directory.Build.props') -Raw
+          $projectVersion = @(
+              'VersionMajor'
+              'VersionMinor'
+              'VersionDate'
+              'VersionCounter'
+          ) | ForEach-Object {
+              $buildProperties.SelectSingleNode("/Project/PropertyGroup/$_").InnerText
+          }
+          $projectVersion = $projectVersion -join '.'
+
+          if ($moduleVersion -ne $projectVersion) {
+              throw "Module version '$moduleVersion' does not match project version '$projectVersion'."
+          }
+          if ($env:RELEASE_TAG -ne "v$moduleVersion") {
+              throw "Release tag '$env:RELEASE_TAG' must be 'v$moduleVersion'."
+          }
+
+          Import-Module $manifestPath -Force
+          $exportedFunctions = @(Get-Command -Module HybridDeviceTagger.Management -CommandType Function)
+          if ($exportedFunctions.Count -ne $manifest.ExportedFunctions.Count) {
+              throw "Imported $($exportedFunctions.Count) functions, but the manifest exports $($manifest.ExportedFunctions.Count)."
+          }
+
+          "path=$modulePath" >> $env:GITHUB_OUTPUT
+          "version=$moduleVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Check PowerShell Gallery version
+        id: gallery
+        shell: pwsh
+        env:
+          MODULE_VERSION: ${{ steps.module.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $existingModule = Find-Module `
+              -Name 'HybridDeviceTagger.Management' `
+              -Repository 'PSGallery' `
+              -RequiredVersion $env:MODULE_VERSION `
+              -ErrorAction SilentlyContinue
+
+          $alreadyPublished = $null -ne $existingModule
+          "already-published=$($alreadyPublished.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          if ($alreadyPublished) {
+              Write-Host "HybridDeviceTagger.Management $env:MODULE_VERSION is already available on PSGallery."
+          }
+
+      - name: Publish module to PowerShell Gallery
+        if: ${{ steps.gallery.outputs.already-published != 'true' }}
+        shell: pwsh
+        env:
+          NUGET_API_KEY: ${{ secrets.HYBRIDDEVICETAGGER_PSMODUL }}
+          MODULE_PATH: ${{ steps.module.outputs.path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:NUGET_API_KEY)) {
+              throw 'Repository secret HYBRIDDEVICETAGGER_PSMODUL is not configured.'
+          }
+
+          Publish-Module `
+              -Path $env:MODULE_PATH `
+              -Repository 'PSGallery' `
+              -NuGetApiKey $env:NUGET_API_KEY `
+              -Force `
+              -ErrorAction Stop

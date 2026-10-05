@@ -225,6 +225,14 @@ Connect-HybridDeviceTagger
 Get-HybridDeviceTaggerRule
 ```
 
+After the first PowerShell Gallery release, install the same module without cloning the repository:
+
+```powershell
+Install-PSResource -Name HybridDeviceTagger.Management -Repository PSGallery
+Import-Module HybridDeviceTagger.Management
+Connect-HybridDeviceTagger
+```
+
 Every public cmdlet includes built-in synopsis, parameter, output, and example documentation. Use
 `Get-Help <command> -Full` or `Get-Help <command> -Examples`, for example:
 

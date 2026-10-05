@@ -4,6 +4,20 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20261005.3] - 2026-10-05
+
+### Added
+
+- Add a complete PowerShell management-module reference covering installation, authorization, command usage, security, concurrency, errors, and implementation details.
+- Add automatic, version-validated publishing of release modules from `main` to PowerShell Gallery by using the protected `HYBRIDDEVICETAGGER_PSMODUL` repository secret.
+- Add comprehensive comment-based and inline implementation documentation for public and private PowerShell module functions.
+
+### Changed
+
+- Reorganize installation guidance into script-based, pipeline-based, and shared-configuration sections with secure unattended deployment examples.
+- Expand the Zero Trust introduction and document post-installation module installation and updates through PowerShell Gallery.
+- Enrich the PowerShell module manifest with Gallery tags, help, icon, and release-notes metadata.
+
 ## [0.1.20261005.2] - 2026-10-05
 
 ### Added

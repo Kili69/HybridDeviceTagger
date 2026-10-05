@@ -5,15 +5,19 @@
 # HybridDeviceTagger
 
 [![Buy me a coffee – Kili](https://img.shields.io/badge/Buy_me_a_coffee-Kili-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/andreaslmuz)
-[![Version](https://img.shields.io/badge/Version-0.1.20261005.2-2EA44F?style=for-the-badge)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.1.20261005.3-2EA44F?style=for-the-badge)](CHANGELOG.md)
 [![Branch](https://img.shields.io/badge/Branch-dev-181717?style=for-the-badge&logo=git&logoColor=white)](https://github.com/Kili69/HybridDeviceTagger/tree/dev)
 [![Lizenz: Apache 2.0](https://img.shields.io/badge/Lizenz-Apache_2.0-0B5CAD?style=for-the-badge)](LICENSE)
 ![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4?style=for-the-badge&logo=dotnet&logoColor=white)
 ![Azure Functions v4](https://img.shields.io/badge/Azure_Functions-v4-0062AD?style=for-the-badge&logo=azurefunctions&logoColor=white)
 
-HybridDeviceTagger schließt eine Informationslücke zwischen Active Directory und Microsoft Entra ID bei Microsoft-Entra-hybrid-joined Geräten. Im Active Directory lässt sich die Position eines Computerobjekts anhand seines Distinguished Name (DN) und damit seiner Organisationseinheit (OU) bestimmen. Anders als bei Benutzerobjekten wird der DN von Computerobjekten jedoch nicht nach Entra ID synchronisiert.
+Für die Umsetzung einer Zero-Trust-Strategie muss nicht nur die Identität eines Benutzers, sondern auch das verwendete Quellsystem zuverlässig bestimmt und bewertet werden. In Conditional-Access-Richtlinien lässt sich diese Einordnung bei Geräten üblicherweise über Extension Attributes abbilden. Damit kann beispielsweise geprüft werden, ob ein Quellsystem einer definierten Sicherheitsstufe entspricht.
 
-HybridDeviceTagger nutzt den DN eines Computerobjekts als Grundlage für konfigurierbare Regeln und überträgt die daraus abgeleitete Zuordnung nach Entra ID. Abhängig von der AD-OU kann er:
+Voraussetzung dafür ist ein in Microsoft Entra ID verfügbares Geräteobjekt, beispielsweise ein Microsoft-Entra-hybrid-joined Computer. Eine Bewertung allein anhand der Quelladresse reicht häufig nicht aus: Conditional Access sieht in der Regel nur die öffentliche IP-Adresse des Zugriffs. Befinden sich mehrere Systeme hinter derselben öffentlichen Adresse, lässt sich daraus weder das konkrete Quellsystem noch dessen Sicherheitsklassifizierung ableiten.
+
+Im lokalen Active Directory kann diese Klassifizierung über die Verzeichnisstruktur und die Organisationseinheit eines Computerobjekts abgebildet werden. Beim Synchronisieren von Computerobjekten nach Microsoft Entra ID geht diese Information jedoch verloren, weil der Distinguished Name (DN) und damit die OU-Zuordnung nicht übernommen werden.
+
+Genau hier setzt HybridDeviceTagger an. Er wertet die Position eines Computerobjekts im Active Directory aus, wendet darauf konfigurierbare Regeln an und überträgt die daraus abgeleitete Sicherheitsklassifizierung nach Microsoft Entra ID. Abhängig von der AD-OU kann er:
 
 - `extensionAttribute1` bis `extensionAttribute15` setzen,
 - das Gerät Entra-Sicherheitsgruppen hinzufügen und
@@ -23,6 +27,9 @@ HybridDeviceTagger nutzt den DN eines Computerobjekts als Grundlage für konfigu
 
 - [Funktionsweise](#funktionsweise)
 - [Installation](#installation)
+  - [Skriptbasierte Installation](#skriptbasierte-installation)
+  - [Pipeline-Installation](#pipeline-installation)
+  - [Gemeinsame Konfiguration](#gemeinsame-konfiguration)
 - [Administration](#administration)
 - [Azure-Betrieb](#azure-betrieb)
 - [Problembehandlung](#problembehandlung)
@@ -45,52 +52,23 @@ flowchart LR
 
 ## Installation
 
-### Voraussetzungen
+HybridDeviceTagger kann interaktiv mit dem bereitgestellten PowerShell-Skript oder unbeaufsichtigt aus einer beliebigen CI/CD-Pipeline installiert werden. Beide Varianten verwenden denselben Installer und dieselben Bicep-Vorlagen. Dadurch entstehen unabhängig vom Ausführungsweg identische Azure-Ressourcen und Anwendungseinstellungen.
+
+### Skriptbasierte Installation
+
+Die skriptbasierte Installation eignet sich für die Erstbereitstellung, Testumgebungen und manuell kontrollierte Änderungen. Der Installer fragt fehlende Werte interaktiv ab, validiert die Umgebung und zeigt vor Änderungen eine Zusammenfassung.
+
+#### Voraussetzungen
 
 - PowerShell 7.2 oder neuer mit dem ActiveDirectory-Modul
-- Azure CLI 2.60.0
+- Azure CLI 2.60.0 oder neuer
 - Eine Azure Subscription, in der der Installationsbenutzer Ressourcen bereitstellen, das vorhandene virtuelle Netzwerk einbinden und RBAC-Rollenzuweisungen erstellen darf
 - DNS-Auflösung und Netzwerkzugriff der Function App auf die DNS-Namen aller betroffenen Forest-Domains über LDAPS auf Port 636 oder ersatzweise LDAP auf Port 389
 - Ein vorhandenes virtuelles Netzwerk mit Subnetzen für die Function-Integration und den privaten Storage-Endpunkt
 - Ein forestweit verwendbares AD-Servicekonto mit Leserechten auf die konfigurierten OUs in allen Domains und dem Recht, das eigene Kennwort zu ändern
 - Die in der [Installationsanleitung](Deployment/README.md#required-permissions) beschriebenen Azure-, Entra- und Active-Directory-Berechtigungen
 
-#### Berechtigungen für Regel- und Kennwortverwaltung
-
-Regel- und Kennwortverwaltung werden durch Anwendungsrollen der Entra Enterprise Application für die HybridDeviceTagger Management API geschützt. Zusätzlich erhalten alle Principals mit der Azure-RBAC-Rolle `Owner` oder `Contributor` auf der Function App automatisch dieselben Rechte wie `HybridDeviceTagger.RuleAdministrator` und `HybridDeviceTagger.PasswordRotationAdministrator`. Das gilt auch für über Sicherheitsgruppen oder übergeordnete Scopes geerbte Zuweisungen.
-
-| Verwaltungsaufgabe | Erforderliche Anwendungsrolle | Installer-Parameter |
-| --- | --- | --- |
-| Tagging-Regeln lesen, erstellen, ändern und löschen | `HybridDeviceTagger.RuleAdministrator` | `ManagementApiRuleAdministratorPrincipalObjectId` |
-| Initiales AD-Kennwort einrichten, Rotationsstatus lesen und Kennwortrotation erzwingen | `HybridDeviceTagger.PasswordRotationAdministrator` | `ManagementApiPasswordRotationAdministratorPrincipalObjectId` |
-
-Die Parameter akzeptieren die Entra Object IDs von Benutzern, Sicherheitsgruppen oder Service Principals. Für die dauerhafte Administration sollten Sicherheitsgruppen verwendet und nach dem Least-Privilege-Prinzip nur der jeweils benötigten Rolle zugewiesen werden:
-
-```powershell
-$installParameters = @{
-    ManagementApiClientId = '<Client-ID der Management-API-App-Registrierung>'
-    ManagementApiRuleAdministratorPrincipalObjectId = @(
-        '<Object-ID der Regeladministratoren-Gruppe>'
-    )
-    ManagementApiPasswordRotationAdministratorPrincipalObjectId = @(
-        '<Object-ID der Kennwortadministratoren-Gruppe>'
-    )
-}
-
-./Deployment/Install-HybridDeviceTagger.ps1 @installParameters -ValidateOnly
-```
-
-Alternativ weist `ManagementApiAllowedPrincipalObjectId` einem Bootstrap-Principal alle fünf Management-API-Rollen zu. Diese breite Zuweisung eignet sich für Migration oder Ersteinrichtung, nicht für den dauerhaften Betrieb. Der ausführende Entra-Administrator benötigt zum Erstellen und Zuweisen der Anwendungsrollen eine ausreichend privilegierte Verzeichnisrolle, beispielsweise `Privileged Role Administrator` oder `Global Administrator`.
-
-Kennwortadministratoren benötigen weder direkten Zugriff auf den Key Vault noch Azure-Ressourcenrollen. Sie rufen die geschützte API auf; die Function validiert das AD-Kennwort und greift anschließend mit ihrer Managed Identity auf den Key Vault zu. Nach einer neuen API-Anwendungsrollenzuweisung muss das Zugriffstoken durch eine erneute Anmeldung beziehungsweise einen neuen Aufruf von `Connect-HybridDeviceTagger` aktualisiert werden. Änderungen an Owner-/Contributor-Zuweisungen werden bei der nächsten API-Anfrage geprüft.
-
-Die Function prüft Owner- und Contributor-Zuweisungen zur Laufzeit über Azure Resource Manager. Ihre Managed Identity erhält dafür ausschließlich die Rolle `Reader` auf der eigenen Function App. Andere Azure-RBAC-Rollen berechtigen nicht zur Management API; auch Owner und Contributor erhalten dadurch keine Tagging-Operator- oder Zertifikatsadministratorrechte.
-
-#### Optional: vorhandener Key Vault
-
-Ein bestehender Key Vault ist optional. Ist keiner vorhanden, erstellt das Setup einen neuen privaten Key Vault in der Ressourcengruppe der Function App. Soll ein bestehender Key Vault verwendet werden, fragt der Installer dessen Subscription, Ressourcengruppe und Namen ab.
-
-### Schnellinstallation
+#### Installation ausführen
 
 Nach dem Entpacken des Installationspakets zunächst bei Azure anmelden:
 
@@ -117,19 +95,174 @@ Ist LDAPS nicht verfügbar, fragt der Installer vor der Verwendung des abgesiche
 
 `-ValidateOnly` prüft die Voraussetzungen ohne Änderungen. `-WhatIf` zeigt die geplanten Azure-Änderungen. Erst der dritte Aufruf führt die Installation nach Bestätigung aus.
 
-Bei jedem der drei interaktiven Aufrufe werden die Angaben erneut abgefragt. Sollen dieselben Werte wiederverwendet werden, empfiehlt sich die unter **Erweiterte Installation** beschriebene Übergabe über ein PowerShell-Splat.
+Bei jedem der drei interaktiven Aufrufe werden die Angaben erneut abgefragt. Für eine wiederholbare Ausführung sollten die Werte deshalb in einem PowerShell-Splat vorbereitet werden.
 
-### Erweiterte Installation
+#### Wiederholbare Skriptausführung
 
-Für automatisierte oder wiederholbare Installationen können alle Werte als Parameter oder PowerShell-Splat übergeben werden. Mit `-CreateKeyVault` wird ein neuer privater Key Vault in der Ziel-Ressourcengruppe erstellt; ohne diesen Schalter wird ein vorhandener Key Vault verwendet. `-CreateResourceGroup`, `-RegisterProviders`, `-ActiveDirectoryTrustedCertificatePath` und die rollenbezogenen Management-API-Parameter steuern weitere Installationsoptionen.
+Alle Werte können als Parameter oder PowerShell-Splat übergeben und für Validierung, What-if und Installation wiederverwendet werden:
 
-Ein vollständiges Parameterbeispiel sowie Details zu Berechtigungen, Netzwerk, Key Vault, Validierung und unbeaufsichtigter Ausführung stehen in der [erweiterten Installationsanleitung](Deployment/README.md#validation).
+```powershell
+$parameters = @{
+    SubscriptionId = '<Azure-Subscription-ID>'
+    ResourceGroupName = 'rg-hybrid-device-tagger'
+    Location = 'westeurope'
+    FunctionAppName = 'func-hybrid-device-tagger'
+    StorageAccountName = 'sthybriddevicetagger'
+    # Weitere Netzwerk-, AD-, Key-Vault- und Management-API-Parameter
+}
 
-### Installation in Azure
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters -ValidateOnly
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters -WhatIf
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters
+```
 
-Das Verzeichnis `Deployment` enthält ein idempotentes PowerShell-Installationsskript und die Bicep-Vorlagen für Azure Functions Flex Consumption (FC1), Storage, Log Analytics und Application Insights. VNet, Integrationssubnetz und Key Vault werden als vorhandene Ressourcen geprüft und referenziert, aber nicht erstellt oder verändert.
+Mit `-CreateKeyVault` wird ein neuer privater Key Vault in der Ziel-Ressourcengruppe erstellt; ohne diesen Schalter wird ein vorhandener Key Vault verwendet. `-CreateResourceGroup`, `-RegisterProviders`, `-ActiveDirectoryTrustedCertificatePath` und die rollenbezogenen Management-API-Parameter steuern weitere Installationsoptionen. Ein vollständiges Parameterbeispiel steht in der [erweiterten Installationsanleitung](Deployment/README.md#validation).
 
-Beginnen Sie immer mit `-ValidateOnly`, danach mit `-WhatIf`, und führen Sie erst anschließend die Installation aus. Parameter, Voraussetzungen, Berechtigungen und ein vollständiges Beispiel stehen in [Deployment/README.md](Deployment/README.md).
+### Pipeline-Installation
+
+Die Pipeline-Installation verwendet denselben PowerShell-Installer im vollständig parametrisierten Noninteractive-Modus. Sie ist nicht an GitHub Actions, Azure DevOps oder ein anderes Pipeline-System gebunden.
+
+#### Voraussetzungen
+
+- Ein Windows-basierter, selbst gehosteter Runner mit PowerShell 7.2, Azure CLI, ActiveDirectory-Modul und Netzwerkzugriff auf Active Directory
+- .NET 8 SDK, wenn das Installationspaket innerhalb der Pipeline erzeugt wird
+- Eine nicht interaktive Azure-Anmeldung, vorzugsweise über Workload Identity Federation; alternativ kann ein Service Principal verwendet werden
+- Dieselben Azure-, Entra-, Netzwerk- und Active-Directory-Berechtigungen wie bei der skriptbasierten Installation
+- Geschützte Pipeline-Secrets für das AD-Servicekonto und gegebenenfalls das separate AD-Provisioning-Credential
+- Vollständig gesetzte Installer-Parameter; die Pipeline darf nicht von interaktiven Eingabeaufforderungen abhängen
+
+Ein von einem Pipeline-Anbieter gehosteter Runner kann nur verwendet werden, wenn er die privaten DNS-Zonen und Domain Controller sicher erreichen kann. Für typische Hybridumgebungen ist daher ein selbst gehosteter Runner im verbundenen Netzwerk erforderlich.
+
+#### Pipeline-Ablauf
+
+Eine plattformneutrale Pipeline sollte die folgenden Stufen verwenden:
+
+1. **Build und Tests:** Solution im Release-Modus bauen und testen.
+2. **Paket erstellen:** Mit `scripts/New-InstallationPackage.ps1` das vollständige Installationsarchiv erzeugen und als Pipeline-Artefakt veröffentlichen.
+3. **Authentifizieren:** Azure CLI noninteractive mit der Pipeline-Identität anmelden.
+4. **Validieren:** Installer mit allen Parametern, `-ValidateOnly` und `-Confirm:$false` ausführen.
+5. **What-if:** Denselben Parametersatz mit `-WhatIf` und `-Confirm:$false` ausführen.
+6. **Bereitstellen:** Nach einer optionalen Freigabe denselben Parametersatz mit `-Confirm:$false` ausführen.
+
+```powershell
+# Build-Stufe
+dotnet test HybridDeviceTagger.sln --configuration Release
+$package = pwsh -NoProfile -File scripts/New-InstallationPackage.ps1 `
+    -OutputDirectory artifacts
+
+# Deployment-Stufe nach dem Entpacken des Pipeline-Artefakts
+$parameters = @{
+    SubscriptionId = $env:HDT_SUBSCRIPTION_ID
+    ResourceGroupName = $env:HDT_RESOURCE_GROUP
+    # Alle weiteren nicht vertraulichen Installerwerte aus Pipelinevariablen
+}
+
+$securePassword = ConvertTo-SecureString $env:HDT_AD_PASSWORD -AsPlainText -Force
+$parameters.ActiveDirectoryCredential = [pscredential]::new(
+    $env:HDT_AD_USERNAME,
+    $securePassword
+)
+
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters -ValidateOnly -Confirm:$false
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters -WhatIf -Confirm:$false
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters -Confirm:$false
+```
+
+Pipeline-Secrets dürfen weder in Parameterdateien eingecheckt noch in Logs ausgegeben werden. Wenn der LDAP-Fallback in einer Noninteractive-Ausführung ausdrücklich erlaubt werden soll, muss `AllowLdapFallback = $true` im Parametersatz gesetzt werden. Mit `-SkipCodeDeployment` können Infrastruktur- und Anwendungsdeployment in getrennte Pipeline-Stufen aufgeteilt werden.
+
+### Gemeinsame Konfiguration
+
+Beide Installationsarten verwenden dieselben Parameter und erzeugen dieselbe Zielkonfiguration.
+
+#### Key Vault
+
+Ein bestehender Key Vault ist optional. Ist keiner vorhanden, erstellt das Setup mit `-CreateKeyVault` einen neuen privaten Key Vault in der Ressourcengruppe der Function App. Ohne diesen Schalter wird ein vorhandener Vault über Subscription, Ressourcengruppe und Namen referenziert.
+
+Das AD-Kennwort wird nicht durch die Installationsidentität in den Key Vault geschrieben. Der Installer übergibt es an die Entra-geschützte Management API; die Function validiert es und speichert es anschließend mit ihrer Managed Identity.
+
+#### Berechtigungen für Regel- und Kennwortverwaltung
+
+Regel- und Kennwortverwaltung werden durch Anwendungsrollen der Entra Enterprise Application für die HybridDeviceTagger Management API geschützt. Zusätzlich erhalten alle Principals mit der Azure-RBAC-Rolle `Owner` oder `Contributor` auf der Function App automatisch dieselben Rechte wie `HybridDeviceTagger.RuleAdministrator` und `HybridDeviceTagger.PasswordRotationAdministrator`. Das gilt auch für über Sicherheitsgruppen oder übergeordnete Scopes geerbte Zuweisungen.
+
+| Verwaltungsaufgabe | Erforderliche Anwendungsrolle | Installer-Parameter |
+| --- | --- | --- |
+| Tagging-Regeln lesen, erstellen, ändern und löschen | `HybridDeviceTagger.RuleAdministrator` | `ManagementApiRuleAdministratorPrincipalObjectId` |
+| Initiales AD-Kennwort einrichten, Rotationsstatus lesen und Kennwortrotation erzwingen | `HybridDeviceTagger.PasswordRotationAdministrator` | `ManagementApiPasswordRotationAdministratorPrincipalObjectId` |
+
+Die Parameter akzeptieren die Entra Object IDs von Benutzern, Sicherheitsgruppen oder Service Principals. Für die dauerhafte Administration sollten Sicherheitsgruppen verwendet und nach dem Least-Privilege-Prinzip nur der jeweils benötigten Rolle zugewiesen werden. Alternativ weist `ManagementApiAllowedPrincipalObjectId` einem Bootstrap-Principal alle fünf Management-API-Rollen zu. Diese breite Zuweisung eignet sich nur für Migration oder Ersteinrichtung.
+
+Kennwortadministratoren benötigen keinen direkten Key-Vault-Zugriff. Nach einer neuen API-Anwendungsrollenzuweisung muss das Zugriffstoken erneuert werden. Änderungen an Owner-/Contributor-Zuweisungen prüft die Function bei der nächsten API-Anfrage über Azure Resource Manager. Andere Azure-RBAC-Rollen berechtigen nicht zur Management API; Owner und Contributor erhalten keine Tagging-Operator- oder Zertifikatsadministratorrechte.
+
+#### Active Directory und Tagging-Regeln
+
+Beide Installationsarten verwenden dasselbe AD-Servicekonto, dieselben Verbindungs- und Zertifikatseinstellungen sowie dieselben Tagging-Regeln. Das Servicekonto muss forestweit die benötigten Computerobjekte lesen und sein eigenes Kennwort ändern dürfen. Kennwortänderungen erfolgen ausschließlich über LDAPS.
+
+Tagging-Regeln können bereits als `TaggingRules` an den Installer übergeben oder nach der Installation über das PowerShell-Management-Modul gepflegt werden. Das initiale AD-Kennwort kann ebenfalls während der Installation oder anschließend mit `Initialize-HybridDeviceTaggerActiveDirectoryCredential` gesetzt werden. Die folgenden Abschnitte beschreiben die gemeinsame Administration nach beiden Installationsarten.
+
+#### PowerShell-Management-Modul nachinstallieren
+
+Das PowerShell-Modul ist nicht für den Betrieb der Azure Function erforderlich. Es wird auf
+Administrationsarbeitsplätzen oder Pipeline-Runnern installiert, von denen aus Regeln,
+LDAPS-Vertrauenszertifikate, Statusinformationen und administrative Aktionen verwaltet werden sollen.
+
+Sobald die erste Version auf PSGallery veröffentlicht wurde, kann das Modul unter PowerShell 7.2 oder
+neuer für den aktuellen Benutzer installiert werden:
+
+```powershell
+Install-PSResource `
+    -Name HybridDeviceTagger.Management `
+    -Repository PSGallery `
+    -Scope CurrentUser
+```
+
+Ist `Install-PSResource` auf dem System noch nicht verfügbar, kann alternativ PowerShellGet verwendet
+werden:
+
+```powershell
+Install-Module `
+    -Name HybridDeviceTagger.Management `
+    -Repository PSGallery `
+    -Scope CurrentUser
+```
+
+Eine bereits installierte Version wird mit dem zum Installationsweg passenden Befehl aktualisiert:
+
+```powershell
+Update-PSResource -Name HybridDeviceTagger.Management
+
+# Alternative für eine Installation mit Install-Module
+Update-Module -Name HybridDeviceTagger.Management
+```
+
+Anschließend das Modul importieren, die installierte Version prüfen und mit der Management API
+verbinden:
+
+```powershell
+Import-Module HybridDeviceTagger.Management
+
+Get-Module HybridDeviceTagger.Management -ListAvailable |
+    Sort-Object Version -Descending |
+    Select-Object -First 1 Name, Version, ModuleBase
+
+az login
+Connect-HybridDeviceTagger
+Get-HybridDeviceTaggerRule
+```
+
+Für eine abweichende Bereitstellung werden deren API-URI und Entra-Client-ID angegeben:
+
+```powershell
+Connect-HybridDeviceTagger `
+    -ApiBaseUri 'https://example.azurewebsites.net/api/management' `
+    -ClientId '00000000-0000-0000-0000-000000000000'
+```
+
+Der angemeldete Benutzer benötigt die für die jeweilige Verwaltungsaufgabe dokumentierte
+Management-API-Anwendungsrolle oder eine wirksame Owner-/Contributor-Zuweisung auf der Function App.
+In abgeschotteten Umgebungen kann weiterhin das mit dem Installationspaket ausgelieferte Modul über
+`Import-Module ./Deployment/HybridDeviceTagger.Management` geladen werden.
+
+Alle Parameter, Berechtigungen und vollständigen Beispiele stehen in [Deployment/README.md](Deployment/README.md).
 
 ## Administration
 
@@ -244,6 +377,17 @@ Bei einer echten Installation kann der Installer das Servicekonto mit einem sepa
 ### PowerShell-Management-Modul
 
 Das Modul `Deployment/HybridDeviceTagger.Management` stellt folgende Funktionen für die Entra-geschützte Management API bereit:
+
+Eine vollständige Beschreibung der Voraussetzungen, Autorisierung, Datenmodelle, Befehle,
+Nebenläufigkeitssteuerung, Fehlerbehandlung und internen Implementierung enthält die
+[Modulreferenz](Deployment/HybridDeviceTagger.Management/README.md).
+
+Nach der ersten Veröffentlichung kann das Modul aus der PowerShell Gallery installiert werden:
+
+```powershell
+Install-PSResource -Name HybridDeviceTagger.Management -Repository PSGallery
+Import-Module HybridDeviceTagger.Management
+```
 
 | Funktion | Beschreibung |
 | --- | --- |
