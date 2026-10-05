@@ -1,4 +1,4 @@
-# Project-Version: 0.1.20261005.1
+# Project-Version: 0.1.20261005.2
 # Author: andreas.lucas@outlook.com (aka Kili)
 
 <#
@@ -21,7 +21,7 @@ SPDX-License-Identifier: Apache-2.0
 
 @{
     RootModule = 'HybridDeviceTagger.Management.psm1'
-    ModuleVersion = '0.1.20261005.1'
+    ModuleVersion = '0.1.20261005.2'
     GUID = 'c86eeec6-c5ee-44ea-b06f-86d7a0fd4a3f'
     Author = 'Andreas Lucas (aka Kili)'
     CompanyName = 'Andreas Lucas'
@@ -51,7 +51,7 @@ SPDX-License-Identifier: Apache-2.0
         PSData = @{
             Tags = @('AzureFunctions', 'MicrosoftEntra', 'HybridDevices')
             LicenseUri = 'https://www.apache.org/licenses/LICENSE-2.0'
-            ProjectUri = 'https://github.com/anluca_microsoft/HybridDeviceTagger'
+            ProjectUri = 'https://github.com/Kili69/HybridDeviceTagger'
         }
     }
 }

@@ -3,7 +3,7 @@
     <VersionMajor Condition="'$(VersionMajor)' == ''">0</VersionMajor>
     <VersionMinor Condition="'$(VersionMinor)' == ''">1</VersionMinor>
     <VersionDate Condition="'$(VersionDate)' == ''">20261005</VersionDate>
-    <VersionCounter Condition="'$(VersionCounter)' == ''">1</VersionCounter>
+    <VersionCounter Condition="'$(VersionCounter)' == ''">2</VersionCounter>
     <Version>$(VersionMajor).$(VersionMinor).$(VersionDate).$(VersionCounter)</Version>
     <InformationalVersion>$(Version)</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
@@ -13,8 +13,8 @@
     <AuthorEmail>andreas.lucas@outlook.com</AuthorEmail>
     <Company>Andreas Lucas</Company>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/anluca_microsoft/HybridDeviceTagger</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/anluca_microsoft/HybridDeviceTagger.git</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/Kili69/HybridDeviceTagger</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Kili69/HybridDeviceTagger.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <Description>Tags hybrid Active Directory devices in Microsoft Entra ID and securely rotates the directory service credential.</Description>
   </PropertyGroup>

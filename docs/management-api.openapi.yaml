@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: HybridDeviceTagger Management API
-  version: 0.1.20260911.1
+  version: 0.1.20261005.2
   description: REST API for authentication discovery, tagging configuration, operational actions, run status, and trace retrieval.
 servers:
   - url: https://func-hybriddevicetagger.azurewebsites.net/api/management

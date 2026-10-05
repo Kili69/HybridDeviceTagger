@@ -4,7 +4,7 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
-## [0.1.20261005.1] - 2026-10-05
+## [0.1.20261005.2] - 2026-10-05
 
 ### Added
 
@@ -18,6 +18,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Consolidate code and developer documentation in `DEVELOPER.md`, simplify its runtime architecture diagram, and remove the superseded standalone code-documentation file.
 - Reformat `README.md` for GitHub with consistent headings, navigation, installation permissions, and complete rule-management examples.
 - Disable Enterprise Application assignment enforcement so authenticated Function App Owners and Contributors can reach the API authorization layer while unauthorized principals continue to receive HTTP `403`.
+- Migrate the active repository to `Kili69/HybridDeviceTagger` while preserving the complete source history, branches, and tags.
+
+## [0.1.20261005.1] - 2026-10-05
+
+### Changed
+
+- Update the author contact address to `andreas.lucas@outlook.com`.
+- Align this changelog with the Keep a Changelog 1.1.0 structure.
+- Rename the root readme to `README.md` so GitHub recognizes it using the conventional file name.
+- Rename `CODE_DOCUMENTATION.md` to `DEVELOPER.md` and update its repository reference.
+- License the entire project under the Apache License 2.0 and publish the license in package metadata.
+- Document the repository structure and the responsibilities of its main directories in the developer guide.
 
 ## [0.1.20260917.1] - 2026-09-17
 

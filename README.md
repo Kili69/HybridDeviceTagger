@@ -5,8 +5,8 @@
 # HybridDeviceTagger
 
 [![Buy me a coffee – Kili](https://img.shields.io/badge/Buy_me_a_coffee-Kili-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/andreaslmuz)
-[![Version](https://img.shields.io/badge/Version-0.1.20261005.1-2EA44F?style=for-the-badge)](CHANGELOG.md)
-[![Branch](https://img.shields.io/badge/Branch-dev-181717?style=for-the-badge&logo=git&logoColor=white)](https://github.com/anluca_microsoft/HybridDeviceTagger/tree/dev)
+[![Version](https://img.shields.io/badge/Version-0.1.20261005.2-2EA44F?style=for-the-badge)](CHANGELOG.md)
+[![Branch](https://img.shields.io/badge/Branch-dev-181717?style=for-the-badge&logo=git&logoColor=white)](https://github.com/Kili69/HybridDeviceTagger/tree/dev)
 [![Lizenz: Apache 2.0](https://img.shields.io/badge/Lizenz-Apache_2.0-0B5CAD?style=for-the-badge)](LICENSE)
 ![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4?style=for-the-badge&logo=dotnet&logoColor=white)
 ![Azure Functions v4](https://img.shields.io/badge/Azure_Functions-v4-0062AD?style=for-the-badge&logo=azurefunctions&logoColor=white)
