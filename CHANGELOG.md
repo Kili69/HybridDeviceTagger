@@ -4,6 +4,19 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [Unreleased]
+
+## [0.1.20261005.1] - 2026-10-05
+
+### Changed
+
+- Update the author contact address to `andreas.lucas@outlook.com`.
+- Align this changelog with the Keep a Changelog 1.1.0 structure.
+- Rename the root readme to `README.md` so GitHub recognizes it using the conventional file name.
+- Rename `CODE_DOCUMENTATION.md` to `DEVELOPER.md` and update its repository reference.
+- License the entire project under the Apache License 2.0 and publish the license in package metadata.
+- Document the repository structure and the responsibilities of its main directories in the developer guide.
+
 ## [0.1.20260911.1] - 2026-09-11
 
 ### Added
@@ -217,3 +230,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Initial .NET 8 isolated Azure Functions implementation for Active Directory to Entra device tagging.
+
+[unreleased]: https://github.com/Kili69/HybridDeviceTagger/compare/9188b02ca008e5993910fd782beedda9f6c40a3b...HEAD
+[0.1.20261005.1]: https://github.com/Kili69/HybridDeviceTagger/compare/9188b02ca008e5993910fd782beedda9f6c40a3b...HEAD
+[0.1.20260911.1]: https://github.com/Kili69/HybridDeviceTagger/compare/96cd5c7a43a6140e45ffda3a907632b58ab3fe1f...9188b02ca008e5993910fd782beedda9f6c40a3b
+[0.1.20260905.16]: https://github.com/Kili69/HybridDeviceTagger/compare/7836d5a34839bf6832d5c7ae0a83c369c9630df2...96cd5c7a43a6140e45ffda3a907632b58ab3fe1f
+[0.1.20260905.15]: https://github.com/Kili69/HybridDeviceTagger/compare/485a6d9f35b8c0e6b4724867b054726b0f53cab6...7836d5a34839bf6832d5c7ae0a83c369c9630df2
+[0.1.20260905.14]: https://github.com/Kili69/HybridDeviceTagger/compare/3c3534971ac08d7044f1149321df72d626c61405...485a6d9f35b8c0e6b4724867b054726b0f53cab6
+[0.1.20260905.13]: https://github.com/Kili69/HybridDeviceTagger/compare/e0bd235fe2c5ae0904583a20faed5a2cf565ea84...3c3534971ac08d7044f1149321df72d626c61405
+[0.1.20260905.12]: https://github.com/Kili69/HybridDeviceTagger/compare/8b0eb7f1461837f614c48b85e04cefa0b3f4ed90...e0bd235fe2c5ae0904583a20faed5a2cf565ea84
+[0.1.20260905.11]: https://github.com/Kili69/HybridDeviceTagger/compare/872e1bdc8321a9202f25c8275ee879b4f21c4a13...8b0eb7f1461837f614c48b85e04cefa0b3f4ed90
+[0.1.20260905.10]: https://github.com/Kili69/HybridDeviceTagger/compare/12297b58d3da428e0a7dbe17cff5bf510dc723fe...872e1bdc8321a9202f25c8275ee879b4f21c4a13
+[0.1.20260905.9]: https://github.com/Kili69/HybridDeviceTagger/compare/88ab584ea7517c7e2215554ccc04ceb5bb3286c8...12297b58d3da428e0a7dbe17cff5bf510dc723fe
+[0.1.20260905.8]: https://github.com/Kili69/HybridDeviceTagger/compare/84ed6b65ae593b757f12dc5df565d04b096acf9f...88ab584ea7517c7e2215554ccc04ceb5bb3286c8
+[0.1.20260905.7]: https://github.com/Kili69/HybridDeviceTagger/compare/ce0de3fc74916f23a85e913948fe2f502ca06391...84ed6b65ae593b757f12dc5df565d04b096acf9f
+[0.1.20260905.6]: https://github.com/Kili69/HybridDeviceTagger/compare/b876b27a88438e8681961cbd922470c38f08b801...ce0de3fc74916f23a85e913948fe2f502ca06391
+[0.1.20260905.5]: https://github.com/Kili69/HybridDeviceTagger/compare/fbc3166e7c5bb18269ffd0350c05ef48c84edb0b...b876b27a88438e8681961cbd922470c38f08b801
+[0.1.20260905.4]: https://github.com/Kili69/HybridDeviceTagger/compare/237b9602ba8a0235256776eb80f2e5da829cd6a7...fbc3166e7c5bb18269ffd0350c05ef48c84edb0b
+[0.1.20260905.3]: https://github.com/Kili69/HybridDeviceTagger/compare/866482e87981a187e3cce39e0a0dc25625cfa086...237b9602ba8a0235256776eb80f2e5da829cd6a7
+[0.1.20260905.2]: https://github.com/Kili69/HybridDeviceTagger/compare/285e462332d713e40e9291c59c6fbfd4c46a5efd...866482e87981a187e3cce39e0a0dc25625cfa086
+[0.1.20260905.1]: https://github.com/Kili69/HybridDeviceTagger/compare/270e2d0fe518accc54be9b1a490f214e60d2fcf0...285e462332d713e40e9291c59c6fbfd4c46a5efd
+[0.1.20260904.3]: https://github.com/Kili69/HybridDeviceTagger/compare/4587d3a...270e2d0fe518accc54be9b1a490f214e60d2fcf0
+[0.1.20260904.1]: https://github.com/Kili69/HybridDeviceTagger/compare/968e6fe2a9efd81b61db5840d4f83995170175fe...4587d3a
+[0.1.20260903.2]: https://github.com/Kili69/HybridDeviceTagger/compare/a6f224e...968e6fe2a9efd81b61db5840d4f83995170175fe
+[0.1.20260903.1]: https://github.com/Kili69/HybridDeviceTagger/commit/a6f224e

@@ -1,7 +1,7 @@
 #Requires -Version 7.2
 #Requires -Modules ActiveDirectory
-# Project-Version: 0.1.20260911.1
-# Author: andreas.lucas@microsoft.com (aka Kili)
+# Project-Version: 0.1.20261005.1
+# Author: andreas.lucas@outlook.com (aka Kili)
 
 <#
 .SYNOPSIS
@@ -200,7 +200,7 @@ Runs the complete read-only preflight using values collected in the parameters s
 Deploys the validated infrastructure and Function package. Run ValidateOnly and WhatIf first.
 
 .NOTES
-Author: Andreas Lucas (aka Kili) <andreas.lucas@microsoft.com>
+Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
 
 Installer log: $env:TEMP\HybridDeviceTagger-Install.log
 

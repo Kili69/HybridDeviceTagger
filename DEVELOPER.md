@@ -1,4 +1,4 @@
-# HybridDeviceTagger Code Documentation
+# HybridDeviceTagger Developer Documentation
 
 ## Purpose
 
@@ -8,6 +8,48 @@ HybridDeviceTagger is a .NET 8 Azure Functions v4 isolated-worker application. I
 2. **Password rotation** rotates the Active Directory service-account password and keeps the Active Directory and Azure Key Vault states recoverable if a run is interrupted.
 
 The application separates trigger, management API, orchestration, directory, Graph, credential-storage, and operational-state concerns. Interfaces isolate external systems so the orchestration services can be tested without Active Directory, Key Vault, Microsoft Graph, or App Service Authentication.
+
+## Repository Structure
+
+```text
+.
+|-- .azure/                         Deployment planning and validation records
+|-- .githooks/                      Repository-local Git hooks
+|-- .github/                        GitHub Actions and Copilot instructions
+|-- .vscode/                        Recommended VS Code workspace configuration
+|-- Deployment/
+|   |-- HybridDeviceTagger.Management/
+|   |                                  PowerShell management module
+|   |-- Install-HybridDeviceTagger.ps1 Interactive validation and deployment
+|   |-- main.bicep                     Azure infrastructure definition
+|   `-- key-vault-role-assignment.bicep
+|                                      Existing Key Vault role assignment
+|-- docs/
+|   `-- management-api.openapi.yaml    Management API contract
+|-- scripts/
+|   `-- Assert-CommitMetadata.ps1      Version and changelog commit guard
+|-- src/
+|   `-- HybridDeviceTagger/            Azure Functions application
+|       |-- Models/                    Workflow and persistence data contracts
+|       |-- Options/                   Strongly typed configuration
+|       |-- Properties/                Assembly and launch metadata
+|       `-- Services/                  Orchestration and external-system adapters
+|-- tests/
+|   `-- HybridDeviceTagger.Tests/      Focused unit and entry-point tests
+|-- CHANGELOG.md                       Version history
+|-- DEVELOPER.md                       Developer and architecture documentation
+|-- Directory.Build.props              Shared version and package metadata
+|-- global.json                        .NET SDK selection
+|-- HybridDeviceTagger.sln             Build and test solution
+|-- LICENSE                            Apache License 2.0
+`-- README.md                          User, deployment, and operations guide
+```
+
+The production application lives entirely under `src/HybridDeviceTagger`. Function entry points remain thin and delegate work to services registered in `Program.cs`. The `Services` directory contains both abstractions and production implementations for Active Directory, Microsoft Graph, Azure Key Vault, Blob Storage, authentication, tracing, and workflow orchestration. Keeping these dependencies behind interfaces allows the test project to exercise workflows with in-memory substitutes.
+
+Deployment assets are intentionally separate from runtime code. `Deployment/main.bicep` defines the Azure resources, `Install-HybridDeviceTagger.ps1` validates prerequisites and coordinates deployment, and `Deployment/HybridDeviceTagger.Management` provides the reusable operator-facing PowerShell module. The OpenAPI contract under `docs` describes the same management endpoints consumed by that module.
+
+Repository-wide build, version, and release metadata is centralized in `Directory.Build.props`, `CHANGELOG.md`, and `scripts/Assert-CommitMetadata.ps1`. Generated `bin` and `obj` directories are build outputs and are not tracked.
 
 ## Runtime Architecture
 
