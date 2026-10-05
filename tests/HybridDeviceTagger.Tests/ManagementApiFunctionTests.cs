@@ -328,7 +328,8 @@ public sealed class ManagementApiFunctionTests
         IDeviceTaggingRunner? deviceTaggingRunner = null,
         IPasswordRotationRunner? passwordRotationRunner = null,
         IActiveDirectoryTrustStore? trustStore = null,
-        IActiveDirectoryCredentialInitializer? credentialInitializer = null) =>
+        IActiveDirectoryCredentialInitializer? credentialInitializer = null,
+        IManagementApiAuthorizer? authorizer = null) =>
         new(
             new TaggingConfigurationService(configurationStore),
             statusStore,
@@ -336,7 +337,8 @@ public sealed class ManagementApiFunctionTests
             trustStore ?? new FakeTrustStore(),
             deviceTaggingRunner ?? new FakeDeviceTaggingRunner(),
             passwordRotationRunner ?? new FakePasswordRotationRunner(),
-            credentialInitializer ?? new FakeCredentialInitializer());
+            credentialInitializer ?? new FakeCredentialInitializer(),
+            authorizer ?? new ApplicationRoleAuthorizer());
 
     private static HttpRequest AuthenticatedRequest(params string[] roles)
     {
@@ -346,6 +348,17 @@ public sealed class ManagementApiFunctionTests
         request.Headers["X-MS-CLIENT-PRINCIPAL"] = Convert.ToBase64String(
             Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { auth_typ = "aad", claims })));
         return request;
+    }
+
+    private sealed class ApplicationRoleAuthorizer : IManagementApiAuthorizer
+    {
+        public Task<EasyAuthAuthorizationResult> AuthorizeAsync(
+            HttpRequest request,
+            IReadOnlyCollection<string> requiredRoles,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(EasyAuthPrincipalValidator.Authorize(
+                request,
+                [.. requiredRoles]));
     }
 
     private sealed class FakeTaggingConfigurationStore : ITaggingConfigurationStore

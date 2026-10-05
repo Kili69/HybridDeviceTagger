@@ -4,6 +4,21 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20261005.1] - 2026-10-05
+
+### Added
+
+- Add Apache License 2.0 licensing, package metadata, SPDX source headers, and license inclusion in installation archives.
+- Add runtime authorization that grants Function App `Owner` and `Contributor` principals rule and password administration through direct, transitive-group, or inherited Azure RBAC assignments.
+- Add focused authorization tests and a Kili project logo with project, version, branch, platform, license, and support badges.
+
+### Changed
+
+- Replace the Microsoft contact addresses with `andreas.lucas@outlook.com` throughout the repository.
+- Consolidate code and developer documentation in `DEVELOPER.md`, simplify its runtime architecture diagram, and remove the superseded standalone code-documentation file.
+- Reformat `README.md` for GitHub with consistent headings, navigation, installation permissions, and complete rule-management examples.
+- Disable Enterprise Application assignment enforcement so authenticated Function App Owners and Contributors can reach the API authorization layer while unauthorized principals continue to receive HTTP `403`.
+
 ## [0.1.20260917.1] - 2026-09-17
 
 ### Added

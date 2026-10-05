@@ -2,7 +2,7 @@
   <PropertyGroup>
     <VersionMajor Condition="'$(VersionMajor)' == ''">0</VersionMajor>
     <VersionMinor Condition="'$(VersionMinor)' == ''">1</VersionMinor>
-    <VersionDate Condition="'$(VersionDate)' == ''">20260917</VersionDate>
+    <VersionDate Condition="'$(VersionDate)' == ''">20261005</VersionDate>
     <VersionCounter Condition="'$(VersionCounter)' == ''">1</VersionCounter>
     <Version>$(VersionMajor).$(VersionMinor).$(VersionDate).$(VersionCounter)</Version>
     <InformationalVersion>$(Version)</InformationalVersion>
@@ -10,8 +10,9 @@
     <AssemblyVersion>$(VersionMajor).$(VersionMinor).0.0</AssemblyVersion>
     <FileVersion>$(VersionMajor).$(VersionMinor).0.$(VersionCounter)</FileVersion>
     <Authors>Andreas Lucas (aka Kili)</Authors>
-    <AuthorEmail>andreas.lucas@microsoft.com</AuthorEmail>
+    <AuthorEmail>andreas.lucas@outlook.com</AuthorEmail>
     <Company>Andreas Lucas</Company>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/anluca_microsoft/HybridDeviceTagger</PackageProjectUrl>
     <RepositoryUrl>https://github.com/anluca_microsoft/HybridDeviceTagger.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>

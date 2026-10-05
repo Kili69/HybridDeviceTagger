@@ -16,9 +16,11 @@ Installation uses separate Azure, Entra, Active Directory, and runtime identitie
 | AD provisioning identity | Create user in the configured parent OU and enable/reset password on that account | Used only with `-PrepareActiveDirectoryAccountOnly`; it is not stored or used by the Function. Existing delegated AD permissions may be used instead of broad domain administration. |
 | DNS administrator | Create a private DNS zone and A record, or modify the existing private DNS service | Required when Storage public network access is disabled. The Function subnet must resolve `<storage-account>.blob.core.windows.net` through `<storage-account>.privatelink.blob.core.windows.net` to the Storage private endpoint IP. |
 
-The management REST API additionally requires a single-tenant Entra app registration whose Application ID URI is `api://<client-id>`. Pass its application/client ID as `ManagementApiClientId`. The installer creates five application roles, assigns approved users, security groups, or service principals, then enables **Assignment required** on the Enterprise Application. Easy Auth validates issuer, audience, and authentication; the Function returns HTTP `403` unless the principal has a role accepted by the requested operation.
+The management REST API additionally requires a single-tenant Entra app registration whose Application ID URI is `api://<client-id>`. Pass its application/client ID as `ManagementApiClientId`. The installer creates five application roles and assigns approved users, security groups, or service principals. **Assignment required** remains disabled so Function App Owners and Contributors can obtain a token without a separate API role. Easy Auth validates issuer, audience, and authentication; the Function returns HTTP `403` unless the principal has an accepted application role or an accepted Function App RBAC assignment.
 
-`ManagementApiAllowedPrincipalObjectId` is the migration/bootstrap input. Its principals receive all five roles unless a role-specific list is supplied through `ManagementApiReaderPrincipalObjectId`, `ManagementApiRuleAdministratorPrincipalObjectId`, `ManagementApiTaggingOperatorPrincipalObjectId`, `ManagementApiPasswordRotationAdministratorPrincipalObjectId`, or `ManagementApiCertificateAdministratorPrincipalObjectId`. Prefer security-group assignments for ongoing administration. Azure subscription roles do not authorize this custom API.
+`ManagementApiAllowedPrincipalObjectId` is the migration/bootstrap input. Its principals receive all five roles unless a role-specific list is supplied through `ManagementApiReaderPrincipalObjectId`, `ManagementApiRuleAdministratorPrincipalObjectId`, `ManagementApiTaggingOperatorPrincipalObjectId`, `ManagementApiPasswordRotationAdministratorPrincipalObjectId`, or `ManagementApiCertificateAdministratorPrincipalObjectId`. Prefer security-group assignments for ongoing administration.
+
+The Function also queries Azure Resource Manager at runtime. A principal with the built-in `Owner` or `Contributor` role on the Function App receives rule-administrator and password-rotation-administrator access automatically. Direct assignments, transitive security-group assignments, and assignments inherited from a parent scope are accepted. No other management API role is implied. The Function managed identity receives `Reader` on its own Function App solely to read these effective role assignments.
 
 | Application role | Permitted operations |
 | --- | --- |
@@ -84,7 +86,7 @@ Invoke-MgGraphRequest -Method DELETE -Uri (
 )
 ```
 
-Acquire a new management API token after changing assignments. Reconnect the module and, if Azure CLI still returns a cached token, sign in again. Keep **Assignment required** enabled; Azure subscription or resource-group RBAC does not replace these API application roles.
+Acquire a new management API token after changing application-role assignments. Reconnect the module and, if Azure CLI still returns a cached token, sign in again. Keep **Assignment required** disabled so the Function can evaluate effective Owner and Contributor assignments. Azure RBAC changes are queried on the next API request and do not require a new API token.
 
 The signed-in identity used by Azure CLI must be able to read Microsoft Graph service principals. Assigning `Device.ReadWrite.All` requires an appropriately privileged Entra administrator; Azure subscription roles such as `Owner` do not grant this Entra permission.
 

@@ -1,6 +1,20 @@
 /*
- * Author: Andreas Lucas (aka Kili) <andreas.lucas@microsoft.com>
- * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ * Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
+ * Copyright 2026 Andreas Lucas
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 targetScope = 'resourceGroup'
@@ -113,6 +127,7 @@ var effectiveKeyVaultPrivateDnsZoneResourceId = empty(keyVaultPrivateDnsZoneReso
 var keyVaultUri = 'https://${keyVaultName}${environment().suffixes.keyvaultDns}'
 var keyVaultSecretsOfficerRoleDefinitionId = '/subscriptions/${keyVaultSubscriptionId}/providers/Microsoft.Authorization/roleDefinitions/b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
 var storageBlobDataOwnerRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b')
+var readerRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')
 
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' existing = {
   name: virtualNetworkName
@@ -458,6 +473,10 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           value: managementApiClientId
         }
         {
+          name: 'ManagementAuthorization__FunctionAppResourceId'
+          value: resourceId('Microsoft.Web/sites', functionAppName)
+        }
+        {
           name: 'Tagging__RulesJson'
           value: '[]'
         }
@@ -521,6 +540,16 @@ resource deploymentStorageRoleAssignment 'Microsoft.Authorization/roleAssignment
     principalId: functionApp.identity.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: storageBlobDataOwnerRoleDefinitionId
+  }
+}
+
+resource functionAppReaderRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(functionApp.id, readerRoleDefinitionId)
+  scope: functionApp
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: readerRoleDefinitionId
   }
 }
 

@@ -18,5 +18,5 @@
 - Before every commit, increment the product version in `Directory.Build.props` using the `<major>.<minor>.<yyyyMMdd>.<counter>` format.
 - Before every commit, add a dated section for that exact version to `CHANGELOG.md`; never commit code changes without their history entry.
 - Run `pwsh -NoProfile -File scripts/Assert-CommitMetadata.ps1 -Staged` after staging and before creating a commit.
-- Start every production PowerShell script with its `#Requires` statements, `# Project-Version: <version>` matching `Directory.Build.props`, and `# Author: andreas.lucas@microsoft.com (aka Kili)`, followed by the repository's standard Microsoft sample disclaimer.
-- Start every production C# and Bicep source file with author `Andreas Lucas (aka Kili) <andreas.lucas@microsoft.com>` and the repository's standard Microsoft sample disclaimer. Test sources are excluded unless explicitly requested.
+- Start every production PowerShell script with its `#Requires` statements, `# Project-Version: <version>` matching `Directory.Build.props`, and `# Author: andreas.lucas@outlook.com (aka Kili)`, followed by the repository's standard Apache 2.0 license header.
+- Start every production C# and Bicep source file with author `Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>` and the repository's standard Apache 2.0 license header. Test sources are excluded unless explicitly requested.
