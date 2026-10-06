@@ -1,5 +1,5 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20261005.3
+# Project-Version: 0.1.20261006.1
 # Author: andreas.lucas@outlook.com (aka Kili)
 
 <#

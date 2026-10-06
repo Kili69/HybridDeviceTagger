@@ -26,4 +26,23 @@ public sealed class LdapActiveDirectoryDeviceSourceTests
         Assert.True(parsed);
         Assert.Equal(expected, actual);
     }
+
+    [Theory]
+    [InlineData("OU=Servers,DC=example,DC=com", true)]
+    [InlineData("OU=Servers,DC=CHILD,DC=EXAMPLE,DC=COM", true)]
+    [InlineData("OU=Servers,DC=attacker,DC=example", false)]
+    [InlineData("OU=Servers,DC=notexample,DC=com", false)]
+    [InlineData("OU=Servers,DC=example,DC=com,DC=attacker", false)]
+    public void IsForestDomain_RequiresExactAdvertisedDnsRoot(
+        string baseDn,
+        bool expected)
+    {
+        var forestDomains = new[] { "example.com", "child.example.com" };
+
+        var result = LdapActiveDirectoryDeviceSource.IsForestDomain(
+            baseDn,
+            forestDomains);
+
+        Assert.Equal(expected, result);
+    }
 }

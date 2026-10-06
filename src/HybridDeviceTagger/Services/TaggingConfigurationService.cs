@@ -30,11 +30,15 @@ public sealed class TaggingConfigurationService
         new(JsonSerializerDefaults.Web);
 
     private readonly ITaggingConfigurationStore _store;
+    private readonly IActiveDirectoryRuleValidator _activeDirectoryRuleValidator;
 
     /// <summary>Initializes the configuration service.</summary>
-    public TaggingConfigurationService(ITaggingConfigurationStore store)
+    public TaggingConfigurationService(
+        ITaggingConfigurationStore store,
+        IActiveDirectoryRuleValidator activeDirectoryRuleValidator)
     {
         _store = store;
+        _activeDirectoryRuleValidator = activeDirectoryRuleValidator;
     }
 
     /// <summary>Gets the current configuration.</summary>
@@ -49,6 +53,9 @@ public sealed class TaggingConfigurationService
     {
         var current = await _store.GetSnapshotAsync(cancellationToken);
         var normalizedRules = NormalizeAndValidate(rules);
+        await _activeDirectoryRuleValidator.ValidateRulesAsync(
+            normalizedRules,
+            cancellationToken);
         return await _store.ReplaceAsync(
             normalizedRules,
             expectedETag ?? current.ETag,
@@ -66,8 +73,12 @@ public sealed class TaggingConfigurationService
             .Where(existing => !string.Equals(existing.Name, rule.Name, StringComparison.OrdinalIgnoreCase))
             .Append(rule)
             .ToArray();
+        var normalizedRules = NormalizeAndValidate(rules);
+        await _activeDirectoryRuleValidator.ValidateRulesAsync(
+            normalizedRules,
+            cancellationToken);
         return await _store.ReplaceAsync(
-            NormalizeAndValidate(rules),
+            normalizedRules,
             expectedETag ?? current.ETag,
             cancellationToken);
     }
@@ -87,8 +98,12 @@ public sealed class TaggingConfigurationService
             throw new KeyNotFoundException($"Tagging rule '{ruleName}' was not found.");
         }
 
+        var normalizedRules = NormalizeAndValidate(rules);
+        await _activeDirectoryRuleValidator.ValidateRulesAsync(
+            normalizedRules,
+            cancellationToken);
         return await _store.ReplaceAsync(
-            NormalizeAndValidate(rules),
+            normalizedRules,
             expectedETag ?? current.ETag,
             cancellationToken);
     }

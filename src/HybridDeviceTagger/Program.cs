@@ -97,7 +97,11 @@ builder.Services.AddSingleton(serviceProvider =>
 });
 builder.Services.AddSingleton<IActiveDirectoryCredentialStore, KeyVaultActiveDirectoryCredentialStore>();
 builder.Services.AddSingleton<ActiveDirectoryLdapConnectionFactory>();
-builder.Services.AddSingleton<IActiveDirectoryDeviceSource, LdapActiveDirectoryDeviceSource>();
+builder.Services.AddSingleton<LdapActiveDirectoryDeviceSource>();
+builder.Services.AddSingleton<IActiveDirectoryDeviceSource>(serviceProvider =>
+    serviceProvider.GetRequiredService<LdapActiveDirectoryDeviceSource>());
+builder.Services.AddSingleton<IActiveDirectoryRuleValidator>(serviceProvider =>
+    serviceProvider.GetRequiredService<LdapActiveDirectoryDeviceSource>());
 builder.Services.AddSingleton<IActiveDirectoryPasswordClient, LdapActiveDirectoryPasswordClient>();
 builder.Services.AddSingleton<IActiveDirectoryCredentialInitializer, ActiveDirectoryCredentialInitializer>();
 builder.Services.AddSingleton<IPasswordGenerator, SecurePasswordGenerator>();

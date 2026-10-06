@@ -1,6 +1,6 @@
 #Requires -Version 7.2
 #Requires -Modules ActiveDirectory
-# Project-Version: 0.1.20261005.3
+# Project-Version: 0.1.20261006.1
 # Author: andreas.lucas@outlook.com (aka Kili)
 
 <#
@@ -446,7 +446,7 @@ $certificateAssemblies = @(
     ([AppContext]::GetData('TRUSTED_PLATFORM_ASSEMBLIES') -split [IO.Path]::PathSeparator)
     [System.DirectoryServices.Protocols.LdapConnection].Assembly.Location
 ) | Select-Object -Unique
-if (-not ('HybridDeviceTaggerLdapCertificateValidatorV2' -as [type])) {
+if (-not ('HybridDeviceTaggerLdapCertificateValidatorV3' -as [type])) {
     Add-Type -ReferencedAssemblies $certificateAssemblies -TypeDefinition @'
 using System;
 using System.DirectoryServices.Protocols;
@@ -457,7 +457,7 @@ using System.Security.Cryptography.X509Certificates;
 
 #pragma warning disable SYSLIB0057
 
-public static class HybridDeviceTaggerLdapCertificateValidatorV2
+public static class HybridDeviceTaggerLdapCertificateValidatorV3
 {
     public static VerifyServerCertificateCallback Create(
         string expectedServer,
@@ -489,15 +489,38 @@ public static class HybridDeviceTaggerLdapCertificateValidatorV2
     {
         using var serverCertificate = new X509Certificate2(
             certificate.Export(X509ContentType.Cert));
-        using var chain = new X509Chain();
+        var certificateName = serverCertificate.GetNameInfo(X509NameType.DnsName, false);
+        if (!certificateName.Equals(expectedServer, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        using var trustChain = CreateChain(trustAnchor, X509RevocationMode.NoCheck);
+        if (!trustChain.Build(serverCertificate))
+        {
+            return false;
+        }
+        if (trustChain.ChainElements.Count == 1)
+        {
+            return true;
+        }
+
+        using var revocationChain = CreateChain(trustAnchor, X509RevocationMode.Online);
+        return revocationChain.Build(serverCertificate);
+    }
+
+    private static X509Chain CreateChain(
+        X509Certificate2 trustAnchor,
+        X509RevocationMode revocationMode)
+    {
+        var chain = new X509Chain();
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
         chain.ChainPolicy.CustomTrustStore.Add(trustAnchor);
-        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        chain.ChainPolicy.RevocationMode = revocationMode;
+        chain.ChainPolicy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
+        chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(10);
         chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
-
-        var certificateName = serverCertificate.GetNameInfo(X509NameType.DnsName, false);
-        return certificateName.Equals(expectedServer, StringComparison.OrdinalIgnoreCase) &&
-            chain.Build(serverCertificate);
+        return chain;
     }
 }
 '@
@@ -978,7 +1001,7 @@ function Connect-LdapDirectory {
     $connection.SessionOptions.SecureSocketLayer = $UseSsl
     if ($UseSsl -and $script:TrustedCertificate) {
         $connection.SessionOptions.VerifyServerCertificate =
-            [HybridDeviceTaggerLdapCertificateValidatorV2]::Create(
+            [HybridDeviceTaggerLdapCertificateValidatorV3]::Create(
                 $Server,
                 $script:TrustedCertificate)
     }
@@ -1053,7 +1076,7 @@ function Connect-ValidatedLdapDirectory {
         }
 
         if ($script:TrustedCertificate -and
-            [HybridDeviceTaggerLdapCertificateValidatorV2]::ValidateTlsEndpoint(
+            [HybridDeviceTaggerLdapCertificateValidatorV3]::ValidateTlsEndpoint(
                 $Server,
                 636,
                 $script:TrustedCertificate)) {
@@ -2872,7 +2895,7 @@ if ($SkipActiveDirectoryDirectoryChecks) {
     if ($existingFunction.ExitCode -ne 0) {
         throw 'Active Directory directory checks may be skipped only when updating an existing Function App.'
     }
-    if (-not [HybridDeviceTaggerLdapCertificateValidatorV2]::ValidateTlsEndpoint(
+    if (-not [HybridDeviceTaggerLdapCertificateValidatorV3]::ValidateTlsEndpoint(
         $ActiveDirectoryServer,
         636,
         $script:TrustedCertificate)) {

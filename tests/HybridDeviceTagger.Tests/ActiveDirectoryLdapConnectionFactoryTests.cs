@@ -7,14 +7,14 @@ namespace HybridDeviceTagger.Tests;
 public sealed class ActiveDirectoryLdapConnectionFactoryTests
 {
     [Fact]
-    public void ValidateServerCertificate_AcceptsCertificateFromConfiguredRoot()
+    public void ValidateServerCertificate_AcceptsTrustedSelfSignedCertificate()
     {
-        using var certificates = CreateCertificateChain("dc01.example.com");
+        using var certificate = CreateSelfSignedServerCertificate("dc01.example.com");
 
         var valid = ActiveDirectoryLdapConnectionFactory.ValidateServerCertificate(
             "dc01.example.com",
-            certificates.Server,
-            [certificates.Root]);
+            certificate,
+            [certificate]);
 
         Assert.True(valid);
     }
@@ -22,12 +22,12 @@ public sealed class ActiveDirectoryLdapConnectionFactoryTests
     [Fact]
     public void ValidateServerCertificate_RejectsWrongDnsName()
     {
-        using var certificates = CreateCertificateChain("dc01.example.com");
+        using var certificate = CreateSelfSignedServerCertificate("dc01.example.com");
 
         var valid = ActiveDirectoryLdapConnectionFactory.ValidateServerCertificate(
             "dc02.example.com",
-            certificates.Server,
-            [certificates.Root]);
+            certificate,
+            [certificate]);
 
         Assert.False(valid);
     }
@@ -35,13 +35,13 @@ public sealed class ActiveDirectoryLdapConnectionFactoryTests
     [Fact]
     public void ValidateServerCertificate_RejectsUntrustedIssuer()
     {
-        using var certificates = CreateCertificateChain("dc01.example.com");
-        using var otherCertificates = CreateCertificateChain("dc01.example.com");
+        using var certificate = CreateSelfSignedServerCertificate("dc01.example.com");
+        using var otherCertificate = CreateSelfSignedServerCertificate("dc01.example.com");
 
         var valid = ActiveDirectoryLdapConnectionFactory.ValidateServerCertificate(
             "dc01.example.com",
-            certificates.Server,
-            [otherCertificates.Root]);
+            certificate,
+            [otherCertificate]);
 
         Assert.False(valid);
     }
@@ -49,15 +49,38 @@ public sealed class ActiveDirectoryLdapConnectionFactoryTests
     [Fact]
     public void ValidateServerCertificate_AcceptsMatchingRootAmongMultipleCertificates()
     {
+        using var certificate = CreateSelfSignedServerCertificate("dc01.example.com");
+        using var otherCertificate = CreateSelfSignedServerCertificate("dc02.example.com");
+
+        var valid = ActiveDirectoryLdapConnectionFactory.ValidateServerCertificate(
+            "dc01.example.com",
+            certificate,
+            [otherCertificate, certificate]);
+
+        Assert.True(valid);
+    }
+
+    [Fact]
+    public void ValidateServerCertificate_RejectsCaIssuedCertificateWithoutRevocationInformation()
+    {
         using var certificates = CreateCertificateChain("dc01.example.com");
-        using var otherCertificates = CreateCertificateChain("dc02.example.com");
 
         var valid = ActiveDirectoryLdapConnectionFactory.ValidateServerCertificate(
             "dc01.example.com",
             certificates.Server,
-            [otherCertificates.Root, certificates.Root]);
+            [certificates.Root]);
 
-        Assert.True(valid);
+        Assert.False(valid);
+    }
+
+    private static X509Certificate2 CreateSelfSignedServerCertificate(string dnsName)
+    {
+        using var key = RSA.Create(2048);
+        var request = CreateServerCertificateRequest(dnsName, key);
+        using var certificate = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow.AddMinutes(-5),
+            DateTimeOffset.UtcNow.AddHours(12));
+        return new X509Certificate2(certificate.Export(X509ContentType.Cert));
     }
 
     private static CertificateChain CreateCertificateChain(string dnsName)
@@ -80,26 +103,7 @@ public sealed class ActiveDirectoryLdapConnectionFactoryTests
         var root = new X509Certificate2(rootWithKey.Export(X509ContentType.Cert));
 
         using var serverKey = RSA.Create(2048);
-        var serverRequest = new CertificateRequest(
-            $"CN={dnsName}",
-            serverKey,
-            HashAlgorithmName.SHA256,
-            RSASignaturePadding.Pkcs1);
-        serverRequest.CertificateExtensions.Add(
-            new X509BasicConstraintsExtension(false, false, 0, true));
-        serverRequest.CertificateExtensions.Add(
-            new X509KeyUsageExtension(
-                X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment,
-                true));
-        var enhancedKeyUsage = new OidCollection
-        {
-            new("1.3.6.1.5.5.7.3.1")
-        };
-        serverRequest.CertificateExtensions.Add(
-            new X509EnhancedKeyUsageExtension(enhancedKeyUsage, true));
-        var subjectAlternativeName = new SubjectAlternativeNameBuilder();
-        subjectAlternativeName.AddDnsName(dnsName);
-        serverRequest.CertificateExtensions.Add(subjectAlternativeName.Build());
+        var serverRequest = CreateServerCertificateRequest(dnsName, serverKey);
 
         var serialNumber = RandomNumberGenerator.GetBytes(16);
         using var serverCertificate = serverRequest.Create(
@@ -109,6 +113,31 @@ public sealed class ActiveDirectoryLdapConnectionFactoryTests
             serialNumber);
         var server = new X509Certificate2(serverCertificate.Export(X509ContentType.Cert));
         return new CertificateChain(root, server);
+    }
+
+    private static CertificateRequest CreateServerCertificateRequest(string dnsName, RSA key)
+    {
+        var request = new CertificateRequest(
+            $"CN={dnsName}",
+            key,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(
+            new X509BasicConstraintsExtension(false, false, 0, true));
+        request.CertificateExtensions.Add(
+            new X509KeyUsageExtension(
+                X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment,
+                true));
+        var enhancedKeyUsage = new OidCollection
+        {
+            new("1.3.6.1.5.5.7.3.1")
+        };
+        request.CertificateExtensions.Add(
+            new X509EnhancedKeyUsageExtension(enhancedKeyUsage, true));
+        var subjectAlternativeName = new SubjectAlternativeNameBuilder();
+        subjectAlternativeName.AddDnsName(dnsName);
+        request.CertificateExtensions.Add(subjectAlternativeName.Build());
+        return request;
     }
 
     private sealed record CertificateChain(

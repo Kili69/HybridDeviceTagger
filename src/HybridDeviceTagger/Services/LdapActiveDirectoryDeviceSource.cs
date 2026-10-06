@@ -26,7 +26,9 @@ using Microsoft.Extensions.Options;
 namespace HybridDeviceTagger.Services;
 
 /// <summary>Discovers hybrid-joined computers through paged LDAP searches.</summary>
-public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSource
+public sealed class LdapActiveDirectoryDeviceSource :
+    IActiveDirectoryDeviceSource,
+    IActiveDirectoryRuleValidator
 {
     internal const string ComputerFilter =
         "(&(objectCategory=computer)(userCertificate=*))";
@@ -63,15 +65,11 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
         string baseDn,
         CancellationToken cancellationToken)
     {
+        var forestDomains = await GetForestDomainsAsync(cancellationToken);
         var isForestRelative = ActiveDirectorySearchPath.IsForestRelative(baseDn);
         var searchTargets = isForestRelative
-            ? await GetForestSearchTargetsAsync(baseDn, cancellationToken)
-            :
-            [
-                new SearchTarget(
-                    GetLdapServer(ActiveDirectorySearchPath.GetDomainDnsName(baseDn)),
-                    baseDn)
-            ];
+            ? GetForestSearchTargets(baseDn, forestDomains)
+            : [GetDomainSearchTarget(baseDn, forestDomains)];
         var devices = new Dictionary<Guid, DirectoryDevice>();
         var resolvedOuCount = 0;
 
@@ -104,6 +102,40 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
         }
 
         return devices.Values.ToArray();
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Forest-relative OU paths are intrinsically constrained because their targets are built only
+    /// from discovered forest domains. Every domain-specific path must exactly match one advertised
+    /// <c>dnsRoot</c> before the configuration can be persisted.
+    /// </remarks>
+    public async Task ValidateRulesAsync(
+        IReadOnlyList<TaggingRuleOptions> rules,
+        CancellationToken cancellationToken)
+    {
+        var domainSpecificRules = rules
+            .Where(rule => !ActiveDirectorySearchPath.IsForestRelative(rule.BaseDn))
+            .ToArray();
+        if (domainSpecificRules.Length == 0)
+        {
+            return;
+        }
+
+        var forestDomains = await GetForestDomainsAsync(cancellationToken);
+        var errors = domainSpecificRules
+            .Where(rule => !IsForestDomain(
+                rule.BaseDn,
+                forestDomains.Select(domain => domain.DnsRoot)))
+            .Select(rule =>
+                $"Tagging rule '{rule.Name}' BaseDn targets domain " +
+                $"'{ActiveDirectorySearchPath.GetDomainDnsName(rule.BaseDn)}', which is not " +
+                "advertised by the configured Active Directory forest.")
+            .ToArray();
+        if (errors.Length > 0)
+        {
+            throw new TaggingConfigurationValidationException(errors);
+        }
     }
 
     /// <summary>Runs a paged subtree search and projects computers with valid hybrid device IDs.</summary>
@@ -151,13 +183,12 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
         return devices;
     }
 
-    /// <summary>Resolves an OU-only path against every domain advertised by the forest.</summary>
+    /// <summary>Reads every domain advertised by the configured forest.</summary>
     /// <remarks>
-    /// The method reads domain <c>crossRef</c> objects from the configuration partition and pairs
-    /// each domain DNS root with the complete domain-specific OU distinguished name.
+    /// Discovery always starts through the configured server, never through a server name derived
+    /// from a rule. Domain <c>crossRef</c> objects are read from the configuration partition.
     /// </remarks>
-    private async Task<IReadOnlyList<SearchTarget>> GetForestSearchTargetsAsync(
-        string ouPath,
+    private async Task<IReadOnlyList<ForestDomain>> GetForestDomainsAsync(
         CancellationToken cancellationToken)
     {
         using var connection = await CreateConnectionAsync(_options.Server, cancellationToken);
@@ -178,7 +209,7 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
             "nCName",
             "dnsRoot"));
 
-        return domainsResponse.Entries
+        var domains = domainsResponse.Entries
             .Cast<SearchResultEntry>()
             .Select(entry => new
             {
@@ -188,11 +219,56 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
             .Where(domain =>
                 !string.IsNullOrWhiteSpace(domain.NamingContext) &&
                 !string.IsNullOrWhiteSpace(domain.DnsRoot))
-            .Select(domain => new SearchTarget(
-                GetLdapServer(domain.DnsRoot!),
-                ActiveDirectorySearchPath.CombineWithDomain(ouPath, domain.NamingContext!)))
-            .OrderBy(target => target.Server, StringComparer.OrdinalIgnoreCase)
+            .Select(domain => new ForestDomain(domain.DnsRoot!, domain.NamingContext!))
+            .OrderBy(domain => domain.DnsRoot, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        if (domains.Length == 0)
+        {
+            throw new InvalidOperationException(
+                "Active Directory did not advertise any domains in the forest.");
+        }
+
+        return domains;
+    }
+
+    /// <summary>Builds safe targets for an OU-only path from discovered forest domains.</summary>
+    private IReadOnlyList<SearchTarget> GetForestSearchTargets(
+        string ouPath,
+        IReadOnlyList<ForestDomain> forestDomains) =>
+        forestDomains
+            .Select(domain => new SearchTarget(
+                GetLdapServer(domain.DnsRoot),
+                ActiveDirectorySearchPath.CombineWithDomain(ouPath, domain.NamingContext)))
+            .ToArray();
+
+    /// <summary>Resolves a domain-specific path only when its domain belongs to the forest.</summary>
+    private SearchTarget GetDomainSearchTarget(
+        string baseDn,
+        IReadOnlyList<ForestDomain> forestDomains)
+    {
+        var domainDnsName = ActiveDirectorySearchPath.GetDomainDnsName(baseDn);
+        var forestDomain = forestDomains.FirstOrDefault(domain =>
+            string.Equals(domain.DnsRoot, domainDnsName, StringComparison.OrdinalIgnoreCase));
+        if (forestDomain is null)
+        {
+            throw new TaggingConfigurationValidationException(
+            [
+                $"BaseDn targets domain '{domainDnsName}', which is not advertised by the " +
+                "configured Active Directory forest."
+            ]);
+        }
+
+        return new SearchTarget(GetLdapServer(forestDomain.DnsRoot), baseDn);
+    }
+
+    /// <summary>Checks a domain-specific path against the exact discovered DNS roots.</summary>
+    internal static bool IsForestDomain(
+        string baseDn,
+        IEnumerable<string> forestDomainDnsRoots)
+    {
+        var domainDnsName = ActiveDirectorySearchPath.GetDomainDnsName(baseDn);
+        return forestDomainDnsRoots.Any(dnsRoot =>
+            string.Equals(dnsRoot, domainDnsName, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>Uses the configured DC when it belongs to the domain being searched.</summary>
@@ -275,4 +351,7 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
 
     /// <summary>Pairs a domain DNS endpoint with its complete LDAP search base.</summary>
     private sealed record SearchTarget(string Server, string BaseDn);
+
+    /// <summary>Represents one domain advertised by an AD forest cross-reference.</summary>
+    private sealed record ForestDomain(string DnsRoot, string NamingContext);
 }

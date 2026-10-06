@@ -4,6 +4,23 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20261006.1] - 2026-10-06
+
+### Added
+
+- Add server-side Active Directory forest validation for rule base DNs before rule persistence.
+- Add online CRL and OCSP validation for CA-issued LDAPS certificates in the installer and runtime, with fail-closed handling when revocation status cannot be confirmed.
+
+### Changed
+
+- Validate Linux LDAPS endpoints before native OpenLDAP binds while retaining explicit self-signed trust-anchor support.
+- Expand management API, installer, operational, OpenAPI, and developer documentation for forest validation and certificate-revocation requirements.
+
+### Security
+
+- Reject rules that target a naming context outside the configured Active Directory forest.
+- Reject revoked CA-issued LDAPS certificates and certificates whose revocation status is unavailable.
+
 ## [0.1.20261005.3] - 2026-10-05
 
 ### Added

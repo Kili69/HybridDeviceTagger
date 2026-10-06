@@ -392,6 +392,10 @@ components:
         baseDn:
           type: string
           maxLength: 2048
+          description: >-
+            Forest-relative OU path or complete DN whose derived DNS domain exactly matches a
+            dnsRoot advertised by the configured Active Directory forest. Foreign domains are
+            rejected before persistence and checked again before LDAP access.
         extensionAttributes:
           type: object
           additionalProperties:

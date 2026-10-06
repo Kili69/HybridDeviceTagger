@@ -77,6 +77,28 @@ public sealed class ManagementApiFunctionTests
     }
 
     [Fact]
+    public async Task ReplaceTaggingConfigurationAsync_RejectsDomainOutsideForest()
+    {
+        var configurationStore = new FakeTaggingConfigurationStore();
+        var function = CreateFunction(
+            configurationStore,
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            ruleValidator: new RejectingActiveDirectoryRuleValidator());
+        var request = AuthenticatedRequest(ManagementApiRoles.RuleAdministrator);
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes(
+            """[{"name":"External","description":"Blocked","baseDn":"OU=Servers,DC=attacker,DC=example","extensionAttributes":{"extensionAttribute1":"Managed"},"entraGroupIds":[],"administrativeUnitIds":[]}]"""));
+
+        var result = await function.ReplaceTaggingConfigurationAsync(
+            request,
+            CancellationToken.None);
+
+        var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Contains("invalid", badRequest.Value?.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Null(configurationStore.LastExpectedETag);
+    }
+
+    [Fact]
     public async Task GetDeviceTaggingStatusAsync_ReturnsNotFoundBeforeFirstRun()
     {
         var function = CreateFunction(new FakeTaggingConfigurationStore(), new FakeStatusStore(), new FakeTraceReader());
@@ -329,9 +351,12 @@ public sealed class ManagementApiFunctionTests
         IPasswordRotationRunner? passwordRotationRunner = null,
         IActiveDirectoryTrustStore? trustStore = null,
         IActiveDirectoryCredentialInitializer? credentialInitializer = null,
-        IManagementApiAuthorizer? authorizer = null) =>
+        IManagementApiAuthorizer? authorizer = null,
+        IActiveDirectoryRuleValidator? ruleValidator = null) =>
         new(
-            new TaggingConfigurationService(configurationStore),
+            new TaggingConfigurationService(
+                configurationStore,
+                ruleValidator ?? new AllowAllActiveDirectoryRuleValidator()),
             statusStore,
             traceReader,
             trustStore ?? new FakeTrustStore(),
@@ -339,6 +364,23 @@ public sealed class ManagementApiFunctionTests
             passwordRotationRunner ?? new FakePasswordRotationRunner(),
             credentialInitializer ?? new FakeCredentialInitializer(),
             authorizer ?? new ApplicationRoleAuthorizer());
+
+    private sealed class AllowAllActiveDirectoryRuleValidator : IActiveDirectoryRuleValidator
+    {
+        public Task ValidateRulesAsync(
+            IReadOnlyList<TaggingRuleOptions> rules,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+    }
+
+    private sealed class RejectingActiveDirectoryRuleValidator : IActiveDirectoryRuleValidator
+    {
+        public Task ValidateRulesAsync(
+            IReadOnlyList<TaggingRuleOptions> rules,
+            CancellationToken cancellationToken) =>
+            throw new TaggingConfigurationValidationException(
+                ["The rule targets a domain outside the configured forest."]);
+    }
 
     private static HttpRequest AuthenticatedRequest(params string[] roles)
     {

@@ -19,7 +19,10 @@
 
 using System.DirectoryServices.Protocols;
 using System.Net;
+using System.Net.Security;
+using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using HybridDeviceTagger.Models;
@@ -127,6 +130,7 @@ public sealed class ActiveDirectoryLdapConnectionFactory
         var trustedCertificates = useSsl ? _trustStore.GetCertificates() : [];
         if (useSsl && !OperatingSystem.IsWindows())
         {
+            ValidateTlsEndpoint(server, port, trustedCertificates);
             ConfigureOpenLdapTrust(trustedCertificates);
         }
         var connection = new LdapConnection(identifier, networkCredential, authenticationType)
@@ -175,13 +179,72 @@ public sealed class ActiveDirectoryLdapConnectionFactory
     {
         using var serverCertificate = new X509Certificate2(
             certificate.Export(X509ContentType.Cert));
-        using var chain = new X509Chain();
+        if (!MatchesDnsName(serverCertificate, server))
+        {
+            return false;
+        }
+
+        using var trustChain = CreateCertificateChain(
+            trustedCertificates,
+            X509RevocationMode.NoCheck);
+        if (!trustChain.Build(serverCertificate))
+        {
+            return false;
+        }
+        if (trustChain.ChainElements.Count == 1)
+        {
+            return true;
+        }
+
+        using var revocationChain = CreateCertificateChain(
+            trustedCertificates,
+            X509RevocationMode.Online);
+        return revocationChain.Build(serverCertificate);
+    }
+
+    private static X509Chain CreateCertificateChain(
+        IReadOnlyCollection<X509Certificate2> trustedCertificates,
+        X509RevocationMode revocationMode)
+    {
+        var chain = new X509Chain();
         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
         chain.ChainPolicy.CustomTrustStore.AddRange(trustedCertificates.ToArray());
-        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        chain.ChainPolicy.RevocationMode = revocationMode;
+        chain.ChainPolicy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
+        chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(10);
         chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
+        return chain;
+    }
 
-        return chain.Build(serverCertificate) && MatchesDnsName(serverCertificate, server);
+    private static void ValidateTlsEndpoint(
+        string server,
+        int port,
+        IReadOnlyCollection<X509Certificate2> trustedCertificates)
+    {
+        using var client = new TcpClient();
+        try
+        {
+            client.Connect(server, port);
+        }
+        catch (SocketException exception)
+        {
+            throw new LdapException(
+                81,
+                $"The LDAPS endpoint '{server}:{port}' is unavailable.",
+                exception);
+        }
+        using var stream = new SslStream(
+            client.GetStream(),
+            leaveInnerStreamOpen: false,
+            (_, certificate, _, _) =>
+                certificate is not null &&
+                ValidateServerCertificate(server, certificate, trustedCertificates));
+        stream.AuthenticateAsClient(server);
+        if (!stream.IsAuthenticated || !stream.IsEncrypted)
+        {
+            throw new AuthenticationException(
+                $"TLS authentication failed for the LDAP endpoint '{server}:{port}'.");
+        }
     }
 
     private static void ConfigureOpenLdapTrust(IReadOnlyCollection<X509Certificate2> certificates)

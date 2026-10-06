@@ -64,6 +64,7 @@ Die skriptbasierte Installation eignet sich für die Erstbereitstellung, Testumg
 - Azure CLI 2.60.0 oder neuer
 - Eine Azure Subscription, in der der Installationsbenutzer Ressourcen bereitstellen, das vorhandene virtuelle Netzwerk einbinden und RBAC-Rollenzuweisungen erstellen darf
 - DNS-Auflösung und Netzwerkzugriff der Function App auf die DNS-Namen aller betroffenen Forest-Domains über LDAPS auf Port 636 oder ersatzweise LDAP auf Port 389
+- Netzwerkzugriff der Function App und des Installationshosts auf die in CA-signierten LDAPS-Zertifikaten veröffentlichten CRL- oder OCSP-Endpunkte; ein nicht bestätigbarer Sperrstatus wird abgelehnt
 - Ein vorhandenes virtuelles Netzwerk mit Subnetzen für die Function-Integration und den privaten Storage-Endpunkt
 - Ein forestweit verwendbares AD-Servicekonto mit Leserechten auf die konfigurierten OUs in allen Domains und dem Recht, das eigene Kennwort zu ändern
 - Die in der [Installationsanleitung](Deployment/README.md#required-permissions) beschriebenen Azure-, Entra- und Active-Directory-Berechtigungen
@@ -281,12 +282,20 @@ Eine Regel besteht aus folgenden Eigenschaften:
 | --- | --- |
 | `name` | Eindeutiger, nicht zwischen Groß- und Kleinschreibung unterscheidender Regelname |
 | `description` | Verständliche Beschreibung des Regelzwecks |
-| `baseDn` | Vollständiger Domain-DN oder OU-Pfad, beispielsweise `OU=Kiosks,OU=Workstations` |
+| `baseDn` | OU-Pfad für alle Forest-Domains oder vollständiger DN einer Domain des konfigurierten AD Forests |
 | `extensionAttributes` | Zu setzende Werte für `extensionAttribute1` bis `extensionAttribute15` |
 | `entraGroupIds` | Object IDs statischer Entra-Sicherheitsgruppen |
 | `administrativeUnitIds` | Object IDs normaler oder eingeschränkter administrativer Einheiten |
 
 Jede Regel benötigt mindestens eine Aktion in `extensionAttributes`, `entraGroupIds` oder `administrativeUnitIds`. Nicht verwendete Zielarten werden als leere Hashtable beziehungsweise leeres Array angegeben.
+
+Vor dem Speichern einer vollständigen Domain-DN-Regel liest die Function die Domain-CrossRefs aus der
+Forest-Konfigurationspartition über den fest konfigurierten Domain Controller. Die aus `DC=` abgeleitete
+DNS-Domain muss exakt einem dort veröffentlichten `dnsRoot` entsprechen. Fremde, ähnlich benannte oder
+nur als Suffix passende Domains werden abgelehnt. OU-Pfade ohne `DC=` sind ebenfalls sicher begrenzt,
+weil die Function ihre LDAP-Ziele ausschließlich aus den ermittelten Forest-Domains erzeugt. Dieselbe
+Prüfung wird vor jedem Tagging-Lauf erneut durchgeführt, sodass auch ältere gespeicherte Regeln oder
+eine Startkonfiguration keinen LDAP-Bind zu einem Ziel außerhalb des Forests auslösen können.
 
 #### Regeln anzeigen
 
@@ -410,6 +419,8 @@ Zuerst muss `Connect-HybridDeviceTagger` ausgeführt werden; alle weiteren Funkt
 ## Azure-Betrieb
 
 Die Function App muss aus ihrem virtuellen Netzwerk den konfigurierten Domain Controller sowie die über die Forest-CrossRefs ermittelten Domain-DNS-Namen auflösen und per LDAPS erreichen, beispielsweise über Site-to-Site-VPN oder ExpressRoute. Optional kann LDAP auf Port 389 als Fallback erreichbar sein. Legen Sie alle Werte aus der Konfiguration als Function-App-Settings an und aktivieren Sie Managed Identity. Weisen Sie deren Service Principal die drei beschriebenen Graph-App-Rollen sowie die Key-Vault- und Blob-Rechte zu. Für Geräte in eingeschränkten administrativen Einheiten benötigt die Managed Identity zusätzlich die vom Installer erzeugte Least-Privilege-Rolle direkt am jeweiligen RMAU-Scope.
+
+Bei CA-signierten LDAPS-Serverzertifikaten prüfen Installer und Function den Sperrstatus online und lehnen die Verbindung ab, wenn das Zertifikat gesperrt ist oder CRL beziehungsweise OCSP nicht innerhalb von zehn Sekunden erreichbar sind. Stellen Sie deshalb sicher, dass der Installationshost und das Function-Integrationssubnetz die im Zertifikat veröffentlichten Sperrinformations-Endpunkte erreichen. Für ein explizit als Vertrauensanker hinterlegtes selbstsigniertes Serverzertifikat entfällt die Sperrprüfung; Vertrauenskette, Servername, Gültigkeitszeitraum und Server-Authentication-EKU werden weiterhin geprüft.
 
 Die Funktion markiert Geräte innerhalb der Ziel-OUs. Verlässt ein Computer alle konfigurierten Ziel-OUs, entfernt der nächste Lauf die noch unveränderten verwalteten Extension Attributes sowie die vom Tagger angelegten Gruppen-, AU- und RMAU-Mitgliedschaften.
 

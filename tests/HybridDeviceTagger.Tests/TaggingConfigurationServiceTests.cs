@@ -9,7 +9,7 @@ public sealed class TaggingConfigurationServiceTests
     public async Task UpsertAsync_AddsFirstRuleToEmptyConfiguration()
     {
         var store = new InMemoryTaggingConfigurationStore([]);
-        var service = new TaggingConfigurationService(store);
+        var service = CreateService(store);
 
         var result = await service.UpsertAsync(
             CreateRule("Servers", "Managed"),
@@ -25,7 +25,7 @@ public sealed class TaggingConfigurationServiceTests
     public async Task UpsertAsync_ReplacesRuleByCaseInsensitiveName()
     {
         var store = new InMemoryTaggingConfigurationStore([CreateRule("Servers", "Old")]);
-        var service = new TaggingConfigurationService(store);
+        var service = CreateService(store);
 
         var result = await service.UpsertAsync(
             CreateRule("servers", "New"),
@@ -41,7 +41,7 @@ public sealed class TaggingConfigurationServiceTests
     public async Task ReplaceAsync_RejectsInvalidRuleWithoutWriting()
     {
         var store = new InMemoryTaggingConfigurationStore([CreateRule("Servers", "Old")]);
-        var service = new TaggingConfigurationService(store);
+        var service = CreateService(store);
 
         var exception = await Assert.ThrowsAsync<TaggingConfigurationValidationException>(() =>
             service.ReplaceAsync(
@@ -56,7 +56,7 @@ public sealed class TaggingConfigurationServiceTests
     public async Task ReplaceAsync_UsesCallerETag()
     {
         var store = new InMemoryTaggingConfigurationStore([CreateRule("Servers", "Old")]);
-        var service = new TaggingConfigurationService(store);
+        var service = CreateService(store);
 
         await service.ReplaceAsync(
             [CreateRule("Servers", "New")],
@@ -70,7 +70,7 @@ public sealed class TaggingConfigurationServiceTests
     public async Task RemoveAsync_RejectsRemovingTheOnlyRule()
     {
         var store = new InMemoryTaggingConfigurationStore([CreateRule("Servers", "Old")]);
-        var service = new TaggingConfigurationService(store);
+        var service = CreateService(store);
 
         var exception = await Assert.ThrowsAsync<TaggingConfigurationValidationException>(() =>
             service.RemoveAsync("servers", CancellationToken.None));
@@ -96,6 +96,27 @@ public sealed class TaggingConfigurationServiceTests
 
         Assert.NotEmpty(exception.Errors);
     }
+
+    [Fact]
+    public async Task ReplaceAsync_ValidatesForestDomainsBeforeWriting()
+    {
+        var store = new InMemoryTaggingConfigurationStore([CreateRule("Servers", "Old")]);
+        var validator = new RecordingRuleValidator(rejectRules: true);
+        var service = CreateService(store, validator);
+
+        await Assert.ThrowsAsync<TaggingConfigurationValidationException>(() =>
+            service.ReplaceAsync(
+                [CreateRule("External", "Blocked")],
+                CancellationToken.None));
+
+        Assert.Equal(1, validator.CallCount);
+        Assert.Equal(0, store.WriteCount);
+    }
+
+    private static TaggingConfigurationService CreateService(
+        ITaggingConfigurationStore store,
+        IActiveDirectoryRuleValidator? validator = null) =>
+        new(store, validator ?? new RecordingRuleValidator());
 
     private static TaggingRuleOptions CreateRule(string name, string value) => new()
     {
@@ -135,6 +156,26 @@ public sealed class TaggingConfigurationServiceTests
             WriteCount++;
             _snapshot = new TaggingConfigurationSnapshot(rules, "2", DateTimeOffset.UtcNow, "test");
             return Task.FromResult(_snapshot);
+        }
+    }
+
+    private sealed class RecordingRuleValidator(bool rejectRules = false)
+        : IActiveDirectoryRuleValidator
+    {
+        public int CallCount { get; private set; }
+
+        public Task ValidateRulesAsync(
+            IReadOnlyList<TaggingRuleOptions> rules,
+            CancellationToken cancellationToken)
+        {
+            CallCount++;
+            if (rejectRules)
+            {
+                throw new TaggingConfigurationValidationException(
+                    ["The rule targets a domain outside the configured forest."]);
+            }
+
+            return Task.CompletedTask;
         }
     }
 }
