@@ -1,4 +1,4 @@
-# Project-Version: 0.1.20261006.2
+# Project-Version: 0.1.20261008.1
 # Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
@@ -21,7 +21,7 @@ SPDX-License-Identifier: Apache-2.0
 
 @{
     RootModule = 'HybridDeviceTagger.Management.psm1'
-    ModuleVersion = '0.1.20261006.2'
+    ModuleVersion = '0.1.20261008.1'
     GUID = 'c86eeec6-c5ee-44ea-b06f-86d7a0fd4a3f'
     Author = 'Andreas Lucas (aka Kili)'
     CompanyName = 'Andreas Lucas'

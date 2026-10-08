@@ -4,6 +4,12 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20261008.1] - 2026-10-08
+
+### Security
+
+- Upgrade xUnit from 2.5.3 to 2.9.3, removing transitive vulnerable versions of `System.Net.Http` and `System.Text.RegularExpressions` from the test dependency graph.
+
 ## [0.1.20261006.2] - 2026-10-06
 
 ### Changed
