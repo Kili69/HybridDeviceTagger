@@ -7,6 +7,7 @@ Status: Ready for Validation
 - Interactive installation asks whether to reuse an existing Key Vault or create a new one.
 - Existing-vault mode requests and validates the vault name, resource group, and subscription.
 - New-vault mode creates the vault in the Function App resource group and subscription, with Azure RBAC, soft delete, purge protection, disabled public access, a private endpoint in the configured private-endpoint subnet, and private DNS integration.
+- Storage deployment creates a Blob private endpoint and zone group, reuses an existing `privatelink.blob.core.windows.net` zone linked to the selected VNet, or creates and links the zone in the Function App resource group.
 - Noninteractive installation uses an explicit switch to select new-vault mode; existing-vault mode remains the default.
 - The installer writes and validates the current AD credential only after a newly selected vault has been deployed and the installation identity has access.
 - Bicep, PowerShell, documentation, and generated installation-package contents will be validated without deploying resources.
@@ -60,9 +61,8 @@ Status: Ready for Validation
 - AD credentials are entered through local PowerShell credential dialogs and are not passed to ARM.
 - Key Vault uses RBAC, soft delete, purge protection, disabled public access, and private networking.
 - `kili@bloedgelaber.de` temporarily has `Key Vault Secrets Officer` on the dedicated vault for bootstrap; remove this assignment after deployment verification.
-- AD account creation or password reset requires separate explicit confirmation. The installer prefers LDAPS and uses the Active Directory PowerShell module over Active Directory Web Services when LDAPS is unavailable and LDAP fallback was approved.
-- Function read and bind fallback uses Negotiate authentication with LDAP signing and sealing on port 389. Automatic password rotation remains deferred until LDAPS is available.
-- `pwdLastSet=-1` prevents password change at first logon.
+- The AD service account must exist before installation; the installer validates it early and never creates it or performs an administrative password reset.
+- The installer and Linux Flex Consumption Function discover domain controllers through AD DNS SRV records, prefer LDAPS, and use LDAP with StartTLS as the secure fallback.
 
 ## 6. Execution Gates
 

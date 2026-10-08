@@ -6,6 +6,22 @@ namespace HybridDeviceTagger.Tests;
 
 public sealed class ActiveDirectoryLdapConnectionFactoryTests
 {
+    [Theory]
+    [InlineData(0, false, true)]
+    [InlineData(0, true, false)]
+    [InlineData(1, false, true)]
+    [InlineData(1, true, false)]
+    public void UsesNovellClient_ForLinuxTlsTransports(
+        int transportValue,
+        bool isWindows,
+        bool expected)
+    {
+        var transport = (ActiveDirectoryLdapTransport)transportValue;
+        Assert.Equal(
+            expected,
+            ActiveDirectoryLdapConnectionFactory.UsesNovellClient(transport, isWindows));
+    }
+
     [Fact]
     public void ValidateServerCertificate_AcceptsTrustedSelfSignedCertificate()
     {

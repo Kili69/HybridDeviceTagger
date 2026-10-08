@@ -35,6 +35,39 @@ public sealed class BlobActiveDirectoryTrustStoreTests : IDisposable
         Assert.Equal(_fallbackCertificate.Thumbprint, certificate.Thumbprint);
     }
 
+    [Fact]
+    public async Task GetSnapshotAsync_WithoutPackagedCertificate_ReturnsEmptySnapshot()
+    {
+        var store = new BlobActiveDirectoryTrustStore(
+            CreateBlobClient().Object,
+            Microsoft.Extensions.Options.Options.Create(
+                new ActiveDirectoryOptions { TrustedCertificatePath = string.Empty }));
+
+        var snapshot = await store.GetSnapshotAsync(CancellationToken.None);
+
+        Assert.Equal("none", snapshot.Source);
+        Assert.Empty(snapshot.Certificates);
+        Assert.Empty(store.GetCertificates());
+    }
+
+    [Fact]
+    public async Task AddAsync_WithoutPackagedCertificate_PersistsFirstCertificate()
+    {
+        using var addedCertificate = CreateCertificate("Added Root");
+        var store = new BlobActiveDirectoryTrustStore(
+            CreateBlobClient().Object,
+            Microsoft.Extensions.Options.Options.Create(
+                new ActiveDirectoryOptions { TrustedCertificatePath = null }));
+
+        var snapshot = await store.AddAsync(
+            addedCertificate.Export(X509ContentType.Cert),
+            null,
+            CancellationToken.None);
+
+        Assert.Equal("blob", snapshot.Source);
+        Assert.Equal(addedCertificate.Thumbprint, Assert.Single(snapshot.Certificates).Thumbprint);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

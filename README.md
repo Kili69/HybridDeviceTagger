@@ -63,7 +63,7 @@ Die skriptbasierte Installation eignet sich für die Erstbereitstellung, Testumg
 - PowerShell 7.2 oder neuer mit dem ActiveDirectory-Modul
 - Azure CLI 2.60.0 oder neuer
 - Eine Azure Subscription, in der der Installationsbenutzer Ressourcen bereitstellen, das vorhandene virtuelle Netzwerk einbinden und RBAC-Rollenzuweisungen erstellen darf
-- DNS-Auflösung und Netzwerkzugriff der Function App auf die DNS-Namen aller betroffenen Forest-Domains über LDAPS auf Port 636 oder ersatzweise LDAP auf Port 389
+- DNS-SRV-Auflösung der Function App für `_ldap._tcp.dc._msdcs` in allen betroffenen Forest-Domains sowie Netzwerkzugriff auf die gefundenen Domain Controller über LDAPS auf Port 636 oder LDAP mit StartTLS auf Port 389
 - Netzwerkzugriff der Function App und des Installationshosts auf die in CA-signierten LDAPS-Zertifikaten veröffentlichten CRL- oder OCSP-Endpunkte; ein nicht bestätigbarer Sperrstatus wird abgelehnt
 - Ein vorhandenes virtuelles Netzwerk mit Subnetzen für die Function-Integration und den privaten Storage-Endpunkt
 - Ein forestweit verwendbares AD-Servicekonto mit Leserechten auf die konfigurierten OUs in allen Domains und dem Recht, das eigene Kennwort zu ändern
@@ -82,11 +82,10 @@ Anschließend den Installer interaktiv in drei Schritten ausführen. Er fragt al
 - **Azure-Ziel:** Subscription, Ressourcengruppe, Region sowie Namen für Function App und Storage Account
 - **Netzwerk:** Subscription und Ressourcengruppe des vorhandenen VNet, VNet-Name, Function-Integrationssubnetz und separates Private-Endpoint-Subnetz
 - **Key Vault:** Auswahl zwischen einem vorhandenen Vault und einem neuen privaten Vault; bei einem vorhandenen Vault zusätzlich Subscription, Ressourcengruppe und Name
-- **Active Directory:** Forest-DNS-Name, optional ein bestimmter Domain Controller, UPN und Distinguished Name des Servicekontos sowie dessen Kennwort über einen geschützten Anmeldedialog
-- **Erste Tagging-Regel:** Name, Beschreibung, Basis-DN der OU und Wert für `extensionAttribute1`
-- **Management API:** Client-ID der vorhandenen Entra-App-Registrierung und die Objekt-ID des berechtigten Benutzers, der Gruppe oder des Service Principals
+- **Active Directory:** Forest-DNS-Name, optional ein bestimmter Domain Controller, UPN des Servicekontos sowie dessen Kennwort über einen geschützten Anmeldedialog; der Distinguished Name wird automatisch ermittelt
+- **Management API:** Bei einer Erstinstallation erstellt der Installer die single-tenant Entra-App-Registrierung und Enterprise Application automatisch. Bei einem Update fragt er nach der Client-ID der vorhandenen Registrierung. Die berechtigten Principals werden weiterhin über ihre Objekt-IDs zugewiesen.
 
-Ist LDAPS nicht verfügbar, fragt der Installer vor der Verwendung des abgesicherten LDAP-Fallbacks nach einer Bestätigung. Regeln mit eingeschränkten administrativen Einheiten erfordern ebenfalls eine ausdrückliche Freigabe. Vor der eigentlichen Installation zeigt der Installer eine Zusammenfassung und fordert eine abschließende Bestätigung an.
+Ist LDAPS nicht verfügbar, verwendet der Installer automatisch LDAP mit StartTLS; Anmeldedaten werden niemals über eine ungeschützte LDAP-Verbindung übertragen. Vor der eigentlichen Installation zeigt der Installer eine Zusammenfassung und fordert eine abschließende Bestätigung an.
 
 ```powershell
 ./Deployment/Install-HybridDeviceTagger.ps1 -ValidateOnly
@@ -94,7 +93,7 @@ Ist LDAPS nicht verfügbar, fragt der Installer vor der Verwendung des abgesiche
 ./Deployment/Install-HybridDeviceTagger.ps1
 ```
 
-`-ValidateOnly` prüft die Voraussetzungen ohne Änderungen. `-WhatIf` zeigt die geplanten Azure-Änderungen. Erst der dritte Aufruf führt die Installation nach Bestätigung aus.
+`-ValidateOnly` prüft die Voraussetzungen ohne Änderungen. `-WhatIf` zeigt die geplanten Azure-Änderungen. Dabei wird eine für die Erstinstallation vorgesehene App-Registrierung nur geplant und noch nicht erstellt. Erst der dritte Aufruf erstellt sie nach der abschließenden Bestätigung und führt die Installation aus.
 
 Bei jedem der drei interaktiven Aufrufe werden die Angaben erneut abgefragt. Für eine wiederholbare Ausführung sollten die Werte deshalb in einem PowerShell-Splat vorbereitet werden.
 
@@ -129,7 +128,7 @@ Die Pipeline-Installation verwendet denselben PowerShell-Installer im vollständ
 - .NET 8 SDK, wenn das Installationspaket innerhalb der Pipeline erzeugt wird
 - Eine nicht interaktive Azure-Anmeldung, vorzugsweise über Workload Identity Federation; alternativ kann ein Service Principal verwendet werden
 - Dieselben Azure-, Entra-, Netzwerk- und Active-Directory-Berechtigungen wie bei der skriptbasierten Installation
-- Geschützte Pipeline-Secrets für das AD-Servicekonto und gegebenenfalls das separate AD-Provisioning-Credential
+- Ein geschütztes Pipeline-Secret für das bereits vorhandene AD-Servicekonto
 - Vollständig gesetzte Installer-Parameter; die Pipeline darf nicht von interaktiven Eingabeaufforderungen abhängen
 
 Ein von einem Pipeline-Anbieter gehosteter Runner kann nur verwendet werden, wenn er die privaten DNS-Zonen und Domain Controller sicher erreichen kann. Für typische Hybridumgebungen ist daher ein selbst gehosteter Runner im verbundenen Netzwerk erforderlich.
@@ -141,9 +140,9 @@ Eine plattformneutrale Pipeline sollte die folgenden Stufen verwenden:
 1. **Build und Tests:** Solution im Release-Modus bauen und testen.
 2. **Paket erstellen:** Mit `scripts/New-InstallationPackage.ps1` das vollständige Installationsarchiv erzeugen und als Pipeline-Artefakt veröffentlichen.
 3. **Authentifizieren:** Azure CLI noninteractive mit der Pipeline-Identität anmelden.
-4. **Validieren:** Installer mit allen Parametern, `-ValidateOnly` und `-Confirm:$false` ausführen.
-5. **What-if:** Denselben Parametersatz mit `-WhatIf` und `-Confirm:$false` ausführen.
-6. **Bereitstellen:** Nach einer optionalen Freigabe denselben Parametersatz mit `-Confirm:$false` ausführen.
+4. **Validieren:** Installer mit allen Parametern, `-ValidateOnly` und `-Force` ausführen.
+5. **What-if:** Denselben Parametersatz mit `-WhatIf` und `-Force` ausführen.
+6. **Bereitstellen:** Nach einer optionalen Pipeline-Freigabe denselben Parametersatz mit `-Force` ausführen.
 
 ```powershell
 # Build-Stufe
@@ -159,17 +158,17 @@ $parameters = @{
 }
 
 $securePassword = ConvertTo-SecureString $env:HDT_AD_PASSWORD -AsPlainText -Force
-$parameters.ActiveDirectoryCredential = [pscredential]::new(
+$parameters.ADServiceAccountCredential = [pscredential]::new(
     $env:HDT_AD_USERNAME,
     $securePassword
 )
 
-./Deployment/Install-HybridDeviceTagger.ps1 @parameters -ValidateOnly -Confirm:$false
-./Deployment/Install-HybridDeviceTagger.ps1 @parameters -WhatIf -Confirm:$false
-./Deployment/Install-HybridDeviceTagger.ps1 @parameters -Confirm:$false
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters -ValidateOnly -Force
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters -WhatIf -Force
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters -Force
 ```
 
-Pipeline-Secrets dürfen weder in Parameterdateien eingecheckt noch in Logs ausgegeben werden. Wenn der LDAP-Fallback in einer Noninteractive-Ausführung ausdrücklich erlaubt werden soll, muss `AllowLdapFallback = $true` im Parametersatz gesetzt werden. Mit `-SkipCodeDeployment` können Infrastruktur- und Anwendungsdeployment in getrennte Pipeline-Stufen aufgeteilt werden.
+Pipeline-Secrets dürfen weder in Parameterdateien eingecheckt noch in Logs ausgegeben werden. `-Force` deaktiviert sämtliche Installer-Rückfragen und bricht bei fehlenden Angaben ab. Die Linux-basierte Flex-Consumption-Function verwendet ausschließlich TLS-geschützte LDAP-Verbindungen: bevorzugt LDAPS, ersatzweise StartTLS. `ActiveDirectoryTrustedCertificatePath` bleibt für private Zertifizierungsstellen erforderlich. Mit `-SkipCodeDeployment` können Infrastruktur- und Anwendungsdeployment in getrennte Pipeline-Stufen aufgeteilt werden.
 
 ### Gemeinsame Konfiguration
 
@@ -196,9 +195,9 @@ Kennwortadministratoren benötigen keinen direkten Key-Vault-Zugriff. Nach einer
 
 #### Active Directory und Tagging-Regeln
 
-Beide Installationsarten verwenden dasselbe AD-Servicekonto, dieselben Verbindungs- und Zertifikatseinstellungen sowie dieselben Tagging-Regeln. Das Servicekonto muss forestweit die benötigten Computerobjekte lesen und sein eigenes Kennwort ändern dürfen. Kennwortänderungen erfolgen ausschließlich über LDAPS.
+Beide Installationsarten verwenden dasselbe AD-Servicekonto, dieselben Verbindungs- und Zertifikatseinstellungen sowie dieselben Tagging-Regeln. Das Servicekonto muss forestweit die benötigten Computerobjekte lesen und sein eigenes Kennwort ändern dürfen. Kennwortänderungen erfolgen ausschließlich über LDAPS. Der Installer-Parameter `ADServiceAccountCredential` enthält UPN und Kennwort für den LDAP-Bind; der UPN wird aus `ADServiceAccountCredential.UserName` abgeleitet. `ADServiceAccount` und `ADServiceAccountCredential` schließen sich gegenseitig aus und dürfen nicht gemeinsam angegeben werden.
 
-Tagging-Regeln können bereits als `TaggingRules` an den Installer übergeben oder nach der Installation über das PowerShell-Management-Modul gepflegt werden. Das initiale AD-Kennwort kann ebenfalls während der Installation oder anschließend mit `Initialize-HybridDeviceTaggerActiveDirectoryCredential` gesetzt werden. Die folgenden Abschnitte beschreiben die gemeinsame Administration nach beiden Installationsarten.
+Der Installer richtet zunächst ausschließlich die Anwendung ein und erstellt keine Tagging-Regeln. Nach erfolgreicher Installation weist er auf `Add-HybridDeviceTaggerRule` im PowerShell-Management-Modul hin. Das initiale AD-Kennwort kann während der Installation oder anschließend mit `Initialize-HybridDeviceTaggerActiveDirectoryCredential` gesetzt werden. Die folgenden Abschnitte beschreiben die gemeinsame Administration nach beiden Installationsarten.
 
 #### PowerShell-Management-Modul nachinstallieren
 
@@ -379,9 +378,7 @@ Initialize-HybridDeviceTaggerActiveDirectoryCredential -Password $password -Conf
 
 Die Function validiert das Kennwort durch einen AD-Bind und speichert es anschließend mit ihrer Managed Identity als Secret `hybrid-device-tagger-ad-password-current`. Ein bereits vorhandenes Current-Secret wird nicht überschrieben. `next` wird ausschließlich von der Rotation erstellt.
 
-Das Laufzeitkonto bleibt reguläres Mitglied von `Domain Users`. Zusätzlich müssen auf dem Konto `SELF / Change Password` erlaubt und `User cannot change password` deaktiviert sein. Das Laufzeitkonto selbst benötigt weder administrative AD-Gruppen noch Reset-Password-Rechte; nur das getrennte Provisioning-Credential benötigt die Rechte zum Erstellen beziehungsweise Zurücksetzen.
-
-Bei einer echten Installation kann der Installer das Servicekonto mit einem separaten AD-Provisioning-Credential vorbereiten. Fehlt das Konto, fragt er vor dem Erstellen und Aktivieren nach; ist es vorhanden, bietet er ein zufälliges komplexes Kennwort oder eine sichere manuelle Eingabe für den administrativen Reset an. Das Zielkennwort wird direkt als Current-Secret synchronisiert und nicht angezeigt. Der Installer bevorzugt LDAPS. Ist LDAPS nicht verfügbar und wurde der LDAP-Fallback ausdrücklich genehmigt, verwendet der Bootstrap das installierte Active-Directory-PowerShell-Modul über Active Directory Web Services gegen den konfigurierten Server. Nach Erstellung oder Reset bleibt **Benutzer muss Kennwort bei der nächsten Anmeldung ändern** deaktiviert. `-ValidateOnly` und `-WhatIf` verändern das AD-Konto nicht.
+Das Laufzeitkonto muss vor der Installation existieren und bleibt reguläres Mitglied von `Domain Users`. Zusätzlich müssen auf dem Konto `SELF / Change Password` erlaubt, `User cannot change password` deaktiviert und **Benutzer muss Kennwort bei der nächsten Anmeldung ändern** ausgeschaltet sein. Das Laufzeitkonto benötigt weder administrative AD-Gruppen noch Reset-Password-Rechte. Der Installer erstellt das Konto nicht und setzt dessen Kennwort nicht administrativ zurück.
 
 ### PowerShell-Management-Modul
 
@@ -418,9 +415,11 @@ Zuerst muss `Connect-HybridDeviceTagger` ausgeführt werden; alle weiteren Funkt
 
 ## Azure-Betrieb
 
-Die Function App muss aus ihrem virtuellen Netzwerk den konfigurierten Domain Controller sowie die über die Forest-CrossRefs ermittelten Domain-DNS-Namen auflösen und per LDAPS erreichen, beispielsweise über Site-to-Site-VPN oder ExpressRoute. Optional kann LDAP auf Port 389 als Fallback erreichbar sein. Legen Sie alle Werte aus der Konfiguration als Function-App-Settings an und aktivieren Sie Managed Identity. Weisen Sie deren Service Principal die drei beschriebenen Graph-App-Rollen sowie die Key-Vault- und Blob-Rechte zu. Für Geräte in eingeschränkten administrativen Einheiten benötigt die Managed Identity zusätzlich die vom Installer erzeugte Least-Privilege-Rolle direkt am jeweiligen RMAU-Scope.
+Die Function App muss aus ihrem virtuellen Netzwerk die AD-SRV-Records der konfigurierten Forest-Domäne sowie der über Forest-CrossRefs ermittelten Domains auflösen können. Sie verbindet sich mit den gefundenen Domain Controllern bevorzugt per LDAPS auf Port 636 und ersatzweise per LDAP mit StartTLS auf Port 389, beispielsweise über Site-to-Site-VPN oder ExpressRoute. Legen Sie alle Werte aus der Konfiguration als Function-App-Settings an und aktivieren Sie Managed Identity. Weisen Sie deren Service Principal die drei beschriebenen Graph-App-Rollen sowie die Key-Vault- und Blob-Rechte zu. Für Geräte in eingeschränkten administrativen Einheiten benötigt die Managed Identity zusätzlich die vom Installer erzeugte Least-Privilege-Rolle direkt am jeweiligen RMAU-Scope.
 
 Bei CA-signierten LDAPS-Serverzertifikaten prüfen Installer und Function den Sperrstatus online und lehnen die Verbindung ab, wenn das Zertifikat gesperrt ist oder CRL beziehungsweise OCSP nicht innerhalb von zehn Sekunden erreichbar sind. Stellen Sie deshalb sicher, dass der Installationshost und das Function-Integrationssubnetz die im Zertifikat veröffentlichten Sperrinformations-Endpunkte erreichen. Für ein explizit als Vertrauensanker hinterlegtes selbstsigniertes Serverzertifikat entfällt die Sperrprüfung; Vertrauenskette, Servername, Gültigkeitszeitraum und Server-Authentication-EKU werden weiterhin geprüft.
+
+Unter Linux verwendet die Function für LDAPS und StartTLS `Novell.Directory.Ldap.NETStandard`. Zertifikatprüfung, Bind, Suche und Kennwortänderung laufen dadurch über dieselbe TLS-Verbindung. Ein unverschlüsselter Basic Bind wird nicht unterstützt.
 
 Die Funktion markiert Geräte innerhalb der Ziel-OUs. Verlässt ein Computer alle konfigurierten Ziel-OUs, entfernt der nächste Lauf die noch unveränderten verwalteten Extension Attributes sowie die vom Tagger angelegten Gruppen-, AU- und RMAU-Mitgliedschaften.
 

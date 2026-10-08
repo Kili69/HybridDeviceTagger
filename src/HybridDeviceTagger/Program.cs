@@ -29,6 +29,7 @@ using HybridDeviceTagger.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Builder;
 using Microsoft.Azure.Functions.Worker.OpenTelemetry;
+using DnsClient;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using OpenTelemetry;
@@ -96,6 +97,8 @@ builder.Services.AddSingleton(serviceProvider =>
     return new SecretClient(new Uri(options.VaultUri), credential);
 });
 builder.Services.AddSingleton<IActiveDirectoryCredentialStore, KeyVaultActiveDirectoryCredentialStore>();
+builder.Services.AddSingleton<ILookupClient>(_ => new LookupClient());
+builder.Services.AddSingleton<IActiveDirectoryServerResolver, ActiveDirectoryServerResolver>();
 builder.Services.AddSingleton<ActiveDirectoryLdapConnectionFactory>();
 builder.Services.AddSingleton<LdapActiveDirectoryDeviceSource>();
 builder.Services.AddSingleton<IActiveDirectoryDeviceSource>(serviceProvider =>

@@ -1,6 +1,6 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20261005.3
-# Author: andreas.lucas@outlook.com (aka Kili)
+# Project-Version: 0.1.20261006.2
+# Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
 Copyright 2026 Andreas Lucas
@@ -652,7 +652,9 @@ function Add-HybridDeviceTaggerRule {
         $rulesProperty = $null
         if ($Rule -is [System.Collections.IDictionary]) {
             # Hashtable keys do not participate in PSObject property lookup, so inspect keys explicitly.
-            $rulesKey = @($Rule.Keys | Where-Object { [string]$_ -ieq 'Rules' })[0]
+            $rulesKey = $Rule.Keys |
+                Where-Object { [string]$_ -ieq 'Rules' } |
+                Select-Object -First 1
             if ($null -ne $rulesKey) {
                 $rulesProperty = $Rule[$rulesKey]
             }

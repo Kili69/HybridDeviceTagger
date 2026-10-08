@@ -4,6 +4,43 @@ All notable changes to HybridDeviceTagger are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
+## [0.1.20261006.2] - 2026-10-06
+
+### Changed
+
+- Make `ADServiceAccount` and `ADServiceAccountCredential` mutually exclusive installer parameters, report conflicts with actionable usage guidance, and derive the bind UPN from the credential when it is supplied.
+- Install the application without requesting an initial tagging ruleset and display deployment-specific management-module guidance for adding the first rule after deployment.
+- Invoke the Windows Azure CLI Python entry point directly so Microsoft Graph URLs containing multiple query parameters are not split by `az.cmd`, and pass JSON request bodies without obsolete batch-shell escaping.
+- Compare management API application-role member types without relying on scalar-sensitive PowerShell `.Count` behavior.
+- Suppress inherited confirmation prompts for transcript and temporary package operations so `-Confirm` produces only the installer-level approval prompt.
+- Extract the Function App package through the .NET ZIP API so package directories such as `.azurefunctions` do not trigger nested confirmation prompts.
+- Create or reuse the Blob Storage private DNS zone and attach it to the Storage private endpoint so Flex Consumption package deployment works while Storage public network access remains disabled.
+- Reuse the management API client ID stored in an existing Function App so noninteractive retries can resume after a partial deployment without requiring an additional parameter.
+- Route Function content traffic through VNet integration and fail before code upload with actionable conditional-forwarder guidance when a custom VNet DNS server cannot resolve the private Storage endpoint.
+- Ignore CNAME and other non-address DNS response records during private-endpoint validation so PowerShell StrictMode does not reject valid multi-record responses.
+- Expose a least-privilege delegated management API scope and preauthorize Microsoft Azure CLI for installer token acquisition without a separate consent login.
+- Support LDAP-fallback deployments without a packaged LDAPS trust certificate and report nontransient credential-initialization HTTP failures immediately with their server response.
+- Extract HTTP status and error details defensively across PowerShell REST error shapes so StrictMode does not hide Function API failures.
+- Stop before Azure deployment when only the Windows installer can use signed-and-sealed LDAP fallback, because the Linux Flex Consumption runtime requires trusted LDAPS.
+- Resolve and validate the existing AD service account through the configured LDAPS endpoint instead of ADWS so valid runtime credentials are not rejected by unrelated ADWS authentication behavior.
+- Defer required distinguished-name validation until after automatic LDAPS account resolution while continuing to require it when directory checks are explicitly skipped.
+- Discover domain controllers inside the Function through Active Directory DNS SRV records, prefer LDAPS, and securely fall back to LDAP with StartTLS instead of requiring a static server or Windows-only Negotiate fallback.
+- Try each DNS-SRV-discovered domain controller in order when installer validation encounters an unavailable LDAPS or StartTLS endpoint.
+- Use the packaged Novell LDAP client for installer LDAPS, StartTLS, bind, and search operations so private trust anchors work consistently without native Windows Schannel failures.
+- Report a missing or mismatched LDAP trust anchor explicitly instead of exposing the LDAP client's remote-certificate callback error.
+- Version the embedded installer certificate validator type so a long-running PowerShell session cannot retain an older implementation without the Novell TLS callback.
+- Translate Active Directory LDAP bind diagnostic codes into actionable account-state errors such as expired passwords, disabled accounts, required password changes, and lockouts.
+- Ignore AD subordinate-partition referrals after reading results from an explicitly selected naming context instead of following them to unvalidated LDAP targets.
+- Apply bounded Azure CLI execution times, including a five-minute Bicep validation timeout that terminates the stalled process tree with an actionable error.
+- Compile Bicep locally for every run and avoid redundant full-provider ARM validation before What-If or deployment; `-ValidateOnly` uses bounded template-level ARM validation.
+- Skip Microsoft Graph application PATCH requests when the delegated management scope and Azure CLI preauthorization are already configured, allowing idempotent retries without application-owner write access.
+- Pass a locally compiled ARM JSON template to Validate, What-If, and Create so Azure CLI never re-enters the hanging internal Bicep compilation path before submitting to ARM.
+- Submit ARM creation with template-level validation and `--no-wait`, then poll the named deployment with regular progress output instead of blocking inside Azure CLI provider prevalidation.
+- Submit compiled templates directly through the ARM Deployments REST API with a protected Azure CLI token, bypassing the repeatedly hanging `az deployment group create` client path while retaining named-deployment polling.
+- Verify supplied deployment parameters against the locally compiled ARM template before submission so mixed installer/template versions fail locally with actionable package guidance.
+- Handle plain rule hashtables safely in `Add-HybridDeviceTaggerRule` instead of indexing an empty `Rules`-key match under strict mode.
+- Add `-Force` for fully noninteractive installations that skip central approval, disable installer prompts, and fail when required information or consent is missing.
+
 ## [0.1.20261006.1] - 2026-10-06
 
 ### Added

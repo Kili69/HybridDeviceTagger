@@ -59,13 +59,13 @@ The Azure clients, LDAP adapters, credential store, dynamic rule provider, opera
 
 `ManagementApiFunction` exposes twelve HTTP operations for rule management, trusted LDAPS certificate management, both latest-run statuses, streamed latest-trace download, immediate tagging, and forced password rotation. The HTTP triggers are anonymous at the Functions host layer because App Service Easy Auth authenticates and validates the Entra token first. `ManagementApiAuthorizer` requires one valid AAD `X-MS-CLIENT-PRINCIPAL` header and first evaluates its `roles` claims. For rule and password administration it additionally queries effective Azure RBAC assignments at the Function App scope. Missing authentication returns HTTP `401`; an authenticated principal without an accepted application role or RBAC assignment receives HTTP `403`.
 
-The API app registration defines `HybridDeviceTagger.Reader`, `HybridDeviceTagger.RuleAdministrator`, `HybridDeviceTagger.TaggingOperator`, `HybridDeviceTagger.PasswordRotationAdministrator`, and `HybridDeviceTagger.CertificateAdministrator`. The installer assigns approved users, groups, or service principals. `appRoleAssignmentRequired` remains disabled so Function App Owners and Contributors can obtain an API token. Effective direct, transitive-group, or inherited `Owner` and `Contributor` assignments grant rule and password administration only. The Function managed identity receives `Reader` on its own Function App to perform this runtime ARM lookup.
+The API app registration defines `HybridDeviceTagger.Reader`, `HybridDeviceTagger.RuleAdministrator`, `HybridDeviceTagger.TaggingOperator`, `HybridDeviceTagger.PasswordRotationAdministrator`, and `HybridDeviceTagger.CertificateAdministrator`. For a new Function App, the installer creates the single-tenant registration, identifier URI, service principal, and roles automatically after approval; updates reuse an explicitly supplied existing client ID. The installer assigns approved users, groups, or service principals. `appRoleAssignmentRequired` remains disabled so Function App Owners and Contributors can obtain an API token. Effective direct, transitive-group, or inherited `Owner` and `Contributor` assignments grant rule and password administration only. The Function managed identity receives `Reader` on its own Function App to perform this runtime ARM lookup.
 
 The two action endpoints reuse `IDeviceTaggingRunner` and `IPasswordRotationRunner`, so timer and HTTP execution share orchestration, status persistence, trace behavior, and non-blocking operation locks. Forced rotation bypasses only the password-age gate. Credential verification, secure LDAP, next-secret staging, changed-credential validation, and promotion remain mandatory. A concurrent invocation returns HTTP `409`.
 
 `BlobTaggingConfigurationStore` stores `tagging-configuration.json` in the private `run-traces` container. Before its first API mutation, `OptionsTaggingRuleProvider` supplies the validated `Tagging__RulesJson` startup fallback. Mutations normalize and validate the complete result and use Blob ETags. API clients can send the ETag returned by `GET` in `If-Match`; a stale write returns HTTP `409`.
 
-`BlobActiveDirectoryTrustStore` stores public DER certificates as base64 in `run-traces/active-directory-trust-certificates.json`. It exposes metadata only through the API, uses the packaged certificate before the first mutation, rejects an empty resulting collection, and applies Blob ETags to concurrent changes. `ActiveDirectoryLdapConnectionFactory` reads the current set for every new connection. Windows chain validation adds every certificate to `CustomTrustStore`; Linux writes an atomically replaced PEM bundle for OpenLDAP.
+`BlobActiveDirectoryTrustStore` stores public DER certificates as base64 in `run-traces/active-directory-trust-certificates.json`. It exposes metadata only through the API, uses the packaged certificate before the first mutation, rejects an empty resulting collection, and applies Blob ETags to concurrent changes. `ActiveDirectoryLdapConnectionFactory` reads the current set for every new connection. Windows validates through `System.DirectoryServices.Protocols`. Linux LDAPS and StartTLS use `Novell.Directory.Ldap.NETStandard`, whose certificate callback validates custom trust, DNS name, server-authentication EKU, and online revocation on the same TLS session that carries the bind.
 
 `BlobOperationStatusStore` writes separate JSON documents for device tagging and password rotation. Timer entry points record `Running`, then `Succeeded` or a sanitized `Failed` state. Password status preserves the timestamp of the last actual password change across checks that do not rotate. Status persistence failures are warnings and do not fail the directory workflow.
 
@@ -173,7 +173,7 @@ Implements age-based rotation and interrupted-run recovery. It first tests `curr
 
 #### `ActiveDirectoryLdapConnectionFactory`
 
-Creates authenticated LDAP v3 connections with a 30-second timeout. Normal connections try Basic authentication over LDAPS first. For connection-availability errors only, and only when configured, they fall back to Negotiate authentication on LDAP with signing and sealing enabled. Authentication errors do not trigger fallback. `CreateSecureBoundConnection` never falls back and is used for password changes.
+Resolves domain controllers from `_ldap._tcp.dc._msdcs.<domain>` DNS SRV records and creates authenticated LDAP v3 connections with a 30-second timeout. Connections try Basic authentication over LDAPS first and, for connection-availability errors only, fall back to Basic authentication after upgrading LDAP with StartTLS. Authentication errors do not trigger transport fallback. Both transports support password changes because credentials and LDAP operations remain inside validated TLS.
 
 The caller owns the returned connection. A failed bind disposes the connection before rethrowing the error.
 
@@ -310,7 +310,7 @@ Combines `PasswordRotationOutcome` with the known current password age in days. 
 
 - Application credentials are obtained through `DefaultAzureCredential`; no Azure credential is stored in application settings.
 - Active Directory passwords are read from Key Vault and held only in memory.
-- LDAP fallback uses Negotiate with signing and sealing and is limited to bind/read paths. Password modification is LDAPS-only.
+- LDAP fallback uses StartTLS and supports the same bind, read, and password-modification operations as LDAPS.
 - A generated password is recoverable from `next` before Active Directory is modified.
 - Non-hybrid Entra devices are never patched.
 - Conflicting tagging rules fail explicitly instead of producing order-dependent updates.
@@ -487,11 +487,11 @@ Kennwortänderungen über `unicodePwd` und die anschließende Validierung bleibe
 | --- | --- | --- |
 | `TaggingSchedule` | NCRONTAB-Ausdruck mit Sekundenfeld | `0 */15 * * * *` |
 | `PasswordRotationSchedule` | Tägliche Rotationsprüfung, standardmäßig 02:30 UTC | `0 30 2 * * *` |
-| `ActiveDirectory__Server` | DNS-Name eines Domain Controllers im Forest | muss angepasst werden |
+| `ActiveDirectory__Domain` | AD-DNS-Domäne für die SRV-basierte Domain-Controller-Ermittlung | muss angepasst werden |
 | `ActiveDirectory__Port` | LDAP-Port | `636` |
 | `ActiveDirectory__UseSsl` | LDAPS aktivieren | `true` |
-| `ActiveDirectory__AllowLdapFallback` | Bei nicht verfügbarem LDAPS Lese- und Bindzugriffe über LDAP erlauben | `false`; der Installer ermittelt den Wert |
-| `ActiveDirectory__LdapFallbackPort` | Port für den signierten und versiegelten LDAP-Negotiate-Fallback | `389` |
+| `ActiveDirectory__AllowLdapFallback` | Bei nicht verfügbarem LDAPS LDAP mit StartTLS erlauben | `true` |
+| `ActiveDirectory__LdapFallbackPort` | Port für LDAP mit StartTLS | `389` |
 | `ActiveDirectory__TrustedCertificatePath` | Optionaler Pfad zu einem privaten Root-CA- oder selbstsignierten Lab-Zertifikat für LDAPS | leer; Installer paketiert das Zertifikat als PEM |
 | `ActiveDirectory__BindUsername` | UPN des Servicekontos | `svc-HybridDeviceTagger@bloedgelaber.de` |
 | `ActiveDirectory__BindUserDistinguishedName` | DN des Servicekontos für `unicodePwd` | muss angepasst werden |
@@ -512,7 +512,7 @@ Kennwortänderungen über `unicodePwd` und die anschließende Validierung bleibe
 
 Jede Regel benötigt mindestens eine Aktion aus diesen drei Zielarten. Die Mitgliedschaftsziele aller passenden Regeln werden vereinigt. HybridDeviceTagger speichert verwaltete Extension-Attribute mit ihrem zuletzt gesetzten Wert sowie ausschließlich selbst erzeugte Mitgliedschaften im privaten Blob-Container `membership-ledger`. Verlässt ein Computer alle konfigurierten Ziel-OUs oder entfällt eine Aktion aus allen passenden Regeln, entfernt die Function die noch unveränderten verwalteten Attribute und ihre eigenen Gruppen-, AU- und RMAU-Mitgliedschaften. Zwischenzeitlich manuell geänderte Attribute sowie bereits vorher manuell oder durch andere Systeme vorhandene Mitgliedschaften werden nicht entfernt.
 
-Primär verwendet das Servicekonto Basic Bind über LDAPS. Der Installer prüft LDAPS zuerst. Bei erfolgreichem Bind wird `AllowLdapFallback` zwingend auf `false` gesetzt und LDAPS bleibt Pflicht. Ist LDAPS wegen eines Verbindungs-, TLS- oder Verfügbarkeitsfehlers nicht erreichbar, erklärt der Installer den Fallback und fragt, ob LDAP verwendet werden darf. Erst nach ausdrücklicher Zustimmung werden Geräteabfragen und Credential-Tests über LDAP mit Negotiate-Authentifizierung, LDAP Signing und Sealing ermöglicht. Ungültige Anmeldedaten lösen keinen Fallback aus. Der Fallback verwendet zwar kein TLS, schützt Bind und LDAP-Verkehr aber über die ausgehandelte SASL-Sicherheitsschicht.
+Die Anwendung ermittelt Domain Controller über AD-DNS-SRV-Records. Primär verwendet das Servicekonto Basic Bind über LDAPS. Ist LDAPS wegen eines Verbindungs-, TLS- oder Verfügbarkeitsfehlers nicht erreichbar, wird LDAP auf Port 389 vor dem Bind mit StartTLS auf TLS hochgestuft. Ungültige Anmeldedaten lösen keinen Transportwechsel aus. Zertifikats- und DNS-Namensprüfung sind für beide Transportarten identisch; ein unverschlüsselter Basic Bind ist ausgeschlossen.
 
 Für private PKIs kann der Installer mit `-ActiveDirectoryTrustedCertificatePath` ein öffentliches Root-CA-Zertifikat im DER- oder PEM-Format übernehmen. Für einen Lab-DC darf dies auch dessen direkt selbstsigniertes Serverzertifikat sein. Das validierte Zertifikat wird ohne privaten Schlüssel als PEM in das Function-Paket geschrieben. Die Anwendung akzeptiert nur Zertifikate, die eine gültige Kette zu diesem Trust Anchor, die EKU Server Authentication und den DNS-Namen des LDAP-Ziels besitzen.
 

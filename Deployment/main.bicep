@@ -45,6 +45,9 @@ param virtualNetworkResourceGroupName string
 @description('Subscription containing the existing virtual network.')
 param virtualNetworkSubscriptionId string = subscription().subscriptionId
 
+@description('Optional resource ID of an existing Blob Storage private DNS zone linked to the virtual network.')
+param storagePrivateDnsZoneResourceId string = ''
+
 @description('Name of the existing Key Vault.')
 param keyVaultName string
 
@@ -60,13 +63,13 @@ param keyVaultSubscriptionId string = subscription().subscriptionId
 @description('Optional resource ID of an existing Key Vault private DNS zone linked to the virtual network.')
 param keyVaultPrivateDnsZoneResourceId string = ''
 
-@description('Forest DNS name used for discovery, or the DNS name of a specific domain controller when discovery is unavailable.')
-param activeDirectoryServer string
+@description('Active Directory forest DNS name used by the Function for DNS SRV domain-controller discovery.')
+param activeDirectoryDomain string
 
-@description('Allow read and bind operations to fall back to unencrypted LDAP when LDAPS is unavailable.')
-param allowLdapFallback bool = false
+@description('Allow LDAPS to fall back to LDAP upgraded with StartTLS.')
+param allowLdapFallback bool = true
 
-@description('Port used for unencrypted LDAP fallback.')
+@description('Port used for LDAP upgraded with StartTLS.')
 @minValue(1)
 @maxValue(65535)
 param ldapFallbackPort int = 389
@@ -118,6 +121,11 @@ var logAnalyticsWorkspaceName = '${functionAppName}-law'
 var applicationInsightsName = '${functionAppName}-appi'
 var deploymentContainerName = 'app-package-${uniqueString(resourceGroup().id, functionAppName)}'
 var storagePrivateEndpointName = 'pe-${storageAccountName}-blob'
+var storagePrivateDnsZoneName = 'privatelink.blob.${environment().suffixes.storage}'
+var createStoragePrivateDnsZone = empty(storagePrivateDnsZoneResourceId)
+var effectiveStoragePrivateDnsZoneResourceId = empty(storagePrivateDnsZoneResourceId)
+  ? resourceId('Microsoft.Network/privateDnsZones', storagePrivateDnsZoneName)
+  : storagePrivateDnsZoneResourceId
 var keyVaultPrivateEndpointName = 'pe-${keyVaultName}'
 var keyVaultPrivateDnsZoneName = 'privatelink.vaultcore.azure.net'
 var createKeyVaultPrivateDnsZone = createKeyVault && empty(keyVaultPrivateDnsZoneResourceId)
@@ -297,6 +305,43 @@ resource storagePrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' 
   }
 }
 
+resource storagePrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (createStoragePrivateDnsZone) {
+  name: storagePrivateDnsZoneName
+  location: 'global'
+  tags: tags
+}
+
+resource storagePrivateDnsVnetLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (createStoragePrivateDnsZone) {
+  name: '${functionAppName}-storage-link'
+  parent: storagePrivateDnsZone
+  location: 'global'
+  tags: tags
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: virtualNetwork.id
+    }
+  }
+}
+
+resource storagePrivateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+  name: 'default'
+  parent: storagePrivateEndpoint
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'storagePrivateDnsZone'
+        properties: {
+          privateDnsZoneId: effectiveStoragePrivateDnsZoneResourceId
+        }
+      }
+    ]
+  }
+  dependsOn: [
+    storagePrivateDnsZone
+  ]
+}
+
 resource servicePlan 'Microsoft.Web/serverfarms@2024-04-01' = {
   name: servicePlanName
   location: location
@@ -399,8 +444,8 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           value: rotationSchedule
         }
         {
-          name: 'ActiveDirectory__Server'
-          value: activeDirectoryServer
+          name: 'ActiveDirectory__Domain'
+          value: activeDirectoryDomain
         }
         {
           name: 'ActiveDirectory__Port'
@@ -488,6 +533,7 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
       scmMinTlsVersion: '1.2'
     }
     virtualNetworkSubnetId: integrationSubnet.id
+    vnetContentShareEnabled: true
     vnetRouteAllEnabled: true
   }
 }

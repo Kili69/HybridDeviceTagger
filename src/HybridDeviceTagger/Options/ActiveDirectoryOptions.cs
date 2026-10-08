@@ -27,22 +27,26 @@ public sealed class ActiveDirectoryOptions : IValidatableObject
     /// <summary>Gets the configuration section name.</summary>
     public const string SectionName = "ActiveDirectory";
 
-    /// <summary>Gets the DNS name of the domain controller.</summary>
+    /// <summary>Gets the Active Directory DNS domain used for domain-controller discovery.</summary>
     [Required]
     [StringLength(253, MinimumLength = 1)]
-    public string Server { get; init; } = string.Empty;
+    public string Domain { get; init; } = string.Empty;
 
-    /// <summary>Gets the LDAPS port.</summary>
+    /// <summary>Gets an optional domain-controller DNS name that bypasses DNS SRV discovery.</summary>
+    [StringLength(253)]
+    public string? Server { get; init; }
+
+    /// <summary>Gets the LDAPS port tried before StartTLS.</summary>
     [Range(1, 65535)]
     public int Port { get; init; } = 636;
 
     /// <summary>Gets a value indicating whether TLS is enabled for LDAP.</summary>
     public bool UseSsl { get; init; } = true;
 
-    /// <summary>Gets a value indicating whether read operations may fall back to signed and sealed LDAP Negotiate authentication.</summary>
-    public bool AllowLdapFallback { get; init; }
+    /// <summary>Gets a value indicating whether LDAPS may fall back to LDAP with StartTLS.</summary>
+    public bool AllowLdapFallback { get; init; } = true;
 
-    /// <summary>Gets the port used for signed and sealed LDAP fallback connections.</summary>
+    /// <summary>Gets the port used for LDAP with StartTLS.</summary>
     [Range(1, 65535)]
     public int LdapFallbackPort { get; init; } = 389;
 
@@ -66,15 +70,14 @@ public sealed class ActiveDirectoryOptions : IValidatableObject
 
     /// <inheritdoc />
     /// <remarks>
-    /// LDAPS remains mandatory as the primary transport because password operations require it.
-    /// A configured fallback must use a separate endpoint port.
+    /// Both LDAPS and StartTLS protect credentials and password operations with TLS.
     /// </remarks>
     public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
     {
         if (!UseSsl)
         {
             yield return new ValidationResult(
-                "UseSsl must be enabled for LDAP credential and password operations.",
+                "UseSsl must be enabled so LDAP credential and password operations use LDAPS or StartTLS.",
                 [nameof(UseSsl)]);
         }
 

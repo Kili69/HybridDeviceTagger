@@ -1,4 +1,3 @@
-using System.DirectoryServices.Protocols;
 using HybridDeviceTagger.Services;
 
 namespace HybridDeviceTagger.Tests;
@@ -18,10 +17,9 @@ public sealed class LdapActiveDirectoryDeviceSourceTests
     public void TryReadGuid_ConvertsBinaryObjectGuid()
     {
         var expected = Guid.Parse("fa95010e-8a87-4a85-924f-ce9c433900d0");
-        var attribute = new DirectoryAttribute("objectGUID");
-        attribute.Add(expected.ToByteArray());
-
-        var parsed = LdapActiveDirectoryDeviceSource.TryReadGuid(attribute, out var actual);
+        var parsed = LdapActiveDirectoryDeviceSource.TryReadGuid(
+            expected.ToByteArray(),
+            out var actual);
 
         Assert.True(parsed);
         Assert.Equal(expected, actual);

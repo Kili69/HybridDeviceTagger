@@ -1,7 +1,7 @@
 #Requires -Version 7.2
 #Requires -Modules ActiveDirectory
-# Project-Version: 0.1.20261006.1
-# Author: andreas.lucas@outlook.com (aka Kili)
+# Project-Version: 0.1.20261006.2
+# Author: andreas.lucas@microsoft.com (aka Kili)
 
 <#
 .SYNOPSIS
@@ -87,12 +87,13 @@ DNS name of the Active Directory forest. Interactive runs propose the forest of 
 Active Directory user when it can be detected. Workgroup systems have no default.
 
 .PARAMETER ActiveDirectoryServer
-Optional DNS name of the domain controller used for validation and initial forest discovery.
-Defaults to ActiveDirectoryForestDomain for DNS-based discovery.
+Optional DNS name of a domain controller used only for installer validation. When omitted, the
+installer discovers a controller through _ldap._tcp.dc._msdcs DNS SRV records. The deployed
+Function always performs its own DNS SRV discovery.
 
 .PARAMETER AllowLdapFallback
-Allows signed and sealed LDAP on the fallback port when strict LDAPS is unavailable. Password
-changes still require LDAPS.
+Retained for command-line compatibility. Secure LDAP fallback now uses StartTLS automatically and
+never performs an unencrypted LDAP bind.
 
 .PARAMETER LdapFallbackPort
 LDAP fallback port. The default is 389.
@@ -102,21 +103,23 @@ Optional path to a public root CA or self-signed lab DC certificate used as the 
 Private keys are rejected and never packaged.
 
 .PARAMETER ADServiceAccount
-UPN used by the Function App to bind to Active Directory. Interactive runs default to
-HybridDeviceTagger@ActiveDirectoryForestDomain.
+UPN used by the Function App to bind to Active Directory. This parameter cannot be combined with
+ADServiceAccountCredential. Interactive runs without either value default to
+HybridDeviceTagger@ActiveDirectoryForestDomain and request the password separately.
 
 .PARAMETER ActiveDirectoryBindUserDistinguishedName
-Distinguished name of the AD service account used for password changes.
+Optional distinguished name of the AD service account used for password changes. When omitted, the
+installer resolves it from ADServiceAccount and stops if the account cannot be resolved uniquely.
 
-.PARAMETER ActiveDirectoryCredential
+.PARAMETER ADServiceAccountCredential
 Credential used locally to validate directory bind and read access. Interactive runs request the
-AD service-account password when the credential is omitted and directory checks are enabled.
-
-.PARAMETER ActiveDirectoryProvisioningCredential
-Separate delegated credential used only when preparing or resetting the AD service account.
+AD service-account password when the credential is omitted and directory checks are enabled. Its
+UserName supplies the service-account UPN. This parameter cannot be combined with ADServiceAccount.
 
 .PARAMETER ManagementApiClientId
-Application ID of the existing single-tenant Entra registration that protects the management API.
+Application ID of the single-tenant Entra registration that protects the management API. When
+omitted for a new Function App, the installer creates and configures the registration
+automatically. Updates reuse the client ID stored in the existing Function App configuration.
 
 .PARAMETER ManagementApiAllowedPrincipalObjectId
 Bootstrap users, groups, or service principals that receive all five management API roles unless a
@@ -150,10 +153,6 @@ Name of the Key Vault secret containing the active AD password.
 .PARAMETER StagedCredentialEntryName
 Name of the Key Vault secret used while rotating or recovering the AD password.
 
-.PARAMETER TaggingRules
-One or more rules containing Name, Description, BaseDn, and at least one extension-attribute,
-Entra-group, or administrative-unit action.
-
 .PARAMETER TaggingSchedule
 Six-field NCRONTAB schedule for device reconciliation. The default runs every 15 minutes.
 
@@ -166,9 +165,6 @@ Maximum Flex Consumption scale-out instance count.
 .PARAMETER InstanceMemoryMB
 Memory allocated to each FC1 instance. Valid values are 512, 2048, and 4096 MB.
 
-.PARAMETER InitialPasswordLength
-Length of a generated password when preparing or resetting the AD service account.
-
 .PARAMETER Tags
 Azure resource tags applied to app-owned resources.
 
@@ -178,9 +174,9 @@ Creates the target resource group when it does not already exist.
 .PARAMETER RegisterProviders
 Registers missing Azure resource providers required by the deployment.
 
-.PARAMETER PrepareActiveDirectoryAccountOnly
-Creates or resets the AD service account, initializes its credential through an existing Function
-App, validates access, and exits without deploying Azure resources or Function code.
+.PARAMETER Force
+Runs without interactive input or installation confirmation. Every required value and explicit
+consent switch must be supplied; missing information terminates the run with a parameter error.
 
 .PARAMETER SkipActiveDirectoryDirectoryChecks
 Skips repeated forest, OU, and service-account directory checks for an existing installation.
@@ -196,22 +192,19 @@ Deploys or validates infrastructure and permissions without publishing Function 
 Path to the prebuilt Function App ZIP included with the installation package. Defaults to
 HybridDeviceTagger.zip next to this installer.
 
-.PARAMETER GrantRestrictedAdministrativeUnitRole
-Explicitly approves creation and assignment of the least-privilege custom role at every configured
-restricted management administrative-unit scope.
-
 .EXAMPLE
 $credential = Get-Credential 'svc-HybridDeviceTagger@contoso.com'
 ./Deployment/Install-HybridDeviceTagger.ps1 @parameters `
-    -ActiveDirectoryCredential $credential `
+    -ADServiceAccountCredential $credential `
     -ValidateOnly
 
 Runs the complete read-only preflight using values collected in the parameters splat.
 
 .EXAMPLE
-./Deployment/Install-HybridDeviceTagger.ps1 @parameters -Confirm:$false
+./Deployment/Install-HybridDeviceTagger.ps1 @parameters -Force
 
-Deploys the validated infrastructure and Function package. Run ValidateOnly and WhatIf first.
+Deploys the validated infrastructure and Function package without interactive prompts. Run
+ValidateOnly and WhatIf first.
 
 .NOTES
 Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
@@ -252,7 +245,7 @@ SPDX-License-Identifier: Apache-2.0
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
     'PSUseShouldProcessForStateChangingFunctions',
     '',
-    Justification = 'Internal mutations are guarded by the script-level ShouldProcess approval and skipped for ValidateOnly and WhatIf.'
+    Justification = 'Internal mutations are guarded by script-level approval, explicitly forced, or skipped for ValidateOnly and WhatIf.'
 )]
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
@@ -321,10 +314,7 @@ param(
     [string]$ActiveDirectoryBindUserDistinguishedName,
 
     [ValidateNotNull()]
-    [pscredential]$ActiveDirectoryCredential,
-
-    [ValidateNotNull()]
-    [pscredential]$ActiveDirectoryProvisioningCredential,
+    [pscredential]$ADServiceAccountCredential,
 
     [ValidatePattern('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')]
     [string]$ManagementApiClientId,
@@ -367,10 +357,6 @@ param(
     [ValidateLength(1, 127)]
     [string]$StagedCredentialEntryName = 'hybrid-device-tagger-ad-password-next',
 
-    [ValidateNotNull()]
-    [ValidateCount(1, 100)]
-    [object[]]$TaggingRules,
-
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 100)]
     [string]$TaggingSchedule = '0 */15 * * * *',
@@ -385,25 +371,20 @@ param(
     [ValidateSet(512, 2048, 4096)]
     [int]$InstanceMemoryMB = 2048,
 
-    [ValidateRange(4, 256)]
-    [int]$InitialPasswordLength = 40,
-
     [ValidateCount(0, 50)]
     [hashtable]$Tags = @{},
 
     [switch]$CreateResourceGroup,
     [switch]$CreateKeyVault,
     [switch]$RegisterProviders,
-    [switch]$PrepareActiveDirectoryAccountOnly,
+    [switch]$Force,
     [switch]$SkipActiveDirectoryDirectoryChecks,
     [switch]$ValidateOnly,
     [switch]$SkipCodeDeployment,
 
     [ValidateNotNullOrEmpty()]
     [ValidateLength(1, 4096)]
-    [string]$FunctionPackagePath,
-
-    [switch]$GrantRestrictedAdministrativeUnitRole
+    [string]$FunctionPackagePath
 )
 
 Set-StrictMode -Version Latest
@@ -411,6 +392,29 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $script:TrustedCertificate = $null
 $script:CompactInstallerError = $false
+$script:CreateManagementApiApplication = $false
+$script:CreatedManagementApiApplicationObjectId = $null
+$script:AzureDeploymentStarted = $false
+$script:NonInteractive = $Force -or $env:TF_BUILD -eq 'True' -or $env:CI -eq 'true'
+if ($PSBoundParameters.ContainsKey('ADServiceAccount') -and
+    $PSBoundParameters.ContainsKey('ADServiceAccountCredential')) {
+    $message = @'
+The Active Directory service account was specified twice.
+
+Choose exactly one of these options:
+  - Use -ADServiceAccountCredential $credential to provide the UPN and password together.
+  - Use -ADServiceAccount 'service-account@contoso.com' to enter the password interactively.
+
+Remove either -ADServiceAccount or -ADServiceAccountCredential and run the installer again.
+'@
+    $errorRecord = [System.Management.Automation.ErrorRecord]::new(
+        [ArgumentException]::new($message),
+        'ConflictingADServiceAccountParameters',
+        [System.Management.Automation.ErrorCategory]::InvalidArgument,
+        $null
+    )
+    $PSCmdlet.ThrowTerminatingError($errorRecord)
+}
 $createKeyVaultWasSupplied = $PSBoundParameters.ContainsKey('CreateKeyVault')
 $virtualNetworkResourceGroupWasSupplied = $PSBoundParameters.ContainsKey(
     'VirtualNetworkResourceGroupName'
@@ -430,7 +434,6 @@ if ([string]::IsNullOrWhiteSpace($FunctionPackagePath)) {
     $FunctionPackagePath = Join-Path $scriptRoot 'HybridDeviceTagger.zip'
 }
 $trustedCertificatePackagePath = 'certificates/active-directory-trust-anchor.pem'
-$activeDirectoryServiceAccountDescription = 'Service account used by HybridDeviceTagger for Active Directory device discovery and password rotation.'
 $requiredProviders = @(
     'Microsoft.App',
     'Microsoft.Authorization',
@@ -446,7 +449,7 @@ $certificateAssemblies = @(
     ([AppContext]::GetData('TRUSTED_PLATFORM_ASSEMBLIES') -split [IO.Path]::PathSeparator)
     [System.DirectoryServices.Protocols.LdapConnection].Assembly.Location
 ) | Select-Object -Unique
-if (-not ('HybridDeviceTaggerLdapCertificateValidatorV3' -as [type])) {
+if (-not ('HybridDeviceTaggerLdapCertificateValidatorV4' -as [type])) {
     Add-Type -ReferencedAssemblies $certificateAssemblies -TypeDefinition @'
 using System;
 using System.DirectoryServices.Protocols;
@@ -457,13 +460,21 @@ using System.Security.Cryptography.X509Certificates;
 
 #pragma warning disable SYSLIB0057
 
-public static class HybridDeviceTaggerLdapCertificateValidatorV3
+public static class HybridDeviceTaggerLdapCertificateValidatorV4
 {
     public static VerifyServerCertificateCallback Create(
         string expectedServer,
         X509Certificate2 trustAnchor)
     {
         return (_, certificate) => Validate(expectedServer, certificate, trustAnchor);
+    }
+
+    public static RemoteCertificateValidationCallback CreateRemote(
+        string expectedServer,
+        X509Certificate2 trustAnchor)
+    {
+        return (_, certificate, _, _) =>
+            certificate is not null && Validate(expectedServer, certificate, trustAnchor);
     }
 
     public static bool ValidateTlsEndpoint(
@@ -549,9 +560,6 @@ function Write-InstallationSummary {
     elseif ($WhatIfPreference) {
         'ARM What-If (no changes)'
     }
-    elseif ($PrepareActiveDirectoryAccountOnly) {
-        'Active Directory service-account preparation'
-    }
     else {
         'Azure infrastructure and Function App deployment'
     }
@@ -561,14 +569,6 @@ function Write-InstallationSummary {
     Write-Host "Target resource group: $ResourceGroupName"
     Write-Host "Azure location: $Location"
 
-    if ($PrepareActiveDirectoryAccountOnly) {
-        Write-Host 'Planned changes:'
-        Write-Host "  - Create or reset AD account: $ActiveDirectoryBindUserDistinguishedName"
-        Write-Host '  - Initialize the AD credential through the Function managed identity'
-        Write-Host '  - Azure infrastructure and Function App code will not be deployed.'
-        return
-    }
-
     Write-Host 'Planned Azure resources to create or update:'
     Write-Host "  - Function App: $FunctionAppName (.NET 8 isolated, Flex Consumption FC1)"
     Write-Host "  - Storage account: $StorageAccountName with deployment, membership-ledger, and run-traces containers"
@@ -576,7 +576,18 @@ function Write-InstallationSummary {
     Write-Host "  - Log Analytics workspace: $FunctionAppName-law"
     Write-Host "  - Application Insights: $FunctionAppName-appi"
     Write-Host "  - Storage private endpoint: pe-$StorageAccountName-blob"
-    Write-Host "  - Entra-authenticated management API: api://$ManagementApiClientId"
+    if ($script:StoragePrivateDnsZoneResourceId) {
+        Write-Host "  - Reuse Storage private DNS zone: $($script:StoragePrivateDnsZoneResourceId)"
+    }
+    else {
+        Write-Host '  - Storage private DNS zone and virtual-network link'
+    }
+    if ($script:CreateManagementApiApplication) {
+        Write-Host '  - Create a single-tenant Entra application and Enterprise Application for the management API'
+    }
+    else {
+        Write-Host "  - Entra-authenticated management API: api://$ManagementApiClientId"
+    }
     Write-Host '  - Five least-privilege Entra application roles plus Function App Owner/Contributor authorization'
     Write-Host '  - Managed-identity role assignments for Storage and Key Vault'
     Write-Host '  - Microsoft Graph application permissions for device, group, and administrative-unit management'
@@ -615,12 +626,62 @@ function Write-InstallationSummary {
 function Invoke-AzureCli {
     param(
         [Parameter(Mandatory)][string[]]$Arguments,
-        [switch]$AllowFailure
+        [switch]$AllowFailure,
+        [ValidateRange(1, 3600)]
+        [int]$TimeoutSeconds = 900
     )
 
-    $output = & az @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
-    $text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    $azureCliCommand = Get-Command az -ErrorAction Stop
+    $commandArguments = [Collections.Generic.List[string]]::new()
+    if ([IO.Path]::GetExtension($azureCliCommand.Source) -ieq '.cmd') {
+        $executablePath = [IO.Path]::GetFullPath(
+            (Join-Path (Split-Path $azureCliCommand.Source) '..\python.exe')
+        )
+        if (-not [IO.File]::Exists($executablePath)) {
+            throw "Azure CLI Python executable was not found: $executablePath"
+        }
+        $commandArguments.Add('-IBm')
+        $commandArguments.Add('azure.cli')
+    }
+    else {
+        $executablePath = $azureCliCommand.Source
+    }
+    foreach ($argument in $Arguments) {
+        $commandArguments.Add($argument)
+    }
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $executablePath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $commandArguments) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw "Azure CLI process could not be started: $executablePath"
+        }
+        $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $process.Kill($true)
+            $process.WaitForExit()
+            throw "Azure CLI timed out after $TimeoutSeconds seconds (az $($Arguments -join ' '))."
+        }
+        $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
+        $standardError = $standardErrorTask.GetAwaiter().GetResult()
+        $exitCode = $process.ExitCode
+    }
+    finally {
+        $process.Dispose()
+    }
+    $text = @($standardOutput, $standardError).
+        Where({ -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine
     if ($exitCode -ne 0 -and -not $AllowFailure) {
         throw "Azure CLI failed (az $($Arguments -join ' ')):`n$text"
     }
@@ -632,19 +693,128 @@ function Invoke-AzureCli {
 }
 
 function Get-AzureJson {
-    param([Parameter(Mandatory)][string[]]$Arguments)
-    $result = Invoke-AzureCli -Arguments ($Arguments + @('--only-show-errors', '--output', 'json'))
+    param(
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [ValidateRange(1, 3600)]
+        [int]$TimeoutSeconds = 900
+    )
+    $result = Invoke-AzureCli `
+        -Arguments ($Arguments + @('--only-show-errors', '--output', 'json')) `
+        -TimeoutSeconds $TimeoutSeconds
     if ([string]::IsNullOrWhiteSpace($result.Output)) {
         return $null
     }
     $result.Output | ConvertFrom-Json -Depth 100
 }
 
-function Get-KeyVaultPrivateDnsZoneResourceId {
+function Wait-AzureGroupDeployment {
+    param(
+        [Parameter(Mandatory)][string]$DeploymentName,
+        [ValidateRange(60, 7200)]
+        [int]$TimeoutSeconds = 1800
+    )
+
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastReportedState = $null
+    $lastProgressReport = [DateTimeOffset]::MinValue
+    while ([DateTimeOffset]::UtcNow -lt $deadline) {
+        $deployment = Get-AzureJson -Arguments @(
+            'deployment', 'group', 'show',
+            '--subscription', $SubscriptionId,
+            '--resource-group', $ResourceGroupName,
+            '--name', $DeploymentName
+        ) -TimeoutSeconds 60
+        $state = [string]$deployment.properties.provisioningState
+        $now = [DateTimeOffset]::UtcNow
+        if ($state -ne $lastReportedState -or
+            ($now - $lastProgressReport).TotalSeconds -ge 30) {
+            Write-Host "Azure deployment '$DeploymentName' state: $state"
+            $lastReportedState = $state
+            $lastProgressReport = $now
+        }
+
+        if ($state -eq 'Succeeded') {
+            return $deployment
+        }
+        if ($state -in 'Failed', 'Canceled') {
+            $errorText = if ($null -ne $deployment.properties.error) {
+                $deployment.properties.error | ConvertTo-Json -Depth 20 -Compress
+            }
+            else {
+                'Azure Resource Manager did not return deployment error details.'
+            }
+            throw "Azure deployment '$DeploymentName' ended with state '$state': $errorText"
+        }
+        Start-Sleep -Seconds 10
+    }
+
+    throw "Azure deployment '$DeploymentName' is still running after $TimeoutSeconds seconds. Check its status in Azure before retrying; do not start a concurrent deployment with the same resources."
+}
+
+function Start-AzureGroupDeployment {
+    param(
+        [Parameter(Mandatory)][string]$DeploymentName,
+        [Parameter(Mandatory)][string]$TemplateFile,
+        [Parameter(Mandatory)][string]$ParameterFile
+    )
+
+    $template = Get-Content -LiteralPath $TemplateFile -Raw |
+        ConvertFrom-Json -Depth 100
+    $parameterDocument = Get-Content -LiteralPath $ParameterFile -Raw |
+        ConvertFrom-Json -Depth 100
+    $body = @{
+        properties = @{
+            mode = 'Incremental'
+            template = $template
+            parameters = $parameterDocument.parameters
+        }
+    } | ConvertTo-Json -Depth 100 -Compress
+    $tokenResult = Get-AzureJson -Arguments @(
+        'account', 'get-access-token',
+        '--subscription', $SubscriptionId,
+        '--resource', 'https://management.azure.com/'
+    ) -TimeoutSeconds 60
+    if ([string]::IsNullOrWhiteSpace([string]$tokenResult.accessToken)) {
+        throw 'Azure CLI did not return an Azure Resource Manager access token.'
+    }
+
+    $secureToken = [Security.SecureString]::new()
+    foreach ($character in ([string]$tokenResult.accessToken).ToCharArray()) {
+        $secureToken.AppendChar($character)
+    }
+    $secureToken.MakeReadOnly()
+    $tokenResult = $null
+    $escapedResourceGroup = [Uri]::EscapeDataString($ResourceGroupName)
+    $escapedDeploymentName = [Uri]::EscapeDataString($DeploymentName)
+    $uri = (
+        "https://management.azure.com/subscriptions/$SubscriptionId/" +
+        "resourcegroups/$escapedResourceGroup/providers/Microsoft.Resources/" +
+        "deployments/${escapedDeploymentName}?api-version=2022-09-01"
+    )
+    try {
+        Invoke-RestMethod `
+            -Method Put `
+            -Uri $uri `
+            -Authentication Bearer `
+            -Token $secureToken `
+            -ContentType 'application/json' `
+            -Body $body `
+            -TimeoutSec 60
+    }
+    finally {
+        $secureToken.Dispose()
+        $body = $null
+        $tokenResult = $null
+    }
+}
+
+function Get-PrivateDnsZoneResourceId {
+    param([Parameter(Mandatory)][string]$ZoneName)
+
     $zones = @(Get-AzureJson -Arguments @(
         'network', 'private-dns', 'zone', 'list',
         '--subscription', $VirtualNetworkSubscriptionId,
-        '--query', "[?name=='privatelink.vaultcore.azure.net'].{id:id,name:name,resourceGroup:resourceGroup}"
+        '--query', "[?name=='$ZoneName'].{id:id,name:name,resourceGroup:resourceGroup}"
     ))
     foreach ($zone in $zones) {
         $links = @(Get-AzureJson -Arguments @(
@@ -666,10 +836,6 @@ function Get-KeyVaultPrivateDnsZoneResourceId {
 function ConvertTo-AzureCliJsonArgument {
     param([Parameter(Mandatory)][string]$Json)
 
-    if ($IsWindows) {
-        return $Json.Replace('"', '\"')
-    }
-
     $Json
 }
 
@@ -689,7 +855,7 @@ function Read-RequiredInstallerValue {
         [Parameter(Mandatory)][string]$Prompt
     )
 
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+    if ($script:NonInteractive) {
         throw "$Name must be supplied explicitly for noninteractive execution."
     }
     do {
@@ -714,30 +880,6 @@ function Read-InstallerValueWithDefault {
     }
 
     $enteredValue.Trim()
-}
-
-function Read-InteractiveTaggingRule {
-    $ruleName = Read-InstallerValueWithDefault `
-        -Prompt 'Rule name' `
-        -DefaultValue 'Rule1'
-    $ruleDescription = Read-InstallerValueWithDefault `
-        -Prompt 'Rule description' `
-        -DefaultValue '1st Tagging Rule'
-    $baseDn = Read-InstallerValueWithDefault `
-        -Prompt 'Base DN' `
-        -DefaultValue 'OU=Computers,OU=Admin'
-    $extensionAttribute1Value = Read-InstallerValueWithDefault `
-        -Prompt 'ExtensionAttribute1 value' `
-        -DefaultValue 'Tier 0'
-
-    @{
-        Name = $ruleName
-        Description = $ruleDescription
-        BaseDn = $baseDn
-        ExtensionAttributes = @{
-            extensionAttribute1 = $extensionAttribute1Value
-        }
-    }
 }
 
 function Get-LoggedOnUserForestDomain {
@@ -766,32 +908,28 @@ function ConvertTo-LdapFilterValue {
 
 function Resolve-ADServiceAccountDistinguishedName {
     $escapedServiceAccount = ConvertTo-LdapFilterValue -Value $ADServiceAccount
-    $parameters = @{
-        LDAPFilter = "(userPrincipalName=$escapedServiceAccount)"
-        Server = $ActiveDirectoryServer
-        Properties = 'DistinguishedName'
-        ErrorAction = 'Stop'
-    }
-    if ($null -ne $ActiveDirectoryProvisioningCredential) {
-        $parameters.Credential = $ActiveDirectoryProvisioningCredential
-    }
-    elseif ($null -ne $ActiveDirectoryCredential) {
-        $parameters.Credential = $ActiveDirectoryCredential
-    }
-
+    $connection = $null
     try {
-        $accounts = @(Get-ADUser @parameters)
+        $connection = Connect-NextAvailableLdapDirectory `
+            -Servers $script:ActiveDirectoryServerCandidates `
+            -Domain $ActiveDirectoryForestDomain
+        $entries = @(Invoke-LdapSearch `
+            -Connection $connection `
+            -BaseDn (Convert-DnsNameToDistinguishedName $ActiveDirectoryForestDomain) `
+            -Filter "(&(objectClass=user)(userPrincipalName=$escapedServiceAccount))" `
+            -Scope ([Novell.Directory.Ldap.LdapConnection]::ScopeSub) `
+            -Attributes @('distinguishedName'))
+        if ($entries.Count -gt 1) {
+            throw "More than one Active Directory user has the UPN '$ADServiceAccount'."
+        }
+        if ($entries.Count -eq 1) {
+            return [string]$entries[0].Dn
+        }
     }
-    catch {
-        Write-Verbose "The distinguished name for AD service account '$ADServiceAccount' could not be resolved automatically: $($_.Exception.Message)"
-        return $null
-    }
-
-    if ($accounts.Count -gt 1) {
-        throw "More than one Active Directory user has the UPN '$ADServiceAccount'."
-    }
-    if ($accounts.Count -eq 1) {
-        return [string]$accounts[0].DistinguishedName
+    finally {
+        if ($null -ne $connection) {
+            $connection.Dispose()
+        }
     }
 
     $null
@@ -802,24 +940,6 @@ function Convert-DnsNameToDistinguishedName {
     ($DnsName.Trim('.').Split('.') | ForEach-Object { "DC=$_" }) -join ','
 }
 
-function Test-ForestRelativeOuPath {
-    param([Parameter(Mandatory)][string]$Path)
-    $Path -notmatch '(?i)(?:^|(?<!\\),)\s*DC\s*='
-}
-
-function Test-ValidTaggingRuleName {
-    param([Parameter(Mandatory)][string]$Name)
-    $Name.Trim() -match '^[\p{L}\p{N}][\p{L}\p{N} ._()\-]{0,127}$'
-}
-
-function Test-ValidTaggingBaseDn {
-    param([Parameter(Mandatory)][string]$Path)
-    $valuePattern = '(?!#)(?:\\[^\x00-\x1F\x7F]|[^,+"\\<>;\x00-\x1F\x7F])+'
-    $ouPattern = "(?i:OU)\s*=$valuePattern"
-    $dcPattern = "(?i:DC)\s*=$valuePattern"
-    $Path -match "^\s*(?:$ouPattern(?:\s*,\s*$ouPattern)*(?:\s*,\s*$dcPattern)*|$dcPattern(?:\s*,\s*$dcPattern)*)\s*$"
-}
-
 function Get-DomainDnsNameFromDistinguishedName {
     param([Parameter(Mandatory)][string]$DistinguishedName)
     @([regex]::Matches(
@@ -828,239 +948,208 @@ function Get-DomainDnsNameFromDistinguishedName {
     ) | ForEach-Object { $_.Groups[1].Value.Trim() }) -join '.'
 }
 
-function Get-TaggingRuleValue {
-    param(
-        [Parameter(Mandatory)][object]$InputRule,
-        [Parameter(Mandatory)][string]$PropertyName
-    )
-
-    if ($InputRule -is [System.Collections.IDictionary]) {
-        return $InputRule[$PropertyName]
-    }
-
-    $property = $InputRule.PSObject.Properties[$PropertyName]
-    if ($null -ne $property) {
-        return $property.Value
-    }
-}
-
-function ConvertTo-NormalizedTaggingRule {
-    if ($TaggingRules.Count -eq 0) {
-        throw 'At least one tagging rule is required.'
-    }
-
-    $normalizedRules = [System.Collections.Generic.List[object]]::new()
-    $ruleNames = [System.Collections.Generic.HashSet[string]]::new(
-        [StringComparer]::OrdinalIgnoreCase
-    )
-    foreach ($rule in $TaggingRules) {
-        $name = [string](Get-TaggingRuleValue -InputRule $rule -PropertyName 'Name')
-        if ([string]::IsNullOrWhiteSpace($name)) {
-            throw 'Every tagging rule requires a non-empty Name.'
-        }
-        if (-not (Test-ValidTaggingRuleName $name)) {
-            throw "Tagging rule name '$name' contains unsupported characters. Use 1-128 letters, numbers, spaces, dots, underscores, hyphens, or parentheses."
-        }
-        if (-not $ruleNames.Add($name.Trim())) {
-            throw "Tagging rule name '$name' is duplicated."
-        }
-        $description = [string](Get-TaggingRuleValue -InputRule $rule -PropertyName 'Description')
-        if ([string]::IsNullOrWhiteSpace($description)) {
-            throw "Tagging rule '$name' requires a non-empty Description."
-        }
-        if ($description.Length -gt 1024) {
-            throw "Tagging rule '$name' Description cannot exceed 1024 characters."
-        }
-        $baseDn = [string]$rule.BaseDn
-        if ([string]::IsNullOrWhiteSpace($baseDn)) {
-            throw 'Every tagging rule requires a non-empty BaseDn.'
-        }
-        if ($baseDn.Length -gt 2048) {
-            throw "Tagging rule '$name' BaseDn cannot exceed 2048 characters."
-        }
-        if (-not (Test-ValidTaggingBaseDn $baseDn)) {
-            throw "Tagging rule '$baseDn' must be a valid OU distinguished name with an optional trailing DC part."
-        }
-
-        $attributes = [System.Collections.Generic.Dictionary[string, string]]::new(
-            [StringComparer]::OrdinalIgnoreCase
-        )
-        $rawAttributes = Get-TaggingRuleValue -InputRule $rule -PropertyName 'ExtensionAttributes'
-
-        $entries = if ($null -eq $rawAttributes) {
-            @()
-        }
-        elseif ($rawAttributes -is [System.Collections.IDictionary]) {
-            $rawAttributes.GetEnumerator() | ForEach-Object {
-                [pscustomobject]@{ Name = [string]$_.Key; Value = [string]$_.Value }
-            }
-        }
-        else {
-            $rawAttributes.PSObject.Properties | ForEach-Object {
-                [pscustomobject]@{ Name = $_.Name; Value = [string]$_.Value }
-            }
-        }
-
-        foreach ($entry in @($entries)) {
-            if ($entry.Name -notmatch '^extensionAttribute(?:[1-9]|1[0-5])$') {
-                throw "Tagging rule '$baseDn' contains unsupported attribute '$($entry.Name)'."
-            }
-            if ([string]::IsNullOrWhiteSpace($entry.Value)) {
-                throw "Tagging rule '$baseDn' requires a non-empty value for '$($entry.Name)'."
-            }
-            if ($entry.Value.Length -gt 1024) {
-                throw "Tagging rule '$name' value for '$($entry.Name)' cannot exceed 1024 characters."
-            }
-            if (-not $attributes.TryAdd($entry.Name, $entry.Value)) {
-                throw "Tagging rule '$baseDn' contains duplicate attribute '$($entry.Name)'."
-            }
-        }
-        if ($attributes.Count -gt 15) {
-            throw "Tagging rule '$name' cannot contain more than 15 extension attributes."
-        }
-
-        $membershipTargets = [ordered]@{}
-        foreach ($propertyName in @('EntraGroupIds', 'AdministrativeUnitIds')) {
-            $targetIds = @(
-                Get-TaggingRuleValue -InputRule $rule -PropertyName $propertyName |
-                    Where-Object { $null -ne $_ }
-            )
-            if ($targetIds.Count -gt 50) {
-                throw "Tagging rule '$name' cannot contain more than 50 $propertyName."
-            }
-
-            $normalizedIds = [System.Collections.Generic.List[guid]]::new()
-            $uniqueIds = [System.Collections.Generic.HashSet[guid]]::new()
-            foreach ($targetId in $targetIds) {
-                $parsedId = [guid]::Empty
-                if (-not [guid]::TryParse([string]$targetId, [ref]$parsedId) -or
-                    $parsedId -eq [guid]::Empty) {
-                    throw "Tagging rule '$name' contains an invalid or empty GUID in $propertyName."
-                }
-                if (-not $uniqueIds.Add($parsedId)) {
-                    throw "Tagging rule '$name' contains duplicate ID '$parsedId' in $propertyName."
-                }
-                $normalizedIds.Add($parsedId)
-            }
-            $membershipTargets[$propertyName] = $normalizedIds.ToArray()
-        }
-        if ($attributes.Count -eq 0 -and
-            $membershipTargets.EntraGroupIds.Count -eq 0 -and
-            $membershipTargets.AdministrativeUnitIds.Count -eq 0) {
-            throw "Tagging rule '$name' requires at least one extension attribute, Entra group, or administrative unit."
-        }
-
-        $normalizedRules.Add([ordered]@{
-            name = $name.Trim()
-            description = $description.Trim()
-            baseDn = $baseDn
-            extensionAttributes = $attributes
-            entraGroupIds = $membershipTargets.EntraGroupIds
-            administrativeUnitIds = $membershipTargets.AdministrativeUnitIds
-        })
-    }
-
-    $normalizedRules
-}
-
 function Connect-LdapDirectory {
     param(
         [Parameter(Mandatory)][string]$Server,
         [Parameter(Mandatory)][int]$Port,
         [Parameter(Mandatory)][bool]$UseSsl,
-        [Parameter()][pscredential]$Credential = $ActiveDirectoryCredential
+        [Parameter()][bool]$UseStartTls = $false,
+        [Parameter()][pscredential]$Credential = $ADServiceAccountCredential
     )
 
-    $identifier = [System.DirectoryServices.Protocols.LdapDirectoryIdentifier]::new(
-        $Server,
-        $Port,
-        $false,
-        $false
-    )
-    $authenticationType = if ($UseSsl) {
-        [System.DirectoryServices.Protocols.AuthType]::Basic
-    }
-    else {
-        [System.DirectoryServices.Protocols.AuthType]::Negotiate
+    if ($UseSsl -and $UseStartTls) {
+        throw 'LDAPS and StartTLS cannot be enabled on the same LDAP connection.'
     }
     $networkCredential = $Credential.GetNetworkCredential()
-    if (-not $UseSsl -and $networkCredential.UserName.Contains('@')) {
-        $userPrincipalNameParts = $networkCredential.UserName.Split('@', 2)
-        $networkCredential = [System.Net.NetworkCredential]::new(
-            $userPrincipalNameParts[0],
-            $networkCredential.Password,
-            $userPrincipalNameParts[1])
-    }
-    $connection = [System.DirectoryServices.Protocols.LdapConnection]::new(
-        $identifier,
-        $networkCredential,
-        $authenticationType
-    )
-    $connection.Timeout = [TimeSpan]::FromSeconds(15)
-    $connection.SessionOptions.ProtocolVersion = 3
-    $connection.SessionOptions.SecureSocketLayer = $UseSsl
-    if ($UseSsl -and $script:TrustedCertificate) {
-        $connection.SessionOptions.VerifyServerCertificate =
-            [HybridDeviceTaggerLdapCertificateValidatorV3]::Create(
+    $options = [Novell.Directory.Ldap.LdapConnectionOptions]::new()
+    if ($script:TrustedCertificate) {
+        $options = $options.ConfigureRemoteCertificateValidationCallback(
+            [HybridDeviceTaggerLdapCertificateValidatorV4]::CreateRemote(
                 $Server,
-                $script:TrustedCertificate)
+                $script:TrustedCertificate))
     }
-    if (-not $UseSsl) {
-        $connection.SessionOptions.Signing = $true
-        $connection.SessionOptions.Sealing = $true
+    if ($UseSsl) {
+        $options = $options.UseSsl()
     }
+    $connection = [Novell.Directory.Ldap.LdapConnection]::new($options)
+    $connection.ConnectionTimeout = 15000
 
     try {
-        $connection.Bind()
+        $null = $connection.ConnectAsync(
+            $Server,
+            $Port,
+            [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+        if ($UseStartTls) {
+            $null = $connection.StartTlsAsync(
+                [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+        }
+        $null = $connection.BindAsync(
+            $networkCredential.UserName,
+            $networkCredential.Password,
+            [Threading.CancellationToken]::None).GetAwaiter().GetResult()
         $connection
     }
     catch {
         $connection.Dispose()
+        $exceptionMessages = [Collections.Generic.List[string]]::new()
+        $ldapResultCode = $null
+        $ldapDiagnostic = $null
+        $currentException = $_.Exception
+        while ($null -ne $currentException) {
+            if (-not [string]::IsNullOrWhiteSpace($currentException.Message)) {
+                $exceptionMessages.Add($currentException.Message)
+            }
+            $resultCodeProperty = $currentException.PSObject.Properties['ResultCode']
+            if ($null -ne $resultCodeProperty) {
+                $ldapResultCode = [int]$resultCodeProperty.Value
+            }
+            $ldapErrorProperty = $currentException.PSObject.Properties['LdapErrorMessage']
+            if ($null -ne $ldapErrorProperty -and
+                -not [string]::IsNullOrWhiteSpace([string]$ldapErrorProperty.Value)) {
+                $ldapDiagnostic = [string]$ldapErrorProperty.Value
+            }
+            $currentException = $currentException.InnerException
+        }
+        if (($exceptionMessages -join ' ') -match
+            'certificate was rejected|certificate validation|authentication failed') {
+            if ($null -eq $script:TrustedCertificate) {
+                throw "The LDAP server certificate for '$Server' is not trusted. Supply the issuing CA certificate, or the directly self-signed server certificate for a lab, through -ActiveDirectoryTrustedCertificatePath."
+            }
+            throw "The LDAP server certificate for '$Server' did not match the supplied trust anchor '$($script:TrustedCertificate.Thumbprint)' or failed DNS-name, validity, EKU, chain, or revocation validation."
+        }
+        if ($ldapResultCode -eq 49) {
+            $diagnosticCode = if ($ldapDiagnostic -match '(?i)\bdata\s+([0-9a-f]+)\b') {
+                $Matches[1].ToLowerInvariant()
+            }
+            else {
+                ''
+            }
+            $credentialFailure = switch ($diagnosticCode) {
+                '525' { 'The Active Directory service account was not found.' }
+                '52e' { 'The Active Directory service-account password is invalid.' }
+                '530' { 'The Active Directory service account may not sign in at this time.' }
+                '531' { 'The Active Directory service account may not sign in from this computer.' }
+                '532' { 'The Active Directory service-account password has expired.' }
+                '533' { 'The Active Directory service account is disabled.' }
+                '701' { 'The Active Directory service account has expired.' }
+                '773' { 'The Active Directory service account must change its password before it can bind.' }
+                '775' { 'The Active Directory service account is locked.' }
+                default { 'Active Directory rejected the service-account credential.' }
+            }
+            throw "$credentialFailure Verify or reset the account state and recreate ADServiceAccountCredential."
+        }
         throw
     }
 }
 
-function Confirm-LdapFallbackUse {
-    if ($script:EffectiveAllowLdapFallback) {
-        return $true
+function Import-InstallerLdapClient {
+    param([Parameter(Mandatory)][string]$PackagePath)
+
+    if ('Novell.Directory.Ldap.LdapConnection' -as [type]) {
+        return
     }
 
-    $warning = @"
-LDAPS is unavailable. Continuing with LDAP on port $LdapFallbackPort uses Negotiate authentication with LDAP signing and sealing.
-The connection does not use TLS, but the negotiated SASL security layer protects the bind and LDAP traffic.
-Password rotation will remain disabled until LDAPS becomes available.
-"@
-    Write-Warning $warning
-
-    if ($AllowLdapFallback.IsPresent) {
-        Write-Warning 'LDAP fallback was explicitly approved through -AllowLdapFallback.'
-        return $true
-    }
-
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
-        throw 'Interactive confirmation is unavailable in CI. Re-run with -AllowLdapFallback to explicitly approve unencrypted LDAP.'
-    }
-
-    $choices = @(
-        [System.Management.Automation.Host.ChoiceDescription]::new('&Yes', 'Use unencrypted LDAP for read and bind operations.'),
-        [System.Management.Automation.Host.ChoiceDescription]::new('&No', 'Cancel without enabling LDAP fallback.')
-    )
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($PackagePath)
     try {
-        $choice = $Host.UI.PromptForChoice(
-            'Approve unencrypted LDAP fallback?',
-            'Do you want to continue with LDAP instead of LDAPS?',
-            $choices,
-            1
-        )
+        foreach ($assemblyName in @(
+            'Microsoft.Extensions.Logging.Abstractions.dll',
+            'Novell.Directory.Ldap.NETStandard.dll'
+        )) {
+            $entry = $archive.Entries |
+                Where-Object { $_.Name -eq $assemblyName } |
+                Select-Object -First 1
+            if ($null -eq $entry) {
+                throw "Function package '$PackagePath' does not contain $assemblyName."
+            }
+            $stream = $entry.Open()
+            try {
+                $memory = [System.IO.MemoryStream]::new()
+                try {
+                    $stream.CopyTo($memory)
+                    $memory.Position = 0
+                    $null = [System.Runtime.Loader.AssemblyLoadContext]::Default.
+                        LoadFromStream($memory)
+                }
+                finally {
+                    $memory.Dispose()
+                }
+            }
+            finally {
+                $stream.Dispose()
+            }
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
+function Invoke-LdapSearch {
+    param(
+        [Parameter(Mandatory)]$Connection,
+        [Parameter()][AllowEmptyString()][string]$BaseDn = '',
+        [Parameter(Mandatory)][string]$Filter,
+        [Parameter(Mandatory)][int]$Scope,
+        [Parameter(Mandatory)][string[]]$Attributes
+    )
+
+    $constraints = [Novell.Directory.Ldap.LdapSearchConstraints]::new()
+    $constraints.SetControls(
+        [Novell.Directory.Ldap.LdapControl]::new(
+            '1.2.840.113556.1.4.1339',
+            $false,
+            $null))
+    $results = $Connection.SearchAsync(
+        $BaseDn,
+        $Scope,
+        $Filter,
+        $Attributes,
+        $false,
+        $constraints,
+        [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+    $entries = [Collections.Generic.List[object]]::new()
+    try {
+        while ($results.HasMoreAsync(
+            [Threading.CancellationToken]::None).GetAwaiter().GetResult()) {
+            $entries.Add($results.NextAsync(
+                [Threading.CancellationToken]::None).GetAwaiter().GetResult())
+        }
     }
     catch {
-        throw 'LDAP fallback requires interactive confirmation. Re-run with -AllowLdapFallback for noninteractive execution.'
+        $isReferral = $false
+        $currentException = $_.Exception
+        while ($null -ne $currentException) {
+            $resultCodeProperty = $currentException.PSObject.Properties['ResultCode']
+            if ($null -ne $resultCodeProperty -and
+                [int]$resultCodeProperty.Value -eq 10) {
+                $isReferral = $true
+                break
+            }
+            $currentException = $currentException.InnerException
+        }
+        if (-not $isReferral) {
+            throw
+        }
+        Write-Verbose "Ignored LDAP referrals outside the explicitly queried naming context '$BaseDn'."
     }
+    @($entries)
+}
 
-    if ($choice -ne 0) {
-        throw 'Installation canceled because LDAPS is unavailable and LDAP fallback was not approved.'
+function Get-LdapAttributeValue {
+    param(
+        [Parameter(Mandatory)]$Entry,
+        [Parameter(Mandatory)][string]$Name
+    )
+
+    $attribute = $Entry.GetAttributeSet().GetAttribute($Name)
+    if ($null -eq $attribute) {
+        return $null
     }
+    $attribute.StringValue
+}
 
+function Confirm-LdapFallbackUse {
+    Write-Warning "LDAPS is unavailable. Continuing securely with LDAP StartTLS on port $LdapFallbackPort."
     $true
 }
 
@@ -1075,184 +1164,71 @@ function Connect-ValidatedLdapDirectory {
             throw
         }
 
-        if ($script:TrustedCertificate -and
-            [HybridDeviceTaggerLdapCertificateValidatorV3]::ValidateTlsEndpoint(
-                $Server,
-                636,
-                $script:TrustedCertificate)) {
-            Write-Warning @"
-The native Windows LDAP client could not bind over LDAPS, but the strict TLS certificate handshake succeeded.
-Installer directory checks will use LDAP with Negotiate signing and sealing. The deployed Function remains LDAPS-only.
-"@
-            return Connect-LdapDirectory `
-                -Server $Server `
-                -Port $LdapFallbackPort `
-                -UseSsl $false
-        }
-
         $null = Confirm-LdapFallbackUse
         $connection = Connect-LdapDirectory `
             -Server $Server `
             -Port $LdapFallbackPort `
-            -UseSsl $false
+            -UseSsl $false `
+            -UseStartTls $true
         $script:EffectiveAllowLdapFallback = $true
         $connection
     }
 }
 
-function Get-LdapServerForDomain {
-    param([Parameter(Mandatory)][string]$DomainDnsName)
-
-    if ($ActiveDirectoryServer.EndsWith(
-        ".$DomainDnsName",
-        [StringComparison]::OrdinalIgnoreCase
-    )) {
-        return $ActiveDirectoryServer
-    }
-
-    $DomainDnsName
-}
-
-function Get-ActiveDirectoryAccountName {
-    $accountName = if ($ADServiceAccount.Contains('@')) {
-        $ADServiceAccount.Split('@', 2)[0]
-    }
-    elseif ($ADServiceAccount.Contains('\')) {
-        $ADServiceAccount.Split('\', 2)[1]
-    }
-    else {
-        $ADServiceAccount
-    }
-    if ($accountName.Length -gt 20) {
-        throw "The sAMAccountName derived from '$ADServiceAccount' exceeds 20 characters."
-    }
-    $accountName
-}
-
-function New-ComplexRandomPassword {
-    param([Parameter(Mandatory)][ValidateRange(4, 256)][int]$Length)
-
-    $characterSets = @(
-        'ABCDEFGHJKLMNPQRSTUVWXYZ',
-        'abcdefghijkmnopqrstuvwxyz',
-        '23456789',
-        '!#$%&*+-=?@_'
-    )
-    $allCharacters = $characterSets -join ''
-    $characters = [char[]]::new($Length)
-
-    for ($index = 0; $index -lt $characterSets.Count; $index++) {
-        $set = $characterSets[$index]
-        $characters[$index] = $set[[Security.Cryptography.RandomNumberGenerator]::GetInt32($set.Length)]
-    }
-    for ($index = $characterSets.Count; $index -lt $characters.Length; $index++) {
-        $characters[$index] = $allCharacters[
-            [Security.Cryptography.RandomNumberGenerator]::GetInt32($allCharacters.Length)
-        ]
-    }
-    for ($index = $characters.Length - 1; $index -gt 0; $index--) {
-        $swapIndex = [Security.Cryptography.RandomNumberGenerator]::GetInt32($index + 1)
-        $temporary = $characters[$index]
-        $characters[$index] = $characters[$swapIndex]
-        $characters[$swapIndex] = $temporary
-    }
-
-    -join $characters
-}
-
-function Set-RandomActiveDirectoryCredential {
-    $plainPassword = New-ComplexRandomPassword -Length $InitialPasswordLength
-    try {
-        $securePassword = [Security.SecureString]::new()
-        foreach ($character in $plainPassword.ToCharArray()) {
-            $securePassword.AppendChar($character)
-        }
-        $securePassword.MakeReadOnly()
-        $script:ActiveDirectoryCredential = [pscredential]::new(
-            $ADServiceAccount,
-            $securePassword
-        )
-    }
-    finally {
-        $plainPassword = $null
-    }
-}
-
-function Select-ActiveDirectoryResetCredential {
-    $choices = @(
-        [System.Management.Automation.Host.ChoiceDescription]::new(
-            '&Randomized',
-            'Reset to a cryptographically random complex password.'
-        ),
-        [System.Management.Automation.Host.ChoiceDescription]::new(
-            '&Enter',
-            'Enter the new password securely.'
-        ),
-        [System.Management.Automation.Host.ChoiceDescription]::new(
-            '&Cancel',
-            'Cancel without changing Active Directory.'
-        )
-    )
-    $choice = $Host.UI.PromptForChoice(
-        'Reset Active Directory service-account password?',
-        "Choose the new password source for '$ActiveDirectoryBindUserDistinguishedName'.",
-        $choices,
-        2
-    )
-
-    switch ($choice) {
-        0 { Set-RandomActiveDirectoryCredential }
-        1 {
-            $script:ActiveDirectoryCredential = Get-Credential `
-                -UserName $ADServiceAccount `
-                -Message 'Enter the new Active Directory service-account password'
-            if ($null -eq $script:ActiveDirectoryCredential) {
-                throw 'Password entry was canceled without changing Active Directory.'
-            }
-        }
-        default { throw 'Installation canceled without changing the Active Directory service account.' }
-    }
-}
-
-function Set-ActiveDirectoryAccountPassword {
+function Connect-NextAvailableLdapDirectory {
     param(
-        [Parameter(Mandatory)][System.DirectoryServices.Protocols.LdapConnection]$Connection,
-        [Parameter(Mandatory)][bool]$EnableAccount
+        [Parameter(Mandatory)][string[]]$Servers,
+        [Parameter(Mandatory)][string]$Domain
     )
 
-    $quotedPassword = '"' + $ActiveDirectoryCredential.GetNetworkCredential().Password + '"'
-    $passwordBytes = [Text.Encoding]::Unicode.GetBytes($quotedPassword)
-    try {
-        $passwordChange = [System.DirectoryServices.Protocols.DirectoryAttributeModification]::new()
-        $passwordChange.Name = 'unicodePwd'
-        $passwordChange.Operation = [System.DirectoryServices.Protocols.DirectoryAttributeOperation]::Replace
-        $null = $passwordChange.Add($passwordBytes)
-        $passwordRequest = [System.DirectoryServices.Protocols.ModifyRequest]::new(
-            $ActiveDirectoryBindUserDistinguishedName,
-            $passwordChange
-        )
-        $null = $Connection.SendRequest($passwordRequest)
+    $serverList = @($Servers | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($serverList.Count -eq 0) {
+        throw "No Active Directory domain controllers are available for '$Domain'."
+    }
 
-        $attributesRequest = [System.DirectoryServices.Protocols.ModifyRequest]::new(
-            $ActiveDirectoryBindUserDistinguishedName
-        )
-        $pwdLastSet = [System.DirectoryServices.Protocols.DirectoryAttributeModification]::new()
-        $pwdLastSet.Name = 'pwdLastSet'
-        $pwdLastSet.Operation = [System.DirectoryServices.Protocols.DirectoryAttributeOperation]::Replace
-        $null = $pwdLastSet.Add('-1')
-        $null = $attributesRequest.Modifications.Add($pwdLastSet)
-        if ($EnableAccount) {
-            $userAccountControl = [System.DirectoryServices.Protocols.DirectoryAttributeModification]::new()
-            $userAccountControl.Name = 'userAccountControl'
-            $userAccountControl.Operation = [System.DirectoryServices.Protocols.DirectoryAttributeOperation]::Replace
-            $null = $userAccountControl.Add('512')
-            $null = $attributesRequest.Modifications.Add($userAccountControl)
+    for ($index = 0; $index -lt $serverList.Count; $index++) {
+        $server = $serverList[$index]
+        try {
+            $connection = Connect-ValidatedLdapDirectory -Server $server
+            $script:LastConnectedActiveDirectoryServer = $server
+            return $connection
         }
-        $null = $Connection.SendRequest($attributesRequest)
+        catch {
+            $hasNextServer = $index -lt ($serverList.Count - 1)
+            if (-not $hasNextServer -or
+                -not (Test-LdapConnectionUnavailable -Exception $_.Exception)) {
+                throw
+            }
+            Write-Warning "Domain controller '$server' is unavailable; trying '$($serverList[$index + 1])'."
+        }
     }
-    finally {
-        [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+}
+
+function Get-ActiveDirectoryDomainControllerList {
+    param([Parameter(Mandatory)][string]$Domain)
+
+    $queryName = "_ldap._tcp.dc._msdcs.$($Domain.Trim().TrimEnd('.'))"
+    try {
+        $records = @(Resolve-DnsName `
+            -Name $queryName `
+            -Type SRV `
+            -DnsOnly `
+            -ErrorAction Stop | Where-Object {
+                $null -ne $_.PSObject.Properties['NameTarget'] -and
+                -not [string]::IsNullOrWhiteSpace([string]$_.NameTarget)
+            })
     }
+    catch {
+        throw "Active Directory DNS discovery failed for '$Domain' using '$queryName': $($_.Exception.Message)"
+    }
+    if ($records.Count -eq 0) {
+        throw "Active Directory DNS discovery returned no domain controllers for '$Domain' using '$queryName'."
+    }
+
+    @($records |
+        Sort-Object Priority, @{ Expression = 'Weight'; Descending = $true } |
+        ForEach-Object { ([string]$_.NameTarget).TrimEnd('.') } |
+        Select-Object -Unique)
 }
 
 function Test-LdapConnectionUnavailable {
@@ -1260,6 +1236,11 @@ function Test-LdapConnectionUnavailable {
 
     $currentException = $Exception
     while ($null -ne $currentException) {
+        $resultCodeProperty = $currentException.PSObject.Properties['ResultCode']
+        if ($null -ne $resultCodeProperty -and
+            [int]$resultCodeProperty.Value -in 51, 52, 81, 85, 91) {
+            return $true
+        }
         if ($currentException -is [System.DirectoryServices.Protocols.LdapException]) {
             return $currentException.ErrorCode -in 51, 52, 81, 85, 91
         }
@@ -1269,214 +1250,74 @@ function Test-LdapConnectionUnavailable {
     $false
 }
 
-function Initialize-ActiveDirectoryServiceAccountWithAdModule {
-    Import-Module ActiveDirectory -ErrorAction Stop
+function Assert-LdapStartTlsEndpoint {
+    param(
+        [Parameter(Mandatory)][string]$Server,
+        [Parameter(Mandatory)][int]$Port
+    )
 
+    $options = [Novell.Directory.Ldap.LdapConnectionOptions]::new().
+        ConfigureRemoteCertificateValidationCallback(
+            [HybridDeviceTaggerLdapCertificateValidatorV4]::CreateRemote(
+                $Server,
+                $script:TrustedCertificate))
+    $connection = [Novell.Directory.Ldap.LdapConnection]::new($options)
+    $connection.ConnectionTimeout = 15000
     try {
-        $account = Get-ADUser `
-            -Identity $ActiveDirectoryBindUserDistinguishedName `
-            -Server $ActiveDirectoryServer `
-            -Credential $script:ActiveDirectoryProvisioningCredential `
-            -ErrorAction Stop
-    }
-    catch {
-        if ($_.Exception.GetType().FullName -ne 'Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException') {
-            throw
-        }
-        $account = $null
-    }
-
-    if ($null -ne $account) {
-        Select-ActiveDirectoryResetCredential
-        Set-ADAccountPassword `
-            -Identity $ActiveDirectoryBindUserDistinguishedName `
-            -Server $ActiveDirectoryServer `
-            -Credential $script:ActiveDirectoryProvisioningCredential `
-            -Reset `
-            -NewPassword $script:ActiveDirectoryCredential.Password
-        Set-ADUser `
-            -Identity $ActiveDirectoryBindUserDistinguishedName `
-            -Server $ActiveDirectoryServer `
-            -Credential $script:ActiveDirectoryProvisioningCredential `
-            -ChangePasswordAtLogon $false
-        $script:ActiveDirectoryPasswordChanged = $true
-        Write-Host 'The AD service-account password was reset through Active Directory Web Services; password change at next logon is disabled.' -ForegroundColor Green
-        return
-    }
-
-    Set-RandomActiveDirectoryCredential
-    $dnMatch = [regex]::Match($ActiveDirectoryBindUserDistinguishedName, '(?i)^CN=([^,]+),(.+)$')
-    if (-not $dnMatch.Success) {
-        throw 'ActiveDirectoryBindUserDistinguishedName must start with an unescaped CN followed by its parent DN.'
-    }
-
-    $parameters = @{
-        Name = $dnMatch.Groups[1].Value
-        Description = $activeDirectoryServiceAccountDescription
-        SamAccountName = Get-ActiveDirectoryAccountName
-        Path = $dnMatch.Groups[2].Value
-        Server = $ActiveDirectoryServer
-        Credential = $script:ActiveDirectoryProvisioningCredential
-        AccountPassword = $script:ActiveDirectoryCredential.Password
-        Enabled = $true
-        ChangePasswordAtLogon = $false
-    }
-    if ($ADServiceAccount.Contains('@')) {
-        $parameters.UserPrincipalName = $ADServiceAccount
-    }
-    New-ADUser @parameters
-    $script:ActiveDirectoryPasswordChanged = $true
-    Write-Host 'The AD service account was created through Active Directory Web Services with a randomized complex password and enabled; password change at next logon is disabled.' -ForegroundColor Green
-}
-
-function Initialize-ActiveDirectoryServiceAccount {
-    Add-Type -AssemblyName System.DirectoryServices.Protocols
-
-    if ($ValidateOnly -or $WhatIfPreference) {
-        return
-    }
-    if ($null -eq $ActiveDirectoryProvisioningCredential) {
-        $script:ActiveDirectoryProvisioningCredential = Get-Credential `
-            -Message 'Credential permitted to create or reset the configured AD service account'
-    }
-    if ($null -eq $script:ActiveDirectoryProvisioningCredential) {
-        throw 'An Active Directory provisioning credential is required for installation.'
-    }
-
-    $connection = $null
-    try {
-        try {
-            $connection = Connect-LdapDirectory `
-                -Server $ActiveDirectoryServer `
-                -Port 636 `
-                -UseSsl $true `
-                -Credential $script:ActiveDirectoryProvisioningCredential
-        }
-        catch {
-            if (-not (Test-LdapConnectionUnavailable -Exception $_.Exception)) {
-                throw
-            }
-            $null = Confirm-LdapFallbackUse
-            Write-Warning 'Using the Active Directory PowerShell module over Active Directory Web Services for account bootstrap because LDAPS is unavailable.'
-            Initialize-ActiveDirectoryServiceAccountWithAdModule
-            return
-        }
-        $searchRequest = [System.DirectoryServices.Protocols.SearchRequest]::new(
-            $ActiveDirectoryBindUserDistinguishedName,
-            '(objectClass=user)',
-            [System.DirectoryServices.Protocols.SearchScope]::Base,
-            [string[]]@('distinguishedName')
-        )
-        try {
-            $response = [System.DirectoryServices.Protocols.SearchResponse]$connection.SendRequest($searchRequest)
-            $accountExists = $response.Entries.Count -eq 1
-        }
-        catch [System.DirectoryServices.Protocols.DirectoryOperationException] {
-            if ($_.Exception.Response.ResultCode -ne [System.DirectoryServices.Protocols.ResultCode]::NoSuchObject) {
-                throw
-            }
-            $accountExists = $false
-        }
-
-        if ($accountExists) {
-            Select-ActiveDirectoryResetCredential
-            Set-ActiveDirectoryAccountPassword -Connection $connection -EnableAccount $false
-            $script:ActiveDirectoryPasswordChanged = $true
-            Write-Host 'The AD service-account password was reset securely; password change at next logon is disabled.' -ForegroundColor Green
-            return
-        }
-
-        Set-RandomActiveDirectoryCredential
-        $dnMatch = [regex]::Match($ActiveDirectoryBindUserDistinguishedName, '(?i)^CN=([^,]+),(.+)$')
-        if (-not $dnMatch.Success) {
-            throw 'ActiveDirectoryBindUserDistinguishedName must start with an unescaped CN followed by its parent DN.'
-        }
-        $addRequest = [System.DirectoryServices.Protocols.AddRequest]::new(
-            $ActiveDirectoryBindUserDistinguishedName
-        )
-        $objectClass = [System.DirectoryServices.Protocols.DirectoryAttribute]::new('objectClass')
-        foreach ($className in @('top', 'person', 'organizationalPerson', 'user')) {
-            $null = $objectClass.Add($className)
-        }
-        $null = $addRequest.Attributes.Add($objectClass)
-        $null = $addRequest.Attributes.Add(
-            [System.DirectoryServices.Protocols.DirectoryAttribute]::new('cn', $dnMatch.Groups[1].Value)
-        )
-        $null = $addRequest.Attributes.Add(
-            [System.DirectoryServices.Protocols.DirectoryAttribute]::new(
-                'description',
-                $activeDirectoryServiceAccountDescription
-            )
-        )
-        $null = $addRequest.Attributes.Add(
-            [System.DirectoryServices.Protocols.DirectoryAttribute]::new(
-                'sAMAccountName',
-                (Get-ActiveDirectoryAccountName)
-            )
-        )
-        $null = $addRequest.Attributes.Add(
-            [System.DirectoryServices.Protocols.DirectoryAttribute]::new('userAccountControl', '514')
-        )
-        if ($ADServiceAccount.Contains('@')) {
-            $null = $addRequest.Attributes.Add(
-                [System.DirectoryServices.Protocols.DirectoryAttribute]::new(
-                    'userPrincipalName',
-                    $ADServiceAccount
-                )
-            )
-        }
-        $null = $connection.SendRequest($addRequest)
-        Set-ActiveDirectoryAccountPassword -Connection $connection -EnableAccount $true
-        $script:ActiveDirectoryPasswordChanged = $true
-        Write-Host 'The AD service account was created with a randomized complex password and enabled; password change at next logon is disabled.' -ForegroundColor Green
+        $null = $connection.ConnectAsync(
+            $Server,
+            $Port,
+            [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+        $null = $connection.StartTlsAsync(
+            [Threading.CancellationToken]::None).GetAwaiter().GetResult()
     }
     finally {
-        if ($null -ne $connection) {
-            $connection.Dispose()
-        }
+        $connection.Dispose()
     }
 }
 
 function Test-LdapConfiguration {
-    Add-Type -AssemblyName System.DirectoryServices.Protocols
-
-    if ($ActiveDirectoryCredential.UserName -ine $ADServiceAccount) {
-        throw "ActiveDirectoryCredential.UserName must match ADServiceAccount."
+    if ($ADServiceAccountCredential.UserName -ine $ADServiceAccount) {
+        throw "ADServiceAccountCredential.UserName must match ADServiceAccount."
     }
 
     $connection = $null
     $script:EffectiveAllowLdapFallback = $false
     try {
-        $connection = Connect-ValidatedLdapDirectory -Server $ActiveDirectoryServer
-        $rootRequest = [System.DirectoryServices.Protocols.SearchRequest]::new(
-            '',
-            '(objectClass=*)',
-            [System.DirectoryServices.Protocols.SearchScope]::Base,
-            [string[]]@('configurationNamingContext', 'defaultNamingContext', 'rootDomainNamingContext', 'dnsHostName')
-        )
-        $rootResponse = [System.DirectoryServices.Protocols.SearchResponse]$connection.SendRequest($rootRequest)
-        if ($rootResponse.Entries.Count -ne 1) {
+        $connection = Connect-NextAvailableLdapDirectory `
+            -Servers $script:ActiveDirectoryServerCandidates `
+            -Domain $ActiveDirectoryForestDomain
+        $rootEntries = @(Invoke-LdapSearch `
+            -Connection $connection `
+            -BaseDn '' `
+            -Filter '(objectClass=*)' `
+            -Scope ([Novell.Directory.Ldap.LdapConnection]::ScopeBase) `
+            -Attributes @('configurationNamingContext', 'defaultNamingContext', 'rootDomainNamingContext', 'dnsHostName'))
+        if ($rootEntries.Count -ne 1) {
             throw 'The LDAP RootDSE query did not return exactly one entry.'
         }
 
         $expectedForestDn = Convert-DnsNameToDistinguishedName $ActiveDirectoryForestDomain
-        $rootDomainNamingContext = [string]$rootResponse.Entries[0].Attributes['rootDomainNamingContext'][0]
+        $rootDomainNamingContext = Get-LdapAttributeValue `
+            -Entry $rootEntries[0] `
+            -Name 'rootDomainNamingContext'
         if ($rootDomainNamingContext -ine $expectedForestDn) {
             throw "AD forest mismatch. Expected '$expectedForestDn', received '$rootDomainNamingContext'."
         }
 
-        $configurationNamingContext = [string]$rootResponse.Entries[0].Attributes['configurationNamingContext'][0]
-        $partitionsRequest = [System.DirectoryServices.Protocols.SearchRequest]::new(
-            "CN=Partitions,$configurationNamingContext",
-            '(&(objectClass=crossRef)(systemFlags:1.2.840.113556.1.4.803:=3))',
-            [System.DirectoryServices.Protocols.SearchScope]::OneLevel,
-            [string[]]@('nCName', 'dnsRoot')
-        )
-        $partitionsResponse = [System.DirectoryServices.Protocols.SearchResponse]$connection.SendRequest($partitionsRequest)
-        $forestDomains = @($partitionsResponse.Entries | ForEach-Object {
+        $configurationNamingContext = Get-LdapAttributeValue `
+            -Entry $rootEntries[0] `
+            -Name 'configurationNamingContext'
+        $partitionEntries = @(Invoke-LdapSearch `
+            -Connection $connection `
+            -BaseDn "CN=Partitions,$configurationNamingContext" `
+            -Filter '(&(objectClass=crossRef)(systemFlags:1.2.840.113556.1.4.803:=3))' `
+            -Scope ([Novell.Directory.Ldap.LdapConnection]::ScopeOne) `
+            -Attributes @('nCName', 'dnsRoot'))
+        $forestDomains = @($partitionEntries | ForEach-Object {
             [pscustomobject]@{
-                NamingContext = [string]$_.Attributes['nCName'][0]
-                DnsRoot = [string]$_.Attributes['dnsRoot'][0]
+                NamingContext = Get-LdapAttributeValue -Entry $_ -Name 'nCName'
+                DnsRoot = Get-LdapAttributeValue -Entry $_ -Name 'dnsRoot'
             }
         } | Where-Object { $_.NamingContext -and $_.DnsRoot })
         if ($forestDomains.Count -eq 0) {
@@ -1489,89 +1330,25 @@ function Test-LdapConfiguration {
         }
     }
 
-    foreach ($configuredBaseDn in @($script:NormalizedTaggingRules.baseDn | Select-Object -Unique)) {
-        $isForestRelative = Test-ForestRelativeOuPath $configuredBaseDn
-        $searchTargets = if ($isForestRelative) {
-            @($forestDomains | ForEach-Object {
-                [pscustomobject]@{
-                    Server = Get-LdapServerForDomain $_.DnsRoot
-                    BaseDn = "$($configuredBaseDn.Trim().TrimEnd(',')),$($_.NamingContext)"
-                }
-            })
-        }
-        else {
-            @([pscustomobject]@{
-                Server = Get-LdapServerForDomain (
-                    Get-DomainDnsNameFromDistinguishedName $configuredBaseDn
-                )
-                BaseDn = $configuredBaseDn
-            })
-        }
-        $resolvedOuCount = 0
-
-        foreach ($target in $searchTargets) {
-            $domainConnection = $null
-            try {
-                $domainConnection = Connect-ValidatedLdapDirectory -Server $target.Server
-                $baseRequest = [System.DirectoryServices.Protocols.SearchRequest]::new(
-                    $target.BaseDn,
-                    '(objectClass=*)',
-                    [System.DirectoryServices.Protocols.SearchScope]::Base,
-                    [string[]]@('distinguishedName')
-                )
-                $baseResponse = [System.DirectoryServices.Protocols.SearchResponse]$domainConnection.SendRequest($baseRequest)
-                if ($baseResponse.Entries.Count -ne 1) {
-                    throw "Active Directory base DN '$($target.BaseDn)' was not found."
-                }
-                $resolvedOuCount++
-
-                $deviceRequest = [System.DirectoryServices.Protocols.SearchRequest]::new(
-                    $target.BaseDn,
-                    '(&(objectCategory=computer)(userCertificate=*))',
-                    [System.DirectoryServices.Protocols.SearchScope]::Subtree,
-                    [string[]]@('objectGUID')
-                )
-                $deviceRequest.SizeLimit = 1
-                try {
-                    $null = $domainConnection.SendRequest($deviceRequest)
-                }
-                catch [System.DirectoryServices.Protocols.DirectoryOperationException] {
-                    if ($_.Exception.Response.ResultCode -ne [System.DirectoryServices.Protocols.ResultCode]::SizeLimitExceeded) {
-                        throw
-                    }
-                }
-            }
-            catch [System.DirectoryServices.Protocols.DirectoryOperationException] {
-                if (-not $isForestRelative -or
-                    $_.Exception.Response.ResultCode -ne [System.DirectoryServices.Protocols.ResultCode]::NoSuchObject) {
-                    throw
-                }
-                Write-Host "OU path '$configuredBaseDn' is absent in domain '$($target.Server)'; skipping that domain."
-            }
-            finally {
-                if ($null -ne $domainConnection) {
-                    $domainConnection.Dispose()
-                }
-            }
-        }
-
-        if ($isForestRelative -and $resolvedOuCount -eq 0) {
-            throw "OU path '$configuredBaseDn' was not found in any domain in the forest."
-        }
+    $accountDomain = Get-DomainDnsNameFromDistinguishedName $ActiveDirectoryBindUserDistinguishedName
+    $accountServers = if ($accountDomain -ieq $ActiveDirectoryForestDomain) {
+        $script:ActiveDirectoryServerCandidates
     }
-
-    $accountServer = Get-DomainDnsNameFromDistinguishedName $ActiveDirectoryBindUserDistinguishedName
+    else {
+        Get-ActiveDirectoryDomainControllerList -Domain $accountDomain
+    }
     $accountConnection = $null
     try {
-        $accountConnection = Connect-ValidatedLdapDirectory -Server $accountServer
-        $accountRequest = [System.DirectoryServices.Protocols.SearchRequest]::new(
-            $ActiveDirectoryBindUserDistinguishedName,
-            '(objectClass=user)',
-            [System.DirectoryServices.Protocols.SearchScope]::Base,
-            [string[]]@('distinguishedName', 'userAccountControl', 'pwdLastSet')
-        )
-        $accountResponse = [System.DirectoryServices.Protocols.SearchResponse]$accountConnection.SendRequest($accountRequest)
-        if ($accountResponse.Entries.Count -ne 1) {
+        $accountConnection = Connect-NextAvailableLdapDirectory `
+            -Servers $accountServers `
+            -Domain $accountDomain
+        $accountEntries = @(Invoke-LdapSearch `
+            -Connection $accountConnection `
+            -BaseDn $ActiveDirectoryBindUserDistinguishedName `
+            -Filter '(objectClass=user)' `
+            -Scope ([Novell.Directory.Ldap.LdapConnection]::ScopeBase) `
+            -Attributes @('distinguishedName', 'userAccountControl', 'pwdLastSet'))
+        if ($accountEntries.Count -ne 1) {
             throw "AD service account '$ActiveDirectoryBindUserDistinguishedName' was not found."
         }
     }
@@ -1581,9 +1358,8 @@ function Test-LdapConfiguration {
         }
     }
 
-    if (-not $script:EffectiveAllowLdapFallback) {
-        Write-Host 'LDAPS validation succeeded for all required domains. LDAP fallback will be disabled.' -ForegroundColor Green
-    }
+    $transport = if ($script:EffectiveAllowLdapFallback) { 'LDAP with StartTLS' } else { 'LDAPS' }
+    Write-Host "Secure Active Directory validation succeeded through $transport." -ForegroundColor Green
 }
 
 function Assert-Subnet {
@@ -1673,7 +1449,7 @@ function Initialize-CurrentPasswordThroughFunction {
         '--scope', "api://$ManagementApiClientId/.default", '--only-show-errors', '--output', 'json'
     )
     $accessToken = ($tokenResult.Output | ConvertFrom-Json).accessToken
-    $plainPassword = $ActiveDirectoryCredential.GetNetworkCredential().Password
+    $plainPassword = $ADServiceAccountCredential.GetNetworkCredential().Password
     try {
         $body = @{ password = $plainPassword } | ConvertTo-Json -Compress
         $uri = "https://$FunctionAppName.azurewebsites.net/api/management/actions/initialize-ad-credential"
@@ -1688,12 +1464,41 @@ function Initialize-CurrentPasswordThroughFunction {
                 break
             }
             catch {
-                if ($_.Exception.Response.StatusCode -eq 409) {
+                $responseProperty = $_.Exception.PSObject.Properties['Response']
+                $statusCode = if ($null -ne $responseProperty -and
+                    $null -ne $responseProperty.Value) {
+                    $statusCodeProperty = $responseProperty.Value.PSObject.Properties['StatusCode']
+                    if ($null -ne $statusCodeProperty) {
+                        [int]$statusCodeProperty.Value
+                    }
+                    else {
+                        0
+                    }
+                }
+                else {
+                    0
+                }
+                if ($statusCode -eq 409) {
                     Write-Host 'The Active Directory credential is already initialized.' -ForegroundColor Green
                     return
                 }
-                if ($attempt -eq 6) {
-                    throw
+                if ($statusCode -notin @(404, 502, 503, 504) -or $attempt -eq 6) {
+                    $errorDetail = ''
+                    $errorDetailsProperty = $_.PSObject.Properties['ErrorDetails']
+                    if ($null -ne $errorDetailsProperty -and
+                        $null -ne $errorDetailsProperty.Value) {
+                        $messageProperty = $errorDetailsProperty.Value.PSObject.Properties['Message']
+                        $errorDetail = if ($null -ne $messageProperty) {
+                            [string]$messageProperty.Value
+                        }
+                        else {
+                            [string]$errorDetailsProperty.Value
+                        }
+                    }
+                    if ([string]::IsNullOrWhiteSpace($errorDetail)) {
+                        $errorDetail = [string]$_.Exception.Message
+                    }
+                    throw "Active Directory credential initialization failed with HTTP $statusCode`: $errorDetail"
                 }
                 Write-Warning "Function API is not ready; retrying credential initialization ($attempt/6)."
                 Start-Sleep -Seconds 10
@@ -1788,8 +1593,9 @@ function Get-DeploymentParameter {
         keyVaultResourceGroupName = $KeyVaultResourceGroupName
         keyVaultSubscriptionId = $KeyVaultSubscriptionId
         keyVaultPrivateDnsZoneResourceId = $script:KeyVaultPrivateDnsZoneResourceId
-        activeDirectoryServer = $ActiveDirectoryServer
-        allowLdapFallback = $script:EffectiveAllowLdapFallback
+        storagePrivateDnsZoneResourceId = $script:StoragePrivateDnsZoneResourceId
+        activeDirectoryDomain = $ActiveDirectoryForestDomain
+        allowLdapFallback = $true
         ldapFallbackPort = $LdapFallbackPort
         activeDirectoryTrustedCertificatePath = if ($ActiveDirectoryTrustedCertificatePath) {
             $trustedCertificatePackagePath
@@ -1799,7 +1605,6 @@ function Get-DeploymentParameter {
         activeDirectoryBindUsername = $ADServiceAccount
         activeDirectoryBindUserDistinguishedName = $ActiveDirectoryBindUserDistinguishedName
         managementApiClientId = $ManagementApiClientId
-        taggingRules = $script:NormalizedTaggingRules
         currentPasswordSecretName = $CurrentCredentialEntryName
         nextPasswordSecretName = $StagedCredentialEntryName
         taggingSchedule = $TaggingSchedule
@@ -1866,26 +1671,8 @@ function Grant-GraphApplicationPermission {
     }
 }
 
-function Set-ManagementApiAuthorization {
-    $applicationResponse = Get-AzureJson -Arguments @(
-        'rest', '--method', 'get',
-        '--url', "https://graph.microsoft.com/v1.0/applications?`$filter=appId%20eq%20%27$ManagementApiClientId%27&`$select=id,appId,appRoles"
-    )
-    $application = @($applicationResponse.value)[0]
-    if (-not $application) {
-        throw "Management API application '$ManagementApiClientId' was not found in Microsoft Entra ID."
-    }
-
-    $servicePrincipalResponse = Get-AzureJson -Arguments @(
-        'rest', '--method', 'get',
-        '--url', "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId%20eq%20%27$ManagementApiClientId%27&`$select=id,appId,appRoleAssignmentRequired"
-    )
-    $servicePrincipal = @($servicePrincipalResponse.value)[0]
-    if (-not $servicePrincipal) {
-        throw "Management API enterprise application '$ManagementApiClientId' was not found."
-    }
-
-    $roleDefinitions = @(
+function Get-ManagementApiRoleDefinition {
+    @(
         [ordered]@{
             id = 'bbd6f683-ae76-427f-9600-fef96529b9f5'
             value = 'HybridDeviceTagger.Reader'
@@ -1927,6 +1714,189 @@ function Set-ManagementApiAuthorization {
             isEnabled = $true
         }
     )
+}
+
+function New-ManagementApiApplication {
+    $roleDefinitions = @(Get-ManagementApiRoleDefinition)
+    $body = ConvertTo-AzureCliJsonArgument -Json (@{
+        displayName = "$FunctionAppName Management API"
+        signInAudience = 'AzureADMyOrg'
+        appRoles = $roleDefinitions
+    } | ConvertTo-Json -Depth 10 -Compress)
+    $application = Get-AzureJson -Arguments @(
+        'rest', '--method', 'post',
+        '--url', 'https://graph.microsoft.com/v1.0/applications',
+        '--headers', 'Content-Type=application/json',
+        '--body', $body
+    )
+    if ([string]::IsNullOrWhiteSpace([string]$application.id) -or
+        [string]::IsNullOrWhiteSpace([string]$application.appId)) {
+        throw 'Microsoft Graph did not return the created management API application identifiers.'
+    }
+
+    $script:CreatedManagementApiApplicationObjectId = [string]$application.id
+    $ManagementApiClientId = [string]$application.appId
+    Set-Variable -Name ManagementApiClientId -Scope Script -Value $ManagementApiClientId
+
+    $identifierBody = ConvertTo-AzureCliJsonArgument -Json (@{
+        identifierUris = @("api://$ManagementApiClientId")
+    } | ConvertTo-Json -Compress)
+    $null = Invoke-AzureCli -Arguments @(
+        'rest', '--method', 'patch',
+        '--url', "https://graph.microsoft.com/v1.0/applications/$($application.id)",
+        '--headers', 'Content-Type=application/json',
+        '--body', $identifierBody,
+        '--only-show-errors'
+    )
+
+    $servicePrincipalBody = ConvertTo-AzureCliJsonArgument -Json (@{
+        appId = $ManagementApiClientId
+    } | ConvertTo-Json -Compress)
+    for ($attempt = 1; $attempt -le 6; $attempt++) {
+        $servicePrincipalResult = Invoke-AzureCli -Arguments @(
+            'rest', '--method', 'post',
+            '--url', 'https://graph.microsoft.com/v1.0/servicePrincipals',
+            '--headers', 'Content-Type=application/json',
+            '--body', $servicePrincipalBody,
+            '--only-show-errors', '--output', 'json'
+        ) -AllowFailure
+        if ($servicePrincipalResult.ExitCode -eq 0) {
+            Write-Host "Created management API Entra application '$ManagementApiClientId'." -ForegroundColor Green
+            return
+        }
+        if ($attempt -lt 6) {
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    throw "The management API application was created, but its Enterprise Application could not be created:`n$($servicePrincipalResult.Output)"
+}
+
+function Set-ManagementApiAuthorization {
+    $azureCliApplicationId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
+    $delegatedPermissionId = '7d5db24c-bf9d-4b19-9b31-4f021da659be'
+    $applicationResponse = Get-AzureJson -Arguments @(
+        'rest', '--method', 'get',
+        '--url', "https://graph.microsoft.com/v1.0/applications?`$filter=appId%20eq%20%27$ManagementApiClientId%27&`$select=id,appId,appRoles,identifierUris,api"
+    )
+    $application = @($applicationResponse.value)[0]
+    if (-not $application) {
+        throw "Management API application '$ManagementApiClientId' was not found in Microsoft Entra ID."
+    }
+
+    $servicePrincipalResponse = Get-AzureJson -Arguments @(
+        'rest', '--method', 'get',
+        '--url', "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId%20eq%20%27$ManagementApiClientId%27&`$select=id,appId,appRoleAssignmentRequired"
+    )
+    $servicePrincipal = @($servicePrincipalResponse.value)[0]
+    if (-not $servicePrincipal) {
+        throw "Management API enterprise application '$ManagementApiClientId' was not found."
+    }
+
+    $roleDefinitions = @(Get-ManagementApiRoleDefinition)
+    $requiredIdentifierUri = "api://$ManagementApiClientId"
+    if (@($application.identifierUris) -notcontains $requiredIdentifierUri) {
+        $identifierBody = ConvertTo-AzureCliJsonArgument -Json (@{
+            identifierUris = @(@($application.identifierUris) + $requiredIdentifierUri)
+        } | ConvertTo-Json -Compress)
+        $null = Invoke-AzureCli -Arguments @(
+            'rest', '--method', 'patch',
+            '--url', "https://graph.microsoft.com/v1.0/applications/$($application.id)",
+            '--headers', 'Content-Type=application/json',
+            '--body', $identifierBody,
+            '--only-show-errors'
+        )
+        Write-Host "Management API identifier URI '$requiredIdentifierUri' configured."
+    }
+
+    $delegatedPermission = [ordered]@{
+        adminConsentDescription = 'Access HybridDeviceTagger management operations as the signed-in user.'
+        adminConsentDisplayName = 'Access HybridDeviceTagger management operations'
+        id = $delegatedPermissionId
+        isEnabled = $true
+        type = 'User'
+        userConsentDescription = 'Access HybridDeviceTagger management operations that you are authorized to perform.'
+        userConsentDisplayName = 'Access HybridDeviceTagger management operations'
+        value = 'access_as_user'
+    }
+    $updatedScopes = [System.Collections.Generic.List[object]]::new()
+    foreach ($existingScope in @($application.api.oauth2PermissionScopes)) {
+        if ([string]$existingScope.id -eq $delegatedPermissionId -or
+            [string]$existingScope.value -eq $delegatedPermission.value) {
+            continue
+        }
+        $updatedScopes.Add($existingScope)
+    }
+    $updatedScopes.Add($delegatedPermission)
+    $currentDelegatedPermission = @($application.api.oauth2PermissionScopes | Where-Object {
+        [string]$_.id -eq $delegatedPermissionId -or
+        [string]$_.value -eq $delegatedPermission.value
+    })[0]
+    $scopeNeedsUpdate = $null -eq $currentDelegatedPermission -or
+        [string]$currentDelegatedPermission.id -ne $delegatedPermissionId -or
+        [string]$currentDelegatedPermission.value -cne $delegatedPermission.value -or
+        [string]$currentDelegatedPermission.type -cne $delegatedPermission.type -or
+        [bool]$currentDelegatedPermission.isEnabled -ne $delegatedPermission.isEnabled -or
+        [string]$currentDelegatedPermission.adminConsentDescription -cne
+            $delegatedPermission.adminConsentDescription -or
+        [string]$currentDelegatedPermission.adminConsentDisplayName -cne
+            $delegatedPermission.adminConsentDisplayName -or
+        [string]$currentDelegatedPermission.userConsentDescription -cne
+            $delegatedPermission.userConsentDescription -or
+        [string]$currentDelegatedPermission.userConsentDisplayName -cne
+            $delegatedPermission.userConsentDisplayName
+
+    $updatedPreAuthorizedApplications = [System.Collections.Generic.List[object]]::new()
+    foreach ($existingPreAuthorization in @($application.api.preAuthorizedApplications)) {
+        if ([string]$existingPreAuthorization.appId -eq $azureCliApplicationId) {
+            continue
+        }
+        $updatedPreAuthorizedApplications.Add($existingPreAuthorization)
+    }
+    $updatedPreAuthorizedApplications.Add([ordered]@{
+        appId = $azureCliApplicationId
+        delegatedPermissionIds = @($delegatedPermissionId)
+    })
+    $currentPreAuthorization = @($application.api.preAuthorizedApplications | Where-Object {
+        [string]$_.appId -eq $azureCliApplicationId
+    })[0]
+    $preAuthorizationNeedsUpdate = $null -eq $currentPreAuthorization -or
+        @($currentPreAuthorization.delegatedPermissionIds) -notcontains $delegatedPermissionId
+
+    if ($scopeNeedsUpdate) {
+        $scopeBody = ConvertTo-AzureCliJsonArgument -Json (@{
+            api = @{
+                oauth2PermissionScopes = @($updatedScopes)
+            }
+        } | ConvertTo-Json -Depth 10 -Compress)
+        $null = Invoke-AzureCli -Arguments @(
+            'rest', '--method', 'patch',
+            '--url', "https://graph.microsoft.com/v1.0/applications/$($application.id)",
+            '--headers', 'Content-Type=application/json',
+            '--body', $scopeBody,
+            '--only-show-errors'
+        )
+        Write-Host 'Management API delegated scope configured.'
+    }
+
+    if ($preAuthorizationNeedsUpdate) {
+        $preAuthorizationBody = ConvertTo-AzureCliJsonArgument -Json (@{
+            api = @{
+                preAuthorizedApplications = @($updatedPreAuthorizedApplications)
+            }
+        } | ConvertTo-Json -Depth 10 -Compress)
+        $null = Invoke-AzureCli -Arguments @(
+            'rest', '--method', 'patch',
+            '--url', "https://graph.microsoft.com/v1.0/applications/$($application.id)",
+            '--headers', 'Content-Type=application/json',
+            '--body', $preAuthorizationBody,
+            '--only-show-errors'
+        )
+        Write-Host 'Management API delegated access configured for Microsoft Azure CLI.'
+    }
+    if (-not $scopeNeedsUpdate -and -not $preAuthorizationNeedsUpdate) {
+        Write-Host 'Management API delegated access for Microsoft Azure CLI is already configured.'
+    }
 
     $updatedRoles = [System.Collections.Generic.List[object]]::new()
     foreach ($existingRole in @($application.appRoles)) {
@@ -1945,15 +1915,16 @@ function Set-ManagementApiAuthorization {
     $rolesNeedUpdate = $false
     foreach ($roleDefinition in $roleDefinitions) {
         $currentRole = @($application.appRoles | Where-Object id -EQ $roleDefinition.id)[0]
-        $memberTypeDifference = if ($currentRole) {
-            @(Compare-Object @($currentRole.allowedMemberTypes) @($roleDefinition.allowedMemberTypes))
-        } else { @('missing') }
+        $memberTypesDiffer = $null -eq $currentRole -or
+            $null -ne (Compare-Object `
+                @($currentRole.allowedMemberTypes) `
+                @($roleDefinition.allowedMemberTypes))
         if (-not $currentRole -or
             [string]$currentRole.value -cne $roleDefinition.value -or
             [string]$currentRole.displayName -cne $roleDefinition.displayName -or
             [string]$currentRole.description -cne $roleDefinition.description -or
             [bool]$currentRole.isEnabled -ne $roleDefinition.isEnabled -or
-            $memberTypeDifference.Count -gt 0) {
+            $memberTypesDiffer) {
             $rolesNeedUpdate = $true
             break
         }
@@ -2013,29 +1984,8 @@ function Set-ManagementApiAuthorization {
             '--body', $body,
             '--only-show-errors'
         )
-        Write-Host 'Management API enterprise application now requires role assignment.'
+        Write-Host 'Management API enterprise application allows Function App RBAC authorization.'
     }
-}
-
-function Get-RestrictedAdministrativeUnitTarget {
-    $administrativeUnitIds = @(
-        $script:NormalizedTaggingRules |
-            ForEach-Object {
-                @(Get-TaggingRuleValue -InputRule $_ -PropertyName 'administrativeUnitIds')
-            } |
-            Select-Object -Unique
-    )
-    $restrictedTargets = [System.Collections.Generic.List[object]]::new()
-    foreach ($administrativeUnitId in $administrativeUnitIds) {
-        $administrativeUnit = Get-AzureJson -Arguments @(
-            'rest', '--method', 'get',
-            '--url', "https://graph.microsoft.com/v1.0/directory/administrativeUnits/$administrativeUnitId`?`$select=id,displayName,isMemberManagementRestricted"
-        )
-        if ($administrativeUnit.isMemberManagementRestricted -eq $true) {
-            $restrictedTargets.Add($administrativeUnit)
-        }
-    }
-    $restrictedTargets.ToArray()
 }
 
 function Grant-RestrictedAdministrativeUnitRole {
@@ -2113,8 +2063,10 @@ function Publish-FunctionApp {
     $publishPath = Join-Path $temporaryRoot 'publish'
     $zipPath = Join-Path $temporaryRoot 'HybridDeviceTagger.zip'
     try {
-        $null = New-Item -ItemType Directory -Path $publishPath -Force
-        Expand-Archive -LiteralPath $FunctionPackagePath -DestinationPath $publishPath
+        $null = New-Item -ItemType Directory -Path $publishPath -Force -Confirm:$false
+        [System.IO.Compression.ZipFile]::ExtractToDirectory(
+            $FunctionPackagePath,
+            $publishPath)
         foreach ($requiredPackageFile in @('host.json', 'worker.config.json', 'functions.metadata')) {
             if (-not (Test-Path (Join-Path $publishPath $requiredPackageFile) -PathType Leaf)) {
                 throw "Function package is missing required file '$requiredPackageFile'."
@@ -2122,13 +2074,21 @@ function Publish-FunctionApp {
         }
         if ($ActiveDirectoryTrustedCertificatePath) {
             $certificateDirectory = Join-Path $publishPath 'certificates'
-            $null = New-Item -ItemType Directory -Path $certificateDirectory -Force
+            $null = New-Item `
+                -ItemType Directory `
+                -Path $certificateDirectory `
+                -Force `
+                -Confirm:$false
             [System.IO.File]::WriteAllText(
                 (Join-Path $publishPath $trustedCertificatePackagePath),
                 $script:TrustedCertificate.ExportCertificatePem(),
                 [System.Text.Encoding]::ASCII)
         }
-        Compress-Archive -Path (Join-Path $publishPath '*') -DestinationPath $zipPath -CompressionLevel Optimal
+        Compress-Archive `
+            -Path (Join-Path $publishPath '*') `
+            -DestinationPath $zipPath `
+            -CompressionLevel Optimal `
+            -Confirm:$false
         $null = Invoke-AzureCli -Arguments @(
             'functionapp', 'deployment', 'source', 'config-zip',
             '--subscription', $SubscriptionId,
@@ -2140,16 +2100,131 @@ function Publish-FunctionApp {
     }
     finally {
         if (Test-Path $temporaryRoot) {
-            Remove-Item -Path $temporaryRoot -Recurse -Force
+            Remove-Item -Path $temporaryRoot -Recurse -Force -Confirm:$false
         }
     }
+}
+
+function Get-PrivateEndpointAddress {
+    param(
+        [Parameter(Mandatory)][string]$PrivateEndpointName,
+        [Parameter(Mandatory)][string]$PrivateEndpointLabel
+    )
+
+    $privateEndpoint = Get-AzureJson -Arguments @(
+        'network', 'private-endpoint', 'show',
+        '--subscription', $SubscriptionId,
+        '--resource-group', $ResourceGroupName,
+        '--name', $PrivateEndpointName
+    )
+    $networkInterfaceId = [string](@($privateEndpoint.networkInterfaces)[0].id)
+    if ([string]::IsNullOrWhiteSpace($networkInterfaceId)) {
+        throw "$PrivateEndpointLabel private endpoint '$PrivateEndpointName' does not expose a network interface."
+    }
+    $networkInterface = Get-AzureJson -Arguments @(
+        'network', 'nic', 'show',
+        '--subscription', $SubscriptionId,
+        '--ids', $networkInterfaceId
+    )
+    $expectedAddresses = @(
+        $networkInterface.ipConfigurations |
+            ForEach-Object { [string]$_.privateIPAddress } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    if ($expectedAddresses.Count -eq 0) {
+        throw "$PrivateEndpointLabel private endpoint '$PrivateEndpointName' does not have a private IP address."
+    }
+
+    $expectedAddresses
+}
+
+function Assert-CustomDnsPrivateEndpointResolution {
+    param(
+        [Parameter(Mandatory)][string[]]$DnsServers,
+        [Parameter(Mandatory)][string]$HostName,
+        [Parameter(Mandatory)][string]$PrivateDnsZoneName,
+        [Parameter(Mandatory)][string[]]$ExpectedAddresses,
+        [Parameter(Mandatory)][string]$EndpointLabel
+    )
+
+    foreach ($dnsServer in $DnsServers) {
+        for ($attempt = 1; $attempt -le 6; $attempt++) {
+            $resolvedAddresses = @(
+                Resolve-DnsName `
+                    -Name $HostName `
+                    -Server $dnsServer `
+                    -Type A `
+                    -DnsOnly `
+                    -ErrorAction SilentlyContinue |
+                    Where-Object { $null -ne $_.PSObject.Properties['IPAddress'] } |
+                    ForEach-Object { [string]$_.PSObject.Properties['IPAddress'].Value } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+            )
+            if (@($resolvedAddresses | Where-Object { $ExpectedAddresses -contains $_ }).Count -gt 0) {
+                break
+            }
+            if ($attempt -lt 6) {
+                Start-Sleep -Seconds 5
+            }
+        }
+
+        if (@($resolvedAddresses | Where-Object { $ExpectedAddresses -contains $_ }).Count -eq 0) {
+            throw @"
+Custom DNS server '$dnsServer' does not resolve '$HostName' to the $EndpointLabel private endpoint address $($ExpectedAddresses -join ', ').
+Configure a conditional forwarder for '$PrivateDnsZoneName' to Azure DNS '168.63.129.16', then retry the installation.
+On a Windows DNS server, run as a DNS administrator:
+Add-DnsServerConditionalForwarderZone -Name '$PrivateDnsZoneName' -MasterServers 168.63.129.16 -ReplicationScope Forest
+"@
+        }
+    }
+}
+
+function Assert-PrivateEndpointDnsResolution {
+    $customDnsServers = @($virtualNetwork.dhcpOptions.dnsServers)
+    if ($customDnsServers.Count -eq 0) {
+        return
+    }
+
+    $storageAccount = Get-AzureJson -Arguments @(
+        'storage', 'account', 'show',
+        '--subscription', $SubscriptionId,
+        '--resource-group', $ResourceGroupName,
+        '--name', $StorageAccountName
+    )
+    Assert-CustomDnsPrivateEndpointResolution `
+        -DnsServers $customDnsServers `
+        -HostName ([uri][string]$storageAccount.primaryEndpoints.blob).Host `
+        -PrivateDnsZoneName 'privatelink.blob.core.windows.net' `
+        -ExpectedAddresses @(Get-PrivateEndpointAddress `
+            -PrivateEndpointName "pe-$StorageAccountName-blob" `
+            -PrivateEndpointLabel 'Storage') `
+        -EndpointLabel 'Storage'
+
+    if ($CreateKeyVault) {
+        $vault = Get-AzureJson -Arguments @(
+            'keyvault', 'show',
+            '--subscription', $KeyVaultSubscriptionId,
+            '--resource-group', $KeyVaultResourceGroupName,
+            '--name', $KeyVaultName
+        )
+        Assert-CustomDnsPrivateEndpointResolution `
+            -DnsServers $customDnsServers `
+            -HostName ([uri][string]$vault.properties.vaultUri).Host `
+            -PrivateDnsZoneName 'privatelink.vaultcore.azure.net' `
+            -ExpectedAddresses @(Get-PrivateEndpointAddress `
+                -PrivateEndpointName "pe-$KeyVaultName" `
+                -PrivateEndpointLabel 'Key Vault') `
+            -EndpointLabel 'Key Vault'
+    }
+
+    Write-Host "Private endpoint DNS resolution validated through custom DNS server(s): $($customDnsServers -join ', ')." -ForegroundColor Green
 }
 
 $installerLogPath = Join-Path ([System.IO.Path]::GetTempPath()) 'HybridDeviceTagger-Install.log'
 $transcriptStarted = $false
 $compactFailure = $false
 try {
-    Start-Transcript -Path $installerLogPath -Force | Out-Null
+    Start-Transcript -Path $installerLogPath -Force -Confirm:$false | Out-Null
     $transcriptStarted = $true
     Write-Host "Installer log: $installerLogPath"
 
@@ -2157,7 +2232,7 @@ Write-Step 'Validating Azure subscription'
 Assert-Command -Name az -InstallHint 'Install Azure CLI 2.60.0 or newer.'
 $account = Get-AzureJson -Arguments @('account', 'show')
 if ([string]::IsNullOrWhiteSpace($SubscriptionId)) {
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+    if ($script:NonInteractive) {
         throw 'SubscriptionId must be supplied explicitly for noninteractive execution.'
     }
     $enteredSubscriptionId = Read-Host (
@@ -2187,7 +2262,7 @@ if ($account.id -ine $SubscriptionId) {
 Write-Host "Azure subscription '$($account.name)' ($SubscriptionId) validated." -ForegroundColor Green
 
 if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) {
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+    if ($script:NonInteractive) {
         throw 'ResourceGroupName must be supplied explicitly for noninteractive execution.'
     }
     $enteredResourceGroupName = Read-Host 'Resource group name [rg-HybridDeviceTagger]'
@@ -2200,7 +2275,7 @@ if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($Location)) {
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+    if ($script:NonInteractive) {
         throw 'Location must be supplied explicitly for noninteractive execution.'
     }
     $enteredLocation = Read-Host 'Azure location [westeurope]'
@@ -2213,7 +2288,7 @@ if ([string]::IsNullOrWhiteSpace($Location)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($FunctionAppName)) {
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+    if ($script:NonInteractive) {
         throw 'FunctionAppName must be supplied explicitly for noninteractive execution.'
     }
     $defaultFunctionAppName = "func-devtagger-$([DateTime]::UtcNow.ToString('yyyyMMdd'))"
@@ -2227,7 +2302,7 @@ if ([string]::IsNullOrWhiteSpace($FunctionAppName)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($StorageAccountName)) {
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+    if ($script:NonInteractive) {
         throw 'StorageAccountName must be supplied explicitly for noninteractive execution.'
     }
     $storageNameSuffix = (Get-AppResourceNameSuffix) -replace '[^a-z0-9]', ''
@@ -2248,7 +2323,7 @@ if ([string]::IsNullOrWhiteSpace($StorageAccountName)) {
 if ([string]::IsNullOrWhiteSpace($VirtualNetworkSubscriptionId)) {
     if (-not $virtualNetworkSubscriptionWasSupplied -and
         -not $virtualNetworkResourceGroupWasSupplied -and
-        $env:TF_BUILD -ne 'True' -and $env:CI -ne 'true') {
+        -not $script:NonInteractive) {
         $enteredVirtualNetworkSubscriptionId = Read-Host (
             "Virtual network subscription ID [$SubscriptionId]"
         )
@@ -2422,10 +2497,96 @@ if (@($privateEndpoints | Where-Object { $_.subnet.id -ieq $subnet.id }).Count -
     throw "FC1 integration subnet '$SubnetName' must not contain private endpoints."
 }
 Write-Host "Private endpoint subnet '$PrivateEndpointSubnetName' validated." -ForegroundColor Green
+$script:StoragePrivateDnsZoneResourceId = Get-PrivateDnsZoneResourceId `
+    -ZoneName 'privatelink.blob.core.windows.net'
+if ($script:StoragePrivateDnsZoneResourceId) {
+    Write-Host "Reusing Storage private DNS zone '$($script:StoragePrivateDnsZoneResourceId)'."
+}
+
+if ([string]::IsNullOrWhiteSpace($ActiveDirectoryForestDomain)) {
+    $defaultActiveDirectoryForestDomain = Get-LoggedOnUserForestDomain
+    if ([string]::IsNullOrWhiteSpace($defaultActiveDirectoryForestDomain)) {
+        $ActiveDirectoryForestDomain = Read-RequiredInstallerValue `
+            -Name 'ActiveDirectoryForestDomain' `
+            -Prompt 'Active Directory forest DNS name'
+    }
+    elseif (-not $script:NonInteractive) {
+        $enteredActiveDirectoryForestDomain = Read-Host (
+            "Active Directory forest DNS name [$defaultActiveDirectoryForestDomain]"
+        )
+        $ActiveDirectoryForestDomain = if (
+            [string]::IsNullOrWhiteSpace($enteredActiveDirectoryForestDomain)
+        ) {
+            $defaultActiveDirectoryForestDomain
+        }
+        else {
+            $enteredActiveDirectoryForestDomain.Trim()
+        }
+    }
+    else {
+        $ActiveDirectoryForestDomain = $defaultActiveDirectoryForestDomain
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($ActiveDirectoryServer)) {
+    $script:ActiveDirectoryServerCandidates = @(
+        Get-ActiveDirectoryDomainControllerList -Domain $ActiveDirectoryForestDomain
+    )
+    $ActiveDirectoryServer = $script:ActiveDirectoryServerCandidates[0]
+    Write-Host (
+        "Discovered Active Directory domain controllers through DNS SRV: {0}" -f
+        ($script:ActiveDirectoryServerCandidates -join ', ')
+    )
+}
+else {
+    $script:ActiveDirectoryServerCandidates = @($ActiveDirectoryServer)
+}
+
+if ([string]::IsNullOrWhiteSpace($ADServiceAccount)) {
+    if ($null -ne $ADServiceAccountCredential) {
+        $ADServiceAccount = $ADServiceAccountCredential.UserName.Trim()
+    }
+    elseif ($script:NonInteractive) {
+        throw 'ADServiceAccountCredential or ADServiceAccount must be supplied explicitly for noninteractive execution.'
+    }
+    else {
+        $defaultADServiceAccount = "HybridDeviceTagger@$ActiveDirectoryForestDomain"
+        $enteredADServiceAccount = Read-Host (
+            "Service Account [$defaultADServiceAccount]"
+        )
+        $ADServiceAccount = if (
+            [string]::IsNullOrWhiteSpace($enteredADServiceAccount)
+        ) {
+            $defaultADServiceAccount
+        }
+        else {
+            $enteredADServiceAccount.Trim()
+        }
+    }
+}
+if ($ADServiceAccount -notmatch '^[^@\s]+@[^@\s]+$') {
+    throw 'ADServiceAccount must be a user principal name such as service-account@contoso.com.'
+}
+
+if (-not $SkipActiveDirectoryDirectoryChecks -and
+    $null -eq $ADServiceAccountCredential) {
+    if ($script:NonInteractive) {
+        throw 'ADServiceAccountCredential must be supplied explicitly for noninteractive execution.'
+    }
+    $ADServiceAccountCredential = Get-Credential `
+        -UserName $ADServiceAccount `
+        -Message 'Enter the Active Directory service-account password for bind validation'
+    if ($null -eq $ADServiceAccountCredential) {
+        throw 'Active Directory service-account credential entry was canceled.'
+    }
+}
+if ($null -ne $ADServiceAccountCredential -and
+    $ADServiceAccountCredential.UserName -ine $ADServiceAccount) {
+    throw 'The credential user name must match the selected AD service-account UPN.'
+}
 
 if (-not $createKeyVaultWasSupplied -and
-    $env:TF_BUILD -ne 'True' -and
-    $env:CI -ne 'true') {
+    -not $script:NonInteractive) {
     $keyVaultChoices = @(
         [System.Management.Automation.Host.ChoiceDescription]::new(
             '&Existing',
@@ -2442,15 +2603,13 @@ if (-not $createKeyVaultWasSupplied -and
 }
 
 if ($CreateKeyVault) {
-    if ($PrepareActiveDirectoryAccountOnly) {
-        throw 'CreateKeyVault cannot be combined with PrepareActiveDirectoryAccountOnly.'
-    }
     if ($SkipActiveDirectoryDirectoryChecks) {
         throw 'Creating a Key Vault requires Active Directory credential validation so the current secret can be initialized.'
     }
     $KeyVaultSubscriptionId = $SubscriptionId
     $KeyVaultResourceGroupName = $ResourceGroupName
-    $script:KeyVaultPrivateDnsZoneResourceId = Get-KeyVaultPrivateDnsZoneResourceId
+    $script:KeyVaultPrivateDnsZoneResourceId = Get-PrivateDnsZoneResourceId `
+        -ZoneName 'privatelink.vaultcore.azure.net'
     if ($script:KeyVaultPrivateDnsZoneResourceId) {
         Write-Host "Reusing Key Vault private DNS zone '$($script:KeyVaultPrivateDnsZoneResourceId)'."
     }
@@ -2458,7 +2617,7 @@ if ($CreateKeyVault) {
 else {
     $script:KeyVaultPrivateDnsZoneResourceId = ''
     if ([string]::IsNullOrWhiteSpace($KeyVaultSubscriptionId)) {
-        $KeyVaultSubscriptionId = if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        $KeyVaultSubscriptionId = if ($script:NonInteractive) {
             $SubscriptionId
         }
         else {
@@ -2468,7 +2627,7 @@ else {
         }
     }
     if ([string]::IsNullOrWhiteSpace($KeyVaultResourceGroupName)) {
-        $KeyVaultResourceGroupName = if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+        $KeyVaultResourceGroupName = if ($script:NonInteractive) {
             throw 'KeyVaultResourceGroupName must be supplied explicitly for noninteractive execution.'
         }
         else {
@@ -2480,7 +2639,7 @@ else {
 }
 
 if ([string]::IsNullOrWhiteSpace($KeyVaultName)) {
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+    if ($script:NonInteractive) {
         throw 'KeyVaultName must be supplied explicitly for noninteractive execution.'
     }
     $keyVaultNameSuffix = ((Get-AppResourceNameSuffix) -replace '[^a-z0-9-]', '-').Trim('-')
@@ -2501,109 +2660,55 @@ if ([string]::IsNullOrWhiteSpace($KeyVaultName)) {
     }
 }
 
-if ([string]::IsNullOrWhiteSpace($ActiveDirectoryForestDomain)) {
-    $defaultActiveDirectoryForestDomain = Get-LoggedOnUserForestDomain
-    if ([string]::IsNullOrWhiteSpace($defaultActiveDirectoryForestDomain)) {
-        $ActiveDirectoryForestDomain = Read-RequiredInstallerValue `
-            -Name 'ActiveDirectoryForestDomain' `
-            -Prompt 'Active Directory forest DNS name'
+$targetFunctionResult = Invoke-AzureCli -Arguments @(
+    'functionapp', 'show',
+    '--subscription', $SubscriptionId,
+    '--resource-group', $ResourceGroupName,
+    '--name', $FunctionAppName,
+    '--only-show-errors', '--output', 'none'
+) -AllowFailure
+$targetFunctionExists = $targetFunctionResult.ExitCode -eq 0
+if ([string]::IsNullOrWhiteSpace($ManagementApiClientId)) {
+    if (-not $targetFunctionExists) {
+        $script:CreateManagementApiApplication = $true
+        $ManagementApiClientId = [guid]::NewGuid().ToString()
+        Write-Host 'A new management API Entra application will be created automatically after installation approval.' -ForegroundColor Green
     }
     else {
-        $enteredActiveDirectoryForestDomain = Read-Host (
-            "Active Directory forest DNS name [$defaultActiveDirectoryForestDomain]"
-        )
-        $ActiveDirectoryForestDomain = if (
-            [string]::IsNullOrWhiteSpace($enteredActiveDirectoryForestDomain)
-        ) {
-            $defaultActiveDirectoryForestDomain
+        $appSettingsResult = Invoke-AzureCli -Arguments @(
+            'functionapp', 'config', 'appsettings', 'list',
+            '--subscription', $SubscriptionId,
+            '--resource-group', $ResourceGroupName,
+            '--name', $FunctionAppName,
+            '--only-show-errors', '--output', 'json'
+        ) -AllowFailure
+        if ($appSettingsResult.ExitCode -eq 0) {
+            $appSettings = @($appSettingsResult.Output | ConvertFrom-Json -Depth 100)
+            $managementApiClientIdSetting = $appSettings |
+                Where-Object { $_.name -eq 'ManagementApi__ClientId' } |
+                Select-Object -First 1
+            if ($managementApiClientIdSetting) {
+                $ManagementApiClientId = [string]$managementApiClientIdSetting.value
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ManagementApiClientId)) {
+            Write-Host "Reusing management API Entra application '$ManagementApiClientId' from the existing Function App configuration." -ForegroundColor Green
+        }
+        elseif ($script:NonInteractive) {
+            throw "The existing Function App '$FunctionAppName' does not contain the ManagementApi__ClientId application setting. Supply ManagementApiClientId explicitly to resume the installation."
         }
         else {
-            $enteredActiveDirectoryForestDomain.Trim()
+            $ManagementApiClientId = Read-RequiredInstallerValue `
+                -Name 'ManagementApiClientId' `
+                -Prompt 'Existing management API Entra application (client) ID'
         }
     }
 }
-
-if ([string]::IsNullOrWhiteSpace($ActiveDirectoryServer)) {
-    $ActiveDirectoryServer = $ActiveDirectoryForestDomain
-}
-
-if ([string]::IsNullOrWhiteSpace($ADServiceAccount)) {
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
-        throw 'ADServiceAccount must be supplied explicitly for noninteractive execution.'
-    }
-    $defaultADServiceAccount = "HybridDeviceTagger@$ActiveDirectoryForestDomain"
-    $enteredADServiceAccount = Read-Host (
-        "Service Account [$defaultADServiceAccount]"
-    )
-    $ADServiceAccount = if (
-        [string]::IsNullOrWhiteSpace($enteredADServiceAccount)
-    ) {
-        $defaultADServiceAccount
-    }
-    else {
-        $enteredADServiceAccount.Trim()
-    }
-}
-
-$requiredStringInputs = @()
-if ([string]::IsNullOrWhiteSpace($ActiveDirectoryBindUserDistinguishedName)) {
-    $resolvedServiceAccountDn = Resolve-ADServiceAccountDistinguishedName
-    if ([string]::IsNullOrWhiteSpace($resolvedServiceAccountDn)) {
-        $requiredStringInputs += @{
-            Name = 'ActiveDirectoryBindUserDistinguishedName'
-            Prompt = 'Active Directory bind user distinguished name'
-        }
-    }
-    else {
-        $ActiveDirectoryBindUserDistinguishedName = $resolvedServiceAccountDn
-        Write-Host 'Existing Active Directory service account found; distinguished name resolved automatically.' -ForegroundColor Green
-    }
-}
-if (-not $PrepareActiveDirectoryAccountOnly -and
-    -not $SkipActiveDirectoryDirectoryChecks -and
-    $null -eq $ActiveDirectoryCredential) {
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
-        throw 'ActiveDirectoryCredential must be supplied explicitly for noninteractive execution.'
-    }
-    $ActiveDirectoryCredential = Get-Credential `
-        -UserName $ADServiceAccount `
-        -Message 'Enter the Active Directory service-account password for bind validation'
-    if ($null -eq $ActiveDirectoryCredential) {
-        throw 'Active Directory service-account credential entry was canceled.'
-    }
-}
-foreach ($inputDefinition in $requiredStringInputs) {
-    $variable = Get-Variable -Name $inputDefinition.Name
-    if ([string]::IsNullOrWhiteSpace([string]$variable.Value)) {
-        $variable.Value = Read-RequiredInstallerValue `
-            -Name $inputDefinition.Name `
-            -Prompt $inputDefinition.Prompt
-    }
-}
-if ($null -eq $TaggingRules -or $TaggingRules.Count -eq 0) {
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
-        throw 'TaggingRules must be supplied explicitly for noninteractive execution.'
-    }
-    Write-Step 'Creating tagging rule'
-    $TaggingRules = @(Read-InteractiveTaggingRule)
-}
-
-if (-not $PrepareActiveDirectoryAccountOnly -and
-    [string]::IsNullOrWhiteSpace($ManagementApiClientId)) {
-    if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
-        throw 'ManagementApiClientId must be supplied explicitly for noninteractive execution.'
-    }
-    $ManagementApiClientId = Read-RequiredInstallerValue `
-        -Name 'ManagementApiClientId' `
-        -Prompt 'Management API Entra application (client) ID'
-}
-if (-not $PrepareActiveDirectoryAccountOnly -and
-    $ManagementApiClientId -notmatch '^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+if ($ManagementApiClientId -notmatch '^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
     throw 'ManagementApiClientId must be a valid GUID.'
 }
-if (-not $PrepareActiveDirectoryAccountOnly -and
-    ($null -eq $ManagementApiAllowedPrincipalObjectId -or
-        $ManagementApiAllowedPrincipalObjectId.Count -eq 0)) {
+if ($null -eq $ManagementApiAllowedPrincipalObjectId -or
+    @($ManagementApiAllowedPrincipalObjectId).Count -eq 0) {
     $signedInUserResult = Invoke-AzureCli -Arguments @(
         'ad', 'signed-in-user', 'show', '--query', '{ id: id }',
         '--only-show-errors', '--output', 'json'
@@ -2615,41 +2720,41 @@ if (-not $PrepareActiveDirectoryAccountOnly -and
     else {
         $null
     }
-    if ([guid]::TryParse([string]$signedInUser.id, [ref]([guid]$signedInUserId))) {
+    $signedInUserId = [guid]::Empty
+    if ([guid]::TryParse([string]$signedInUser.id, [ref]$signedInUserId)) {
         $ManagementApiAllowedPrincipalObjectId = @($signedInUserId)
         Write-Host "Management API access restricted to signed-in Entra user '$signedInUserId'." -ForegroundColor Green
     }
-    elseif ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
+    elseif ($script:NonInteractive) {
         throw 'ManagementApiAllowedPrincipalObjectId must be supplied explicitly for noninteractive execution.'
     }
     else {
         $allowedPrincipalId = Read-RequiredInstallerValue `
             -Name 'ManagementApiAllowedPrincipalObjectId' `
             -Prompt 'Management API allowed Entra principal object ID'
-        if (-not [guid]::TryParse($allowedPrincipalId, [ref]([guid]$parsedAllowedPrincipalId))) {
+        $parsedAllowedPrincipalId = [guid]::Empty
+        if (-not [guid]::TryParse($allowedPrincipalId, [ref]$parsedAllowedPrincipalId)) {
             throw 'ManagementApiAllowedPrincipalObjectId must be a valid GUID.'
         }
         $ManagementApiAllowedPrincipalObjectId = @($parsedAllowedPrincipalId)
     }
 }
-if (-not $PrepareActiveDirectoryAccountOnly) {
-    $script:ManagementApiRoleAssignments = [ordered]@{
-        'HybridDeviceTagger.Reader' = if ($ManagementApiReaderPrincipalObjectId.Count -gt 0) {
-            $ManagementApiReaderPrincipalObjectId
-        } else { $ManagementApiAllowedPrincipalObjectId }
-        'HybridDeviceTagger.RuleAdministrator' = if ($ManagementApiRuleAdministratorPrincipalObjectId.Count -gt 0) {
-            $ManagementApiRuleAdministratorPrincipalObjectId
-        } else { $ManagementApiAllowedPrincipalObjectId }
-        'HybridDeviceTagger.TaggingOperator' = if ($ManagementApiTaggingOperatorPrincipalObjectId.Count -gt 0) {
-            $ManagementApiTaggingOperatorPrincipalObjectId
-        } else { $ManagementApiAllowedPrincipalObjectId }
-        'HybridDeviceTagger.PasswordRotationAdministrator' = if ($ManagementApiPasswordRotationAdministratorPrincipalObjectId.Count -gt 0) {
-            $ManagementApiPasswordRotationAdministratorPrincipalObjectId
-        } else { $ManagementApiAllowedPrincipalObjectId }
-        'HybridDeviceTagger.CertificateAdministrator' = if ($ManagementApiCertificateAdministratorPrincipalObjectId.Count -gt 0) {
-            $ManagementApiCertificateAdministratorPrincipalObjectId
-        } else { $ManagementApiAllowedPrincipalObjectId }
-    }
+$script:ManagementApiRoleAssignments = [ordered]@{
+    'HybridDeviceTagger.Reader' = if ($null -ne $ManagementApiReaderPrincipalObjectId) {
+        @($ManagementApiReaderPrincipalObjectId)
+    } else { $ManagementApiAllowedPrincipalObjectId }
+    'HybridDeviceTagger.RuleAdministrator' = if ($null -ne $ManagementApiRuleAdministratorPrincipalObjectId) {
+        @($ManagementApiRuleAdministratorPrincipalObjectId)
+    } else { $ManagementApiAllowedPrincipalObjectId }
+    'HybridDeviceTagger.TaggingOperator' = if ($null -ne $ManagementApiTaggingOperatorPrincipalObjectId) {
+        @($ManagementApiTaggingOperatorPrincipalObjectId)
+    } else { $ManagementApiAllowedPrincipalObjectId }
+    'HybridDeviceTagger.PasswordRotationAdministrator' = if ($null -ne $ManagementApiPasswordRotationAdministratorPrincipalObjectId) {
+        @($ManagementApiPasswordRotationAdministratorPrincipalObjectId)
+    } else { $ManagementApiAllowedPrincipalObjectId }
+    'HybridDeviceTagger.CertificateAdministrator' = if ($null -ne $ManagementApiCertificateAdministratorPrincipalObjectId) {
+        @($ManagementApiCertificateAdministratorPrincipalObjectId)
+    } else { $ManagementApiAllowedPrincipalObjectId }
 }
 
 Write-Step 'Validating input parameters'
@@ -2662,14 +2767,21 @@ $requiredInputValidation = @(
     @{ Name = 'VirtualNetworkResourceGroupName'; Value = $VirtualNetworkResourceGroupName; MaximumLength = 90 },
     @{ Name = 'KeyVaultResourceGroupName'; Value = $KeyVaultResourceGroupName; MaximumLength = 90 },
     @{ Name = 'ActiveDirectoryServer'; Value = $ActiveDirectoryServer; MaximumLength = 253 },
-    @{ Name = 'ADServiceAccount'; Value = $ADServiceAccount; MaximumLength = 256 },
-    @{ Name = 'ActiveDirectoryBindUserDistinguishedName'; Value = $ActiveDirectoryBindUserDistinguishedName; MaximumLength = 2048 }
+    @{ Name = 'ADServiceAccount'; Value = $ADServiceAccount; MaximumLength = 256 }
 )
 foreach ($validation in $requiredInputValidation) {
     if ([string]::IsNullOrWhiteSpace([string]$validation.Value) -or
         ([string]$validation.Value).Length -gt $validation.MaximumLength) {
         throw "$($validation.Name) must contain 1-$($validation.MaximumLength) characters."
     }
+}
+if ($SkipActiveDirectoryDirectoryChecks -and
+    [string]::IsNullOrWhiteSpace($ActiveDirectoryBindUserDistinguishedName)) {
+    throw 'ActiveDirectoryBindUserDistinguishedName must be supplied when Active Directory directory checks are skipped.'
+}
+if (-not [string]::IsNullOrWhiteSpace($ActiveDirectoryBindUserDistinguishedName) -and
+    $ActiveDirectoryBindUserDistinguishedName.Length -gt 2048) {
+    throw 'ActiveDirectoryBindUserDistinguishedName cannot exceed 2048 characters.'
 }
 if ($FunctionAppName -notmatch '^[a-zA-Z0-9-]{2,60}$') {
     throw 'FunctionAppName must contain 2-60 letters, numbers, or hyphens.'
@@ -2683,15 +2795,6 @@ if ($KeyVaultName -notmatch '^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$') {
 if ($ActiveDirectoryForestDomain -notmatch '^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$') {
     throw 'ActiveDirectoryForestDomain must be a valid DNS domain name.'
 }
-if ($TaggingRules.Count -gt 100) {
-    throw 'TaggingRules cannot contain more than 100 rules.'
-}
-$script:NormalizedTaggingRules = @(ConvertTo-NormalizedTaggingRule)
-$normalizedTaggingRulesJson = ConvertTo-Json -InputObject $script:NormalizedTaggingRules -Depth 10 -Compress
-if ($normalizedTaggingRulesJson.Length -gt 32768) {
-    throw 'Serialized tagging configuration cannot exceed 32768 characters.'
-}
-
 foreach ($tag in $Tags.GetEnumerator()) {
     if ([string]::IsNullOrEmpty([string]$tag.Key) -or ([string]$tag.Key).Length -gt 512) {
         throw 'Azure tag keys must contain 1-512 characters.'
@@ -2703,11 +2806,10 @@ foreach ($tag in $Tags.GetEnumerator()) {
 
 Write-Step 'Checking local prerequisites'
 if (-not (Test-Path $templatePath)) { throw "Bicep template not found: $templatePath" }
-if (-not $SkipCodeDeployment -and
-    -not $PrepareActiveDirectoryAccountOnly -and
-    -not (Test-Path -LiteralPath $FunctionPackagePath -PathType Leaf)) {
+if (-not (Test-Path -LiteralPath $FunctionPackagePath -PathType Leaf)) {
     throw "Prebuilt Function package not found: $FunctionPackagePath"
 }
+Import-InstallerLdapClient -PackagePath $FunctionPackagePath
 if ($ActiveDirectoryTrustedCertificatePath -and -not (Test-Path -LiteralPath $ActiveDirectoryTrustedCertificatePath -PathType Leaf)) {
     throw "Active Directory trusted certificate not found: $ActiveDirectoryTrustedCertificatePath"
 }
@@ -2724,8 +2826,24 @@ if ($ActiveDirectoryTrustedCertificatePath) {
     }
     Write-Host "Using Active Directory trust anchor $($script:TrustedCertificate.Thumbprint)."
 }
-$script:ActiveDirectoryPasswordChanged = $false
 $script:EffectiveAllowLdapFallback = $false
+
+if (-not $SkipActiveDirectoryDirectoryChecks) {
+    Write-Step 'Validating existing Active Directory service account through secure LDAP'
+    $resolvedServiceAccountDn = Resolve-ADServiceAccountDistinguishedName
+    if ([string]::IsNullOrWhiteSpace($resolvedServiceAccountDn)) {
+        throw "AD service account '$ADServiceAccount' was not found."
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ActiveDirectoryBindUserDistinguishedName) -and
+        $ActiveDirectoryBindUserDistinguishedName -ine $resolvedServiceAccountDn) {
+        throw "ActiveDirectoryBindUserDistinguishedName does not match the account resolved from ADServiceAccount '$ADServiceAccount'."
+    }
+    $ActiveDirectoryBindUserDistinguishedName = $resolvedServiceAccountDn
+    if ($ActiveDirectoryBindUserDistinguishedName.Length -gt 2048) {
+        throw 'The resolved Active Directory service-account distinguished name exceeds 2048 characters.'
+    }
+    Write-Host "Existing Active Directory service account '$ADServiceAccount' validated through secure LDAP." -ForegroundColor Green
+}
 
 $azVersion = Get-AzureJson -Arguments @('version')
 if ([version]$azVersion.'azure-cli' -lt [version]'2.60.0') {
@@ -2739,17 +2857,9 @@ if ([string]::IsNullOrWhiteSpace($KeyVaultSubscriptionId)) {
     $KeyVaultSubscriptionId = $SubscriptionId
 }
 
-Write-Step 'Validating Entra administrative-unit targets'
-$restrictedAdministrativeUnits = @(Get-RestrictedAdministrativeUnitTarget)
-if ($restrictedAdministrativeUnits.Count -gt 0) {
-    $targetSummary = $restrictedAdministrativeUnits |
-        ForEach-Object { "  - $($_.displayName) ($($_.id))" } |
-        Out-String
-    Write-Warning "Rules target restricted management administrative units:`n$targetSummary"
-}
-
+$restrictedAdministrativeUnits = @()
 Write-InstallationSummary -RestrictedAdministrativeUnits $restrictedAdministrativeUnits
-if (-not $ValidateOnly -and -not $WhatIfPreference) {
+if (-not $ValidateOnly -and -not $WhatIfPreference -and -not $Force) {
     if (-not $PSCmdlet.ShouldProcess(
         "$SubscriptionId/$ResourceGroupName",
         'Execute the installation plan shown above'
@@ -2758,18 +2868,8 @@ if (-not $ValidateOnly -and -not $WhatIfPreference) {
         return
     }
 }
-
-if ($restrictedAdministrativeUnits.Count -gt 0) {
-    if (-not $ValidateOnly -and -not $WhatIfPreference -and
-        -not $GrantRestrictedAdministrativeUnitRole) {
-        if ($env:TF_BUILD -eq 'True' -or $env:CI -eq 'true') {
-            throw 'RMAU targets require explicit approval. Re-run with -GrantRestrictedAdministrativeUnitRole.'
-        }
-        $confirmation = Read-Host 'Create and assign the least-privilege device extension-attribute role at these RMAU scopes? Type YES to continue'
-        if ($confirmation -cne 'YES') {
-            throw 'RMAU role assignment was not explicitly approved; installation stopped before deployment.'
-        }
-    }
+elseif ($Force -and -not $ValidateOnly -and -not $WhatIfPreference) {
+    Write-Host 'Force mode enabled; installation approval and interactive prompts are disabled.' -ForegroundColor Yellow
 }
 
 Write-Step 'Checking Azure resource providers'
@@ -2860,28 +2960,8 @@ else {
 Write-Step 'Validating existing app-owned resources and global names'
 Assert-ExistingOwnedResource
 
-if ($PrepareActiveDirectoryAccountOnly) {
-    $existingFunction = Invoke-AzureCli -Arguments @(
-        'functionapp', 'show', '--subscription', $SubscriptionId,
-        '--resource-group', $ResourceGroupName, '--name', $FunctionAppName,
-        '--only-show-errors', '--output', 'none'
-    ) -AllowFailure
-    if ($existingFunction.ExitCode -ne 0) {
-        throw 'PrepareActiveDirectoryAccountOnly requires an existing HybridDeviceTagger Function App so the credential can be initialized without granting Key Vault access.'
-    }
-    Write-Step 'Preparing Active Directory service account'
-    Initialize-ActiveDirectoryServiceAccount
-    if (-not $script:ActiveDirectoryPasswordChanged) {
-        throw 'Active Directory account preparation did not set a password.'
-    }
-    Initialize-CurrentPasswordThroughFunction
-}
-
-Write-Step 'Validating Active Directory forest, OU, account, read access, and LDAPS certificate'
+Write-Step 'Validating Active Directory forest, account, read access, and LDAP TLS certificate'
 if ($SkipActiveDirectoryDirectoryChecks) {
-    if ($PrepareActiveDirectoryAccountOnly) {
-        throw 'Active Directory directory checks cannot be skipped while preparing the service account.'
-    }
     if (-not $script:TrustedCertificate) {
         throw 'Skipping Active Directory directory checks requires an explicit trusted certificate.'
     }
@@ -2895,25 +2975,56 @@ if ($SkipActiveDirectoryDirectoryChecks) {
     if ($existingFunction.ExitCode -ne 0) {
         throw 'Active Directory directory checks may be skipped only when updating an existing Function App.'
     }
-    if (-not [HybridDeviceTaggerLdapCertificateValidatorV3]::ValidateTlsEndpoint(
-        $ActiveDirectoryServer,
-        636,
-        $script:TrustedCertificate)) {
-        throw "Strict LDAPS certificate validation failed for '$ActiveDirectoryServer:636'."
+    $validatedTransport = $null
+    $lastTlsError = $null
+    foreach ($candidateServer in $script:ActiveDirectoryServerCandidates) {
+        if ([HybridDeviceTaggerLdapCertificateValidatorV4]::ValidateTlsEndpoint(
+            $candidateServer,
+            636,
+            $script:TrustedCertificate)) {
+            $ActiveDirectoryServer = $candidateServer
+            $validatedTransport = 'LDAPS'
+            break
+        }
+        try {
+            Assert-LdapStartTlsEndpoint `
+                -Server $candidateServer `
+                -Port $LdapFallbackPort
+            $ActiveDirectoryServer = $candidateServer
+            $validatedTransport = 'LDAP StartTLS'
+            break
+        }
+        catch {
+            $lastTlsError = $_.Exception
+            Write-Warning "Domain controller '$candidateServer' is unavailable through LDAPS and StartTLS; trying the next discovered controller."
+        }
     }
-    $script:EffectiveAllowLdapFallback = $false
-    Write-Warning 'Skipped repeated forest, OU, and account checks for the existing deployment; strict LDAPS endpoint validation succeeded.'
+    if ([string]::IsNullOrWhiteSpace($validatedTransport)) {
+        $errorDetail = if ($null -ne $lastTlsError) {
+            $lastTlsError.Message
+        }
+        else {
+            'No discovered endpoint completed a trusted TLS handshake.'
+        }
+        throw "Neither LDAPS nor LDAP StartTLS certificate validation succeeded for any discovered domain controller. Last error: $errorDetail"
+    }
+    $script:EffectiveAllowLdapFallback = $validatedTransport -eq 'LDAP StartTLS'
+    Write-Warning "Skipped repeated forest and account checks for the existing deployment; strict $validatedTransport endpoint validation succeeded."
 }
 else {
     Test-LdapConfiguration
 }
 
-if ($PrepareActiveDirectoryAccountOnly) {
-    Write-Host 'Active Directory service-account preparation completed. No Azure resources were deployed.' -ForegroundColor Green
-    return
+if ($script:CreateManagementApiApplication -and
+    -not $ValidateOnly -and
+    -not $WhatIfPreference) {
+    Write-Step 'Creating management API Entra application'
+    New-ManagementApiApplication
 }
 
-$parameterFile = Join-Path ([System.IO.Path]::GetTempPath()) "HybridDeviceTagger-$([guid]::NewGuid()).parameters.json"
+$deploymentArtifactId = [guid]::NewGuid()
+$parameterFile = Join-Path ([System.IO.Path]::GetTempPath()) "HybridDeviceTagger-$deploymentArtifactId.parameters.json"
+$compiledTemplateFile = Join-Path ([System.IO.Path]::GetTempPath()) "HybridDeviceTagger-$deploymentArtifactId.template.json"
 try {
     $parameterJson = Get-DeploymentParameter | ConvertTo-Json -Depth 20
     [System.IO.File]::WriteAllText(
@@ -2922,14 +3033,46 @@ try {
         [System.Text.UTF8Encoding]::new($false)
     )
 
-    Write-Step 'Validating Bicep deployment'
+    Write-Step 'Compiling Bicep template'
     $null = Invoke-AzureCli -Arguments @(
-        'deployment', 'group', 'validate', '--subscription', $SubscriptionId,
-        '--resource-group', $ResourceGroupName, '--template-file', $templatePath,
-        '--parameters', "@$parameterFile", '--only-show-errors'
+        'bicep', 'build', '--file', $templatePath,
+        '--outfile', $compiledTemplateFile,
+        '--only-show-errors'
+    ) -TimeoutSeconds 60
+    if (-not [System.IO.File]::Exists($compiledTemplateFile)) {
+        throw "Bicep compilation did not create the ARM template: $compiledTemplateFile"
+    }
+    $compiledTemplate = Get-Content -LiteralPath $compiledTemplateFile -Raw |
+        ConvertFrom-Json -Depth 100
+    $parameterDocument = $parameterJson | ConvertFrom-Json -Depth 100
+    $templateParameterNames = @($compiledTemplate.parameters.PSObject.Properties.Name)
+    $suppliedParameterNames = @($parameterDocument.parameters.PSObject.Properties.Name)
+    $unknownParameters = @($suppliedParameterNames | Where-Object {
+        $templateParameterNames -notcontains $_
+    })
+    if ($unknownParameters.Count -gt 0) {
+        throw "Deployment parameters do not exist in the compiled template: $($unknownParameters -join ', '). Ensure Install-HybridDeviceTagger.ps1 and main.bicep come from the same package."
+    }
+    $missingRequiredParameters = @(
+        $compiledTemplate.parameters.PSObject.Properties |
+            Where-Object {
+                $null -eq $_.Value.PSObject.Properties['defaultValue'] -and
+                $suppliedParameterNames -notcontains $_.Name
+            } |
+            ForEach-Object { $_.Name }
     )
+    if ($missingRequiredParameters.Count -gt 0) {
+        throw "Required deployment parameters are missing: $($missingRequiredParameters -join ', '). Ensure Install-HybridDeviceTagger.ps1 and main.bicep come from the same package."
+    }
 
     if ($ValidateOnly) {
+        Write-Step 'Validating ARM template'
+        $null = Invoke-AzureCli -Arguments @(
+            'deployment', 'group', 'validate', '--subscription', $SubscriptionId,
+            '--resource-group', $ResourceGroupName, '--template-file', $compiledTemplateFile,
+            '--parameters', "@$parameterFile", '--validation-level', 'Template',
+            '--only-show-errors'
+        ) -TimeoutSeconds 300
         Write-Host "Validation completed successfully. No resources were changed." -ForegroundColor Green
         return
     }
@@ -2938,7 +3081,7 @@ try {
         Write-Step 'Running Azure Resource Manager What-if'
         $whatIfResult = Invoke-AzureCli -Arguments @(
             'deployment', 'group', 'what-if', '--subscription', $SubscriptionId,
-            '--resource-group', $ResourceGroupName, '--template-file', $templatePath,
+            '--resource-group', $ResourceGroupName, '--template-file', $compiledTemplateFile,
             '--parameters', "@$parameterFile", '--result-format', 'FullResourcePayloads'
         )
         if (-not [string]::IsNullOrWhiteSpace($whatIfResult.Output)) {
@@ -2953,11 +3096,28 @@ try {
 
     Write-Step 'Deploying Azure infrastructure'
     $deploymentName = "hybrid-device-tagger-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
-    $deployment = Get-AzureJson -Arguments @(
-        'deployment', 'group', 'create', '--subscription', $SubscriptionId,
-        '--resource-group', $ResourceGroupName, '--name', $deploymentName,
-        '--template-file', $templatePath, '--parameters', "@$parameterFile"
-    )
+    try {
+        $null = Start-AzureGroupDeployment `
+            -DeploymentName $deploymentName `
+            -TemplateFile $compiledTemplateFile `
+            -ParameterFile $parameterFile
+    }
+    catch {
+        $deploymentProbe = Invoke-AzureCli -Arguments @(
+            'deployment', 'group', 'show',
+            '--subscription', $SubscriptionId,
+            '--resource-group', $ResourceGroupName,
+            '--name', $deploymentName,
+            '--only-show-errors', '--output', 'none'
+        ) -AllowFailure -TimeoutSeconds 60
+        if ($deploymentProbe.ExitCode -ne 0) {
+            throw
+        }
+        Write-Warning "The ARM submission response was interrupted, but deployment '$deploymentName' exists and will be monitored."
+    }
+    $script:AzureDeploymentStarted = $true
+    Write-Host "Azure deployment '$deploymentName' submitted."
+    $deployment = Wait-AzureGroupDeployment -DeploymentName $deploymentName
     $principalId = [string]$deployment.properties.outputs.functionAppPrincipalId.value
     if ([string]::IsNullOrWhiteSpace($principalId)) {
         throw 'The deployment did not return the Function App managed identity principal ID.'
@@ -2978,38 +3138,61 @@ try {
         Assert-KeyVault -Vault $vaultConfiguration
     }
 
+    if (-not $SkipCodeDeployment) {
+        Write-Step 'Validating private endpoint DNS resolution'
+        Assert-PrivateEndpointDnsResolution
+    }
+
     Write-Step 'Assigning Microsoft Graph application permissions'
     Grant-GraphApplicationPermission -PrincipalId $principalId
-
-    if ($restrictedAdministrativeUnits.Count -gt 0) {
-        Write-Step 'Assigning restricted administrative-unit roles'
-        Grant-RestrictedAdministrativeUnitRole `
-            -PrincipalId $principalId `
-            -AdministrativeUnits $restrictedAdministrativeUnits
-    }
 
     if (-not $SkipCodeDeployment) {
         Write-Step 'Building and deploying Function App code'
         Publish-FunctionApp
     }
 
-    if ($null -ne $ActiveDirectoryCredential) {
+    if ($null -ne $ADServiceAccountCredential) {
         Write-Step 'Initializing Active Directory credential through the Function App'
         Initialize-CurrentPasswordThroughFunction
     }
     else {
-        Write-Host 'Credential initialization skipped because no ActiveDirectoryCredential was supplied.'
+        Write-Host 'Credential initialization skipped because no ADServiceAccountCredential was supplied.'
     }
 
     Write-Host "Installation completed for Function App '$FunctionAppName'." -ForegroundColor Green
+    Write-Host ''
+    Write-Host 'No tagging rules were created during installation.' -ForegroundColor Yellow
+    Write-Host 'Add the first rule through the HybridDeviceTagger management module:'
+    Write-Host "  Import-Module '$scriptRoot\HybridDeviceTagger.Management'"
+    Write-Host "  Connect-HybridDeviceTagger -ApiBaseUri 'https://$FunctionAppName.azurewebsites.net/api/management' -ClientId '$ManagementApiClientId'"
+    Write-Host '  Get-Help Add-HybridDeviceTaggerRule -Examples'
+    Write-Host '  Add-HybridDeviceTaggerRule -Rule $rule'
 }
 finally {
     if ([System.IO.File]::Exists($parameterFile)) {
         [System.IO.File]::Delete($parameterFile)
     }
+    if ([System.IO.File]::Exists($compiledTemplateFile)) {
+        [System.IO.File]::Delete($compiledTemplateFile)
+    }
 }
 }
 catch {
+    if (-not [string]::IsNullOrWhiteSpace(
+            [string]$script:CreatedManagementApiApplicationObjectId) -and
+        -not $script:AzureDeploymentStarted) {
+        $cleanupResult = Invoke-AzureCli -Arguments @(
+            'rest', '--method', 'delete',
+            '--url', "https://graph.microsoft.com/v1.0/applications/$($script:CreatedManagementApiApplicationObjectId)",
+            '--only-show-errors'
+        ) -AllowFailure
+        if ($cleanupResult.ExitCode -eq 0) {
+            Write-Warning 'Removed the automatically created management API Entra application because installation stopped before Azure deployment.'
+        }
+        else {
+            Write-Warning "The automatically created management API Entra application could not be removed. Reuse client ID '$ManagementApiClientId' when retrying the installation."
+        }
+    }
     if ($VerbosePreference -eq 'Continue' -or -not $script:CompactInstallerError) {
         Write-Host "Installation failed: $($_.Exception.Message)" -ForegroundColor Red
         throw
@@ -3019,7 +3202,7 @@ catch {
 }
 finally {
     if ($transcriptStarted) {
-        Stop-Transcript | Out-Null
+        Stop-Transcript -Confirm:$false | Out-Null
     }
     if (-not $compactFailure) {
         Write-Host "Installer log: $installerLogPath"

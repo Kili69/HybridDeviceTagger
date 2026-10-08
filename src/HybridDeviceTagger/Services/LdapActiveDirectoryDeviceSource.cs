@@ -17,7 +17,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-using System.DirectoryServices.Protocols;
 using HybridDeviceTagger.Models;
 using HybridDeviceTagger.Options;
 using Microsoft.Extensions.Logging;
@@ -58,7 +57,7 @@ public sealed class LdapActiveDirectoryDeviceSource :
     /// <inheritdoc />
     /// <remarks>
     /// OU-only paths are resolved through the forest configuration partition and searched in
-    /// every domain. Queries use server-side paging, accept binary and string GUID values, and
+    /// every domain. Queries use server-side paging, read binary object GUID values, and
     /// fall back to the staged credential when the active credential can no longer bind.
     /// </remarks>
     public async Task<IReadOnlyList<DirectoryDevice>> GetHybridJoinedDevicesAsync(
@@ -79,14 +78,17 @@ public sealed class LdapActiveDirectoryDeviceSource :
             using var connection = await CreateConnectionAsync(target.Server, cancellationToken);
             try
             {
-                foreach (var device in SearchDevices(connection, target.BaseDn, cancellationToken))
+                foreach (var device in await SearchDevicesAsync(
+                    connection,
+                    target.BaseDn,
+                    cancellationToken))
                 {
                     devices[device.DeviceId] = device;
                 }
                 resolvedOuCount++;
             }
-            catch (DirectoryOperationException exception) when (
-                isForestRelative && exception.Response?.ResultCode == ResultCode.NoSuchObject)
+            catch (ActiveDirectoryLdapException exception) when (
+                isForestRelative && exception.ResultCode == 32)
             {
                 _logger.LogInformation(
                     "OU path {OuPath} does not exist in forest domain {Domain}; skipping that domain.",
@@ -143,44 +145,23 @@ public sealed class LdapActiveDirectoryDeviceSource :
     /// Microsoft Entra Connect identifies synchronized domain-joined computers by a populated
     /// <c>userCertificate</c> and maps their AD <c>objectGUID</c> to the Entra <c>deviceId</c>.
     /// </remarks>
-    private IReadOnlyList<DirectoryDevice> SearchDevices(
-        LdapConnection connection,
+    private async Task<IReadOnlyList<DirectoryDevice>> SearchDevicesAsync(
+        IActiveDirectoryLdapConnection connection,
         string baseDn,
         CancellationToken cancellationToken)
     {
-        var devices = new List<DirectoryDevice>();
-        var pageRequest = new PageResultRequestControl(_options.PageSize);
-
-        do
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var request = new SearchRequest(
-                baseDn,
-                ComputerFilter,
-                SearchScope.Subtree,
-                DeviceIdAttribute,
-                "name",
-                "distinguishedName");
-            request.Controls.Add(pageRequest);
-
-            var response = (SearchResponse)connection.SendRequest(request);
-            foreach (SearchResultEntry entry in response.Entries)
-            {
-                if (TryReadDevice(entry, out var device))
-                {
-                    devices.Add(device);
-                }
-            }
-
-            pageRequest.Cookie = response.Controls
-                .OfType<PageResultResponseControl>()
-                .Single()
-                .Cookie;
-        }
-        while (pageRequest.Cookie.Length > 0);
-
-        return devices;
+        var entries = await connection.SearchAsync(
+            baseDn,
+            ComputerFilter,
+            ActiveDirectoryLdapSearchScope.Subtree,
+            [DeviceIdAttribute, "name", "distinguishedName"],
+            _options.PageSize,
+            cancellationToken);
+        return entries
+            .Select(entry => TryReadDevice(entry, out var device) ? device : null)
+            .Where(device => device is not null)
+            .Cast<DirectoryDevice>()
+            .ToArray();
     }
 
     /// <summary>Reads every domain advertised by the configured forest.</summary>
@@ -191,30 +172,32 @@ public sealed class LdapActiveDirectoryDeviceSource :
     private async Task<IReadOnlyList<ForestDomain>> GetForestDomainsAsync(
         CancellationToken cancellationToken)
     {
-        using var connection = await CreateConnectionAsync(_options.Server, cancellationToken);
-        var rootResponse = (SearchResponse)connection.SendRequest(new SearchRequest(
+        using var connection = await CreateConnectionAsync(_options.Domain, cancellationToken);
+        var rootResponse = await connection.SearchAsync(
             string.Empty,
             "(objectClass=*)",
-            SearchScope.Base,
-            "configurationNamingContext"));
-        var configurationNamingContext = ReadString(
-            rootResponse.Entries[0].Attributes["configurationNamingContext"])
+            ActiveDirectoryLdapSearchScope.Base,
+            ["configurationNamingContext"],
+            pageSize: null,
+            cancellationToken);
+        var configurationNamingContext = rootResponse[0].GetString(
+            "configurationNamingContext")
             ?? throw new InvalidOperationException(
                 "Active Directory did not return a configuration naming context.");
         var partitionsDn = $"CN=Partitions,{configurationNamingContext}";
-        var domainsResponse = (SearchResponse)connection.SendRequest(new SearchRequest(
+        var domainsResponse = await connection.SearchAsync(
             partitionsDn,
             "(&(objectClass=crossRef)(systemFlags:1.2.840.113556.1.4.803:=3))",
-            SearchScope.OneLevel,
-            "nCName",
-            "dnsRoot"));
+            ActiveDirectoryLdapSearchScope.OneLevel,
+            ["nCName", "dnsRoot"],
+            pageSize: null,
+            cancellationToken);
 
-        var domains = domainsResponse.Entries
-            .Cast<SearchResultEntry>()
+        var domains = domainsResponse
             .Select(entry => new
             {
-                NamingContext = ReadString(entry.Attributes["nCName"]),
-                DnsRoot = ReadString(entry.Attributes["dnsRoot"])
+                NamingContext = entry.GetString("nCName"),
+                DnsRoot = entry.GetString("dnsRoot")
             })
             .Where(domain =>
                 !string.IsNullOrWhiteSpace(domain.NamingContext) &&
@@ -271,27 +254,27 @@ public sealed class LdapActiveDirectoryDeviceSource :
             string.Equals(dnsRoot, domainDnsName, StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>Uses the configured DC when it belongs to the domain being searched.</summary>
-    private string GetLdapServer(string domainDnsName) =>
-        _options.Server.EndsWith($".{domainDnsName}", StringComparison.OrdinalIgnoreCase)
-            ? _options.Server
-            : domainDnsName;
+    /// <summary>Returns the domain whose domain controllers must be discovered through DNS.</summary>
+    private static string GetLdapServer(string domainDnsName) => domainDnsName;
 
     /// <summary>Creates a connection with automatic staged-credential recovery.</summary>
     /// <remarks>
     /// The active credential is tried first. If its bind fails during an interrupted rotation,
     /// the staged <c>next</c> credential is loaded and tried against the same server.
     /// </remarks>
-    private async Task<LdapConnection> CreateConnectionAsync(
+    private async Task<IActiveDirectoryLdapConnection> CreateConnectionAsync(
         string server,
         CancellationToken cancellationToken)
     {
         var current = await _credentialStore.GetCurrentAsync(cancellationToken);
         try
         {
-            return _connectionFactory.CreateBoundConnection(current, server);
+            return await _connectionFactory.CreateBoundConnectionAsync(
+                current,
+                server,
+                cancellationToken);
         }
-        catch (LdapException)
+        catch (ActiveDirectoryLdapException)
         {
             var next = await _credentialStore.GetNextAsync(cancellationToken);
             if (next is null)
@@ -299,55 +282,43 @@ public sealed class LdapActiveDirectoryDeviceSource :
                 throw;
             }
 
-            return _connectionFactory.CreateBoundConnection(next, server);
+            return await _connectionFactory.CreateBoundConnectionAsync(
+                next,
+                server,
+                cancellationToken);
         }
     }
 
     /// <summary>Projects one LDAP entry when it contains a valid hybrid device identifier.</summary>
-    private static bool TryReadDevice(SearchResultEntry entry, out DirectoryDevice device)
+    private static bool TryReadDevice(
+        ActiveDirectoryLdapEntry entry,
+        out DirectoryDevice device)
     {
         device = default!;
-        if (!TryReadGuid(entry.Attributes[DeviceIdAttribute], out var deviceId))
+        if (!TryReadGuid(entry.GetBytes(DeviceIdAttribute), out var deviceId))
         {
             return false;
         }
 
-        var name = ReadString(entry.Attributes["name"]) ?? deviceId.ToString();
-        var distinguishedName = ReadString(entry.Attributes["distinguishedName"])
+        var name = entry.GetString("name") ?? deviceId.ToString();
+        var distinguishedName = entry.GetString("distinguishedName")
             ?? entry.DistinguishedName;
         device = new DirectoryDevice(deviceId, name, distinguishedName);
         return true;
     }
 
-    /// <summary>Reads a device GUID from either its 16-byte LDAP form or textual form.</summary>
-    internal static bool TryReadGuid(DirectoryAttribute? attribute, out Guid value)
+    /// <summary>Reads a device GUID from its 16-byte LDAP representation.</summary>
+    internal static bool TryReadGuid(byte[]? bytes, out Guid value)
     {
         value = Guid.Empty;
-        if (attribute is null || attribute.Count == 0)
+        if (bytes is null || bytes.Length != 16)
         {
             return false;
         }
 
-        return attribute[0] switch
-        {
-            byte[] bytes when bytes.Length == 16 => TryCreateGuid(bytes, out value),
-            string text => Guid.TryParse(text.Trim('{', '}'), out value),
-            _ => false
-        };
-    }
-
-    /// <summary>Constructs a GUID from a validated 16-byte value.</summary>
-    private static bool TryCreateGuid(byte[] bytes, out Guid value)
-    {
         value = new Guid(bytes);
         return true;
     }
-
-    /// <summary>Reads the first LDAP attribute value as text, or returns <see langword="null"/>.</summary>
-    private static string? ReadString(DirectoryAttribute? attribute) =>
-        attribute is null || attribute.Count == 0
-            ? null
-            : attribute[0]?.ToString();
 
     /// <summary>Pairs a domain DNS endpoint with its complete LDAP search base.</summary>
     private sealed record SearchTarget(string Server, string BaseDn);

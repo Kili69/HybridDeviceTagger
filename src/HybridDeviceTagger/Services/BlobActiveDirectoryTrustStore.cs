@@ -74,7 +74,7 @@ public sealed class BlobActiveDirectoryTrustStore : IActiveDirectoryTrustStore
 
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
     private readonly BlobClient _blobClient;
-    private readonly byte[] _fallbackCertificate;
+    private readonly byte[]? _fallbackCertificate;
 
     /// <summary>Initializes the trust store with the packaged bootstrap certificate.</summary>
     public BlobActiveDirectoryTrustStore(
@@ -82,7 +82,12 @@ public sealed class BlobActiveDirectoryTrustStore : IActiveDirectoryTrustStore
         IOptions<ActiveDirectoryOptions> options)
     {
         _blobClient = blobClient;
-        var path = Path.GetFullPath(options.Value.TrustedCertificatePath ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(options.Value.TrustedCertificatePath))
+        {
+            return;
+        }
+
+        var path = Path.GetFullPath(options.Value.TrustedCertificatePath);
         using var fallbackCertificate = LoadCertificate(File.ReadAllBytes(path));
         _fallbackCertificate = fallbackCertificate.Export(X509ContentType.Cert);
     }
@@ -97,7 +102,7 @@ public sealed class BlobActiveDirectoryTrustStore : IActiveDirectoryTrustStore
         }
         catch (RequestFailedException exception) when (exception.Status == 404)
         {
-            return [new X509Certificate2(_fallbackCertificate)];
+            return CreateFallbackCertificates();
         }
     }
 
@@ -116,10 +121,10 @@ public sealed class BlobActiveDirectoryTrustStore : IActiveDirectoryTrustStore
         catch (RequestFailedException exception) when (exception.Status == 404)
         {
             return CreateSnapshot(
-                [new X509Certificate2(_fallbackCertificate)],
+                CreateFallbackCertificates(),
                 null,
                 null,
-                "package");
+                _fallbackCertificate is null ? "none" : "package");
         }
     }
 
@@ -178,6 +183,11 @@ public sealed class BlobActiveDirectoryTrustStore : IActiveDirectoryTrustStore
     private List<X509Certificate2> GetCertificatesForMutation(string source) =>
         source == "blob"
             ? GetCertificates().ToList()
+            : CreateFallbackCertificates().ToList();
+
+    private IReadOnlyList<X509Certificate2> CreateFallbackCertificates() =>
+        _fallbackCertificate is null
+            ? []
             : [new X509Certificate2(_fallbackCertificate)];
 
     private async Task<TrustedCertificateSnapshot> UploadAsync(
