@@ -17,13 +17,19 @@ public sealed class BlobTaggingConfigurationStore : ITaggingConfigurationStore
     /// <summary>The stable Blob name containing the effective dynamic rules.</summary>
     public const string BlobName = "tagging-configuration.json";
 
+    /// <summary>Web-default (camelCase) JSON options used for the stored rule document.</summary>
     private static readonly JsonSerializerOptions SerializerOptions =
         new(JsonSerializerDefaults.Web);
 
+    /// <summary>The blob at <see cref="BlobName"/> containing the dynamic rules.</summary>
     private readonly BlobClient _blobClient;
+
+    /// <summary>Supplies the app-setting rules used until the first rule change is stored.</summary>
     private readonly OptionsTaggingRuleProvider _fallbackProvider;
 
     /// <summary>Initializes the Blob-backed configuration store.</summary>
+    /// <param name="blobClient">The blob that stores the dynamic rules.</param>
+    /// <param name="fallbackProvider">The app-setting rule provider used when the blob does not exist.</param>
     public BlobTaggingConfigurationStore(
         BlobClient blobClient,
         OptionsTaggingRuleProvider fallbackProvider)
@@ -38,6 +44,10 @@ public sealed class BlobTaggingConfigurationStore : ITaggingConfigurationStore
         (await GetSnapshotAsync(cancellationToken)).Rules;
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Stored rules are re-validated on every read so a manually edited blob cannot inject invalid
+    /// rules. A missing blob yields the app-setting rules with source <c>appSetting</c> and no ETag.
+    /// </remarks>
     public async Task<TaggingConfigurationSnapshot> GetSnapshotAsync(
         CancellationToken cancellationToken)
     {
@@ -63,6 +73,11 @@ public sealed class BlobTaggingConfigurationStore : ITaggingConfigurationStore
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Without <paramref name="expectedETag"/>, the write only succeeds when the blob does not yet
+    /// exist; with it, the write only succeeds when the blob is unchanged. Storage 409 and 412
+    /// responses are surfaced as <see cref="TaggingConfigurationConflictException"/>.
+    /// </remarks>
     public async Task<TaggingConfigurationSnapshot> ReplaceAsync(
         IReadOnlyList<TaggingRuleOptions> rules,
         string? expectedETag,

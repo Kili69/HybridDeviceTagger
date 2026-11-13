@@ -15,11 +15,23 @@ public sealed partial class TaggingOptions : IValidatableObject
 {
     /// <summary>Gets the configuration section name.</summary>
     public const string SectionName = "Tagging";
+
+    /// <summary>The maximum number of rules, bounding LDAP searches and Graph calls per run.</summary>
     internal const int MaximumRuleCount = 100;
+
+    /// <summary>The maximum length in characters of <see cref="RulesJson"/>.</summary>
     internal const int MaximumRulesJsonLength = 32768;
+
+    /// <summary>The maximum length in characters of a rule description.</summary>
     internal const int MaximumRuleDescriptionLength = 1024;
+
+    /// <summary>The maximum length in characters of a rule base distinguished name.</summary>
     internal const int MaximumBaseDnLength = 2048;
+
+    /// <summary>The maximum length in characters of one extension-attribute value.</summary>
     internal const int MaximumExtensionAttributeValueLength = 1024;
+
+    /// <summary>The maximum number of Entra groups, and separately administrative units, per rule.</summary>
     internal const int MaximumMembershipTargetCount = 50;
 
     /// <summary>Gets the ordered OU tagging rules.</summary>
@@ -185,6 +197,13 @@ public sealed partial class TaggingOptions : IValidatableObject
         return validationResults;
     }
 
+    /// <summary>
+    /// Validates the count, emptiness, and uniqueness of one rule's group or administrative-unit IDs.
+    /// </summary>
+    /// <param name="targetIds">The target object IDs to validate.</param>
+    /// <param name="targetType">The human-readable target type used in error messages.</param>
+    /// <param name="ruleName">The rule name used in error messages.</param>
+    /// <param name="validationResults">The collection that receives validation failures.</param>
     private static void ValidateMembershipTargets(
         IReadOnlyCollection<Guid> targetIds,
         string targetType,
@@ -224,9 +243,19 @@ public sealed partial class TaggingOptions : IValidatableObject
                 RulesJson,
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
 
+    /// <summary>
+    /// Matches the supported Graph extension-attribute names <c>extensionAttribute1</c> through
+    /// <c>extensionAttribute15</c>, case-insensitively.
+    /// </summary>
+    /// <returns>The source-generated regular expression.</returns>
     [GeneratedRegex("^extensionAttribute(?:[1-9]|1[0-5])$", RegexOptions.IgnoreCase)]
     private static partial Regex ExtensionAttributeName();
 
+    /// <summary>
+    /// Matches rule names of 1 to 128 letters, digits, spaces, and <c>._()-</c> that start with a
+    /// letter or digit, keeping names safe for routes, logs, and traces.
+    /// </summary>
+    /// <returns>The source-generated regular expression.</returns>
     [GeneratedRegex(@"^[\p{L}\p{N}][\p{L}\p{N} ._()\-]{0,127}$")]
     private static partial Regex RuleName();
 }

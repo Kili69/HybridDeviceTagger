@@ -14,7 +14,10 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Validates and changes the service-account password through LDAPS.</summary>
 public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPasswordClient
 {
+    /// <summary>Creates bound LDAP connections for bind tests and the password change.</summary>
     private readonly ActiveDirectoryLdapConnectionFactory _connectionFactory;
+
+    /// <summary>Supplies the distinguished name of the account whose password is changed.</summary>
     private readonly ActiveDirectoryOptions _options;
 
     /// <summary>Initializes a new instance of the <see cref="LdapActiveDirectoryPasswordClient"/> class.</summary>
@@ -55,6 +58,12 @@ public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPassword
     /// LDAP failures become <see langword="false"/> because failed credentials are an expected
     /// input to rotation recovery. Cancellation and non-LDAP failures still propagate.
     /// </remarks>
+    /// <param name="credential">The credential to test.</param>
+    /// <param name="requireSecureConnection">
+    /// <see langword="true"/> to require LDAPS; otherwise the configured LDAP fallback may be used.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns><see langword="true"/> when the bind succeeds.</returns>
     private Task<bool> CanBindAsync(
         StoredDirectoryCredential credential,
         bool requireSecureConnection,
@@ -77,8 +86,13 @@ public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPassword
     /// <inheritdoc />
     /// <remarks>
     /// Active Directory receives one atomic modify request that deletes the quoted UTF-16 old
-    /// password and adds the quoted UTF-16 new password.
+    /// password and adds the quoted UTF-16 new password. This is a user password change rather than
+    /// an administrative reset, so the account needs no reset permission and AD password policy
+    /// applies. The connection always uses LDAPS because AD rejects <c>unicodePwd</c> changes
+    /// over unencrypted LDAP.
     /// </remarks>
+    /// <exception cref="LdapException">The secure bind failed.</exception>
+    /// <exception cref="DirectoryOperationException">Active Directory rejected the password change.</exception>
     public Task ChangePasswordAsync(
         StoredDirectoryCredential currentCredential,
         string newPassword,
@@ -111,6 +125,8 @@ public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPassword
 
     /// <summary>Encodes the quoted UTF-16LE representation required by AD's <c>unicodePwd</c>.</summary>
     /// <remarks>Omitting the surrounding quotes causes Active Directory to reject the syntax.</remarks>
+    /// <param name="password">The plain-text password.</param>
+    /// <returns>The encoded attribute value.</returns>
     private static byte[] ToUnicodePassword(string password) =>
         Encoding.Unicode.GetBytes($"\"{password}\"");
 }

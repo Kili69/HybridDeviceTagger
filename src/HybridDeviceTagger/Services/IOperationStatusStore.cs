@@ -19,10 +19,44 @@ public static class OperationNames
 /// <summary>Persists and retrieves latest-run operation status.</summary>
 public interface IOperationStatusStore
 {
+    /// <summary>Marks a requested operation as accepted and waiting for a worker.</summary>
+    /// <remarks>The last actual password-change time of the previous status is preserved.</remarks>
+    /// <param name="operation">The operation name from <see cref="OperationNames"/>.</param>
+    /// <param name="invocationId">The invocation identifier of the run.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous write.</returns>
+    Task QueueAsync(string operation, string invocationId, CancellationToken cancellationToken);
+
+    /// <summary>Marks a still-queued request as failed before it could start.</summary>
+    /// <remarks>A newer status from another invocation is never overwritten.</remarks>
+    /// <param name="operation">The operation name from <see cref="OperationNames"/>.</param>
+    /// <param name="invocationId">The invocation identifier of the run.</param>
+    /// <param name="reason">The exception describing why the request could not start.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous write.</returns>
+    Task RejectQueuedAsync(
+        string operation,
+        string invocationId,
+        Exception reason,
+        CancellationToken cancellationToken);
+
     /// <summary>Marks an operation as running.</summary>
+    /// <remarks>The last actual password-change time of the previous status is preserved.</remarks>
+    /// <param name="operation">The operation name from <see cref="OperationNames"/>.</param>
+    /// <param name="invocationId">The invocation identifier of the run.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous write.</returns>
     Task StartAsync(string operation, string invocationId, CancellationToken cancellationToken);
 
     /// <summary>Marks an operation as successfully completed.</summary>
+    /// <param name="operation">The operation name from <see cref="OperationNames"/>.</param>
+    /// <param name="invocationId">The invocation identifier of the run.</param>
+    /// <param name="result">Aggregate, non-sensitive result values to publish.</param>
+    /// <param name="passwordChanged">
+    /// <see langword="true"/> to record the completion time as the last actual password change.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous write.</returns>
     Task CompleteAsync(
         string operation,
         string invocationId,
@@ -31,6 +65,11 @@ public interface IOperationStatusStore
         CancellationToken cancellationToken);
 
     /// <summary>Marks an operation as failed without persisting a stack trace.</summary>
+    /// <param name="operation">The operation name from <see cref="OperationNames"/>.</param>
+    /// <param name="invocationId">The invocation identifier of the run.</param>
+    /// <param name="exception">The failure; only its type name and message are stored.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous write.</returns>
     Task FailAsync(
         string operation,
         string invocationId,
@@ -38,5 +77,8 @@ public interface IOperationStatusStore
         CancellationToken cancellationToken);
 
     /// <summary>Gets the latest status, or <see langword="null"/> before the first run.</summary>
+    /// <param name="operation">The operation name from <see cref="OperationNames"/>.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The latest status, or <see langword="null"/>.</returns>
     Task<OperationRunStatus?> GetAsync(string operation, CancellationToken cancellationToken);
 }

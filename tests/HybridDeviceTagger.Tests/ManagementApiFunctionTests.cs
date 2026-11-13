@@ -119,140 +119,75 @@ public sealed class ManagementApiFunctionTests
     }
 
     [Fact]
-    public async Task RunDeviceTaggingAsync_InvokesRunner()
+    public async Task RunDeviceTaggingAsync_QueuesRequestAndReturnsAccepted()
     {
-        var runner = new FakeDeviceTaggingRunner();
+        var statusStore = new FakeStatusStore();
+        var queue = new FakeRequestQueue();
         var function = CreateFunction(
             new FakeTaggingConfigurationStore(),
-            new FakeStatusStore(),
+            statusStore,
             new FakeTraceReader(),
-            runner);
+            requestQueue: queue);
 
         var result = await function.RunDeviceTaggingAsync(
             AuthenticatedRequest(ManagementApiRoles.TaggingOperator),
             CancellationToken.None);
 
-        Assert.IsType<OkObjectResult>(result);
-        Assert.NotNull(runner.InvocationId);
-        Assert.False(runner.IsPastDue);
+        var accepted = Assert.IsType<AcceptedResult>(result);
+        Assert.Equal("/api/management/status/device-tagging", accepted.Location);
+        var (operation, request) = Assert.Single(queue.Requests);
+        Assert.Equal(OperationNames.DeviceTagging, operation);
+        Assert.Equal(request.InvocationId, statusStore.QueuedInvocationId);
     }
 
     [Fact]
-    public async Task RunPasswordRotationAsync_ForcesRotation()
+    public async Task RunPasswordRotationAsync_QueuesPasswordRotationRequest()
     {
-        var runner = new FakePasswordRotationRunner();
+        var queue = new FakeRequestQueue();
         var function = CreateFunction(
             new FakeTaggingConfigurationStore(),
             new FakeStatusStore(),
             new FakeTraceReader(),
-            passwordRotationRunner: runner);
+            requestQueue: queue);
 
         var result = await function.RunPasswordRotationAsync(
             AuthenticatedRequest(ManagementApiRoles.PasswordRotationAdministrator),
             CancellationToken.None);
 
-        Assert.IsType<OkObjectResult>(result);
-        Assert.NotNull(runner.InvocationId);
-        Assert.False(runner.IsPastDue);
-        Assert.True(runner.Force);
+        Assert.IsType<AcceptedResult>(result);
+        Assert.Equal(OperationNames.PasswordRotation, Assert.Single(queue.Requests).Operation);
     }
 
     [Fact]
-    public async Task RunDeviceTaggingAsync_ReturnsConflictWhenAlreadyRunning()
+    public async Task RunDeviceTaggingAsync_ReturnsConflictWithoutQueueingWhenLockIsHeld()
     {
-        var runner = new FakeDeviceTaggingRunner { AlreadyRunning = true };
+        var statusStore = new FakeStatusStore();
+        var queue = new FakeRequestQueue();
         var function = CreateFunction(
             new FakeTaggingConfigurationStore(),
-            new FakeStatusStore(),
+            statusStore,
             new FakeTraceReader(),
-            runner);
+            new FakeOperationLock { Held = true },
+            queue);
 
         var result = await function.RunDeviceTaggingAsync(
             AuthenticatedRequest(ManagementApiRoles.TaggingOperator),
             CancellationToken.None);
 
         Assert.IsType<ConflictObjectResult>(result);
-    }
-
-    [Fact]
-    public async Task GetTrustedCertificatesAsync_AllowsReaderAndReturnsETag()
-    {
-        var function = CreateFunction(new FakeTaggingConfigurationStore(), new FakeStatusStore(), new FakeTraceReader());
-        var request = AuthenticatedRequest(ManagementApiRoles.Reader);
-
-        var result = await function.GetTrustedCertificatesAsync(request, CancellationToken.None);
-
-        Assert.IsType<OkObjectResult>(result);
-        Assert.Equal("certificate-etag", request.HttpContext.Response.Headers.ETag);
-    }
-
-    [Fact]
-    public async Task AddTrustedCertificateAsync_ForwardsCertificateAndETag()
-    {
-        var trustStore = new FakeTrustStore();
-        var function = CreateFunction(
-            new FakeTaggingConfigurationStore(),
-            new FakeStatusStore(),
-            new FakeTraceReader(),
-            trustStore: trustStore);
-        var request = AuthenticatedRequest(ManagementApiRoles.CertificateAdministrator);
-        request.Headers.IfMatch = "certificate-etag";
-        request.Body = new MemoryStream(Encoding.UTF8.GetBytes(
-            """{"certificate":"AQID"}"""));
-
-        var result = await function.AddTrustedCertificateAsync(request, CancellationToken.None);
-
-        Assert.IsType<OkObjectResult>(result);
-        Assert.Equal([1, 2, 3], trustStore.AddedCertificate);
-        Assert.Equal("certificate-etag", trustStore.LastExpectedETag);
-    }
-
-    [Fact]
-    public async Task AddTrustedCertificateAsync_RejectsReaderRole()
-    {
-        var trustStore = new FakeTrustStore();
-        var function = CreateFunction(
-            new FakeTaggingConfigurationStore(),
-            new FakeStatusStore(),
-            new FakeTraceReader(),
-            trustStore: trustStore);
-        var request = AuthenticatedRequest(ManagementApiRoles.Reader);
-
-        var result = await function.AddTrustedCertificateAsync(request, CancellationToken.None);
-
-        var forbidden = Assert.IsType<ObjectResult>(result);
-        Assert.Equal(StatusCodes.Status403Forbidden, forbidden.StatusCode);
-        Assert.Null(trustStore.AddedCertificate);
-    }
-
-    [Fact]
-    public async Task RemoveTrustedCertificateAsync_ForwardsThumbprint()
-    {
-        var trustStore = new FakeTrustStore();
-        var function = CreateFunction(
-            new FakeTaggingConfigurationStore(),
-            new FakeStatusStore(),
-            new FakeTraceReader(),
-            trustStore: trustStore);
-
-        var result = await function.RemoveTrustedCertificateAsync(
-            AuthenticatedRequest(ManagementApiRoles.CertificateAdministrator),
-            "00112233445566778899AABBCCDDEEFF00112233",
-            CancellationToken.None);
-
-        Assert.IsType<OkObjectResult>(result);
-        Assert.Equal("00112233445566778899AABBCCDDEEFF00112233", trustStore.RemovedThumbprint);
+        Assert.Empty(queue.Requests);
+        Assert.Null(statusStore.QueuedInvocationId);
     }
 
     [Fact]
     public async Task RunPasswordRotationAsync_RejectsReaderRole()
     {
-        var runner = new FakePasswordRotationRunner();
+        var queue = new FakeRequestQueue();
         var function = CreateFunction(
             new FakeTaggingConfigurationStore(),
             new FakeStatusStore(),
             new FakeTraceReader(),
-            passwordRotationRunner: runner);
+            requestQueue: queue);
 
         var result = await function.RunPasswordRotationAsync(
             AuthenticatedRequest(ManagementApiRoles.Reader),
@@ -260,23 +195,22 @@ public sealed class ManagementApiFunctionTests
 
         var forbidden = Assert.IsType<ObjectResult>(result);
         Assert.Equal(StatusCodes.Status403Forbidden, forbidden.StatusCode);
-        Assert.Null(runner.InvocationId);
+        Assert.Empty(queue.Requests);
     }
 
     private static ManagementApiFunction CreateFunction(
         ITaggingConfigurationStore configurationStore,
         IOperationStatusStore statusStore,
         IRunTraceReader traceReader,
-        IDeviceTaggingRunner? deviceTaggingRunner = null,
-        IPasswordRotationRunner? passwordRotationRunner = null,
-        IActiveDirectoryTrustStore? trustStore = null) =>
+        IOperationLock? operationLock = null,
+        IOperationRequestQueue? requestQueue = null) =>
         new(
             new TaggingConfigurationService(configurationStore),
             statusStore,
             traceReader,
-            trustStore ?? new FakeTrustStore(),
-            deviceTaggingRunner ?? new FakeDeviceTaggingRunner(),
-            passwordRotationRunner ?? new FakePasswordRotationRunner());
+            operationLock ?? new FakeOperationLock(),
+            requestQueue ?? new FakeRequestQueue(),
+            TimeProvider.System);
 
     private static HttpRequest AuthenticatedRequest(params string[] roles)
     {
@@ -317,6 +251,20 @@ public sealed class ManagementApiFunctionTests
 
     private sealed class FakeStatusStore : IOperationStatusStore
     {
+        public string? QueuedInvocationId { get; private set; }
+
+        public Task QueueAsync(string operation, string invocationId, CancellationToken cancellationToken)
+        {
+            QueuedInvocationId = invocationId;
+            return Task.CompletedTask;
+        }
+
+        public Task RejectQueuedAsync(
+            string operation,
+            string invocationId,
+            Exception reason,
+            CancellationToken cancellationToken) => Task.CompletedTask;
+
         public Task StartAsync(string operation, string invocationId, CancellationToken cancellationToken) =>
             Task.CompletedTask;
 
@@ -343,94 +291,28 @@ public sealed class ManagementApiFunctionTests
             Task.FromResult(trace);
     }
 
-    private sealed class FakeTrustStore : IActiveDirectoryTrustStore
+    private sealed class FakeOperationLock : IOperationLock
     {
-        private static readonly TrustedCertificateSnapshot Snapshot = new(
-            [new TrustedCertificateMetadata(
-                "00112233445566778899AABBCCDDEEFF00112233",
-                "CN=Test Root",
-                "CN=Test Root",
-                DateTimeOffset.UtcNow.AddDays(-1),
-                DateTimeOffset.UtcNow.AddDays(1))],
-            "certificate-etag",
-            DateTimeOffset.UtcNow,
-            "blob");
+        public bool Held { get; init; }
 
-        public byte[]? AddedCertificate { get; private set; }
+        public Task<IOperationLease?> TryAcquireAsync(string operation, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
 
-        public string? RemovedThumbprint { get; private set; }
-
-        public string? LastExpectedETag { get; private set; }
-
-        public IReadOnlyList<System.Security.Cryptography.X509Certificates.X509Certificate2> GetCertificates() =>
-            [];
-
-        public Task<TrustedCertificateSnapshot> GetSnapshotAsync(CancellationToken cancellationToken) =>
-            Task.FromResult(Snapshot);
-
-        public Task<TrustedCertificateSnapshot> AddAsync(
-            byte[] certificateBytes,
-            string? expectedETag,
-            CancellationToken cancellationToken)
-        {
-            AddedCertificate = certificateBytes;
-            LastExpectedETag = expectedETag;
-            return Task.FromResult(Snapshot);
-        }
-
-        public Task<TrustedCertificateSnapshot> RemoveAsync(
-            string thumbprint,
-            string? expectedETag,
-            CancellationToken cancellationToken)
-        {
-            RemovedThumbprint = thumbprint;
-            LastExpectedETag = expectedETag;
-            return Task.FromResult(Snapshot);
-        }
+        public Task<bool> IsHeldAsync(string operation, CancellationToken cancellationToken) =>
+            Task.FromResult(Held);
     }
 
-    private sealed class FakeDeviceTaggingRunner : IDeviceTaggingRunner
+    private sealed class FakeRequestQueue : IOperationRequestQueue
     {
-        public string? InvocationId { get; private set; }
+        public List<(string Operation, OperationRequest Request)> Requests { get; } = [];
 
-        public bool IsPastDue { get; private set; }
-
-        public bool AlreadyRunning { get; init; }
-
-        public Task<TaggingResult> RunAsync(
-            string invocationId,
-            bool isPastDue,
+        public Task EnqueueAsync(
+            string operation,
+            OperationRequest request,
             CancellationToken cancellationToken)
         {
-            if (AlreadyRunning)
-            {
-                throw new OperationAlreadyRunningException(OperationNames.DeviceTagging);
-            }
-
-            InvocationId = invocationId;
-            IsPastDue = isPastDue;
-            return Task.FromResult(new TaggingResult(1, 1, 0, 0, 0));
-        }
-    }
-
-    private sealed class FakePasswordRotationRunner : IPasswordRotationRunner
-    {
-        public string? InvocationId { get; private set; }
-
-        public bool IsPastDue { get; private set; }
-
-        public bool Force { get; private set; }
-
-        public Task<PasswordRotationResult> RunAsync(
-            string invocationId,
-            bool isPastDue,
-            bool force,
-            CancellationToken cancellationToken)
-        {
-            InvocationId = invocationId;
-            IsPastDue = isPastDue;
-            Force = force;
-            return Task.FromResult(new PasswordRotationResult(PasswordRotationOutcome.Rotated, 10));
+            Requests.Add((operation, request));
+            return Task.CompletedTask;
         }
     }
 

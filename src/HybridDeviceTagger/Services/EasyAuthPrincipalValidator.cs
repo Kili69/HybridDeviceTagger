@@ -19,8 +19,6 @@ public static class ManagementApiRoles
     public const string TaggingOperator = "HybridDeviceTagger.TaggingOperator";
     /// <summary>Reads rotation status and forces password rotation.</summary>
     public const string PasswordRotationAdministrator = "HybridDeviceTagger.PasswordRotationAdministrator";
-    /// <summary>Reads and changes Active Directory LDAPS trust certificates.</summary>
-    public const string CertificateAdministrator = "HybridDeviceTagger.CertificateAdministrator";
 }
 
 /// <summary>Describes the result of management API principal authorization.</summary>
@@ -35,17 +33,32 @@ public enum EasyAuthAuthorizationResult
 }
 
 /// <summary>Validates the principal header emitted by App Service Easy Auth.</summary>
+/// <remarks>
+/// The header is trusted because the platform authentication middleware validates the Entra token
+/// and strips any client-supplied copy of the header before the request reaches the worker. The
+/// validator therefore checks structure and roles only; it does not verify tokens itself.
+/// </remarks>
 public static class EasyAuthPrincipalValidator
 {
+    /// <summary>The header in which Easy Auth passes the Base64-encoded JSON client principal.</summary>
     private const string PrincipalHeader = "X-MS-CLIENT-PRINCIPAL";
+
+    /// <summary>The short claim type that carries Entra application roles.</summary>
     private const string RoleClaim = "roles";
+
+    /// <summary>The WS-Federation role claim type that Easy Auth may emit instead of <see cref="RoleClaim"/>.</summary>
     private const string RoleClaimUri = "http://schemas.microsoft.com/ws/2008/06/identity/claims/role";
 
     /// <summary>Returns whether the request contains a structurally valid Entra principal.</summary>
+    /// <param name="request">The request to inspect.</param>
+    /// <returns><see langword="true"/> when exactly one valid Entra (<c>aad</c>) principal header is present.</returns>
     public static bool IsAuthenticated(HttpRequest request)
         => ReadClaims(request) is not null;
 
     /// <summary>Returns whether an Entra principal has at least one required application role.</summary>
+    /// <param name="request">The request to inspect.</param>
+    /// <param name="requiredRoles">Roles of which the principal must hold at least one; compared case-sensitively.</param>
+    /// <returns>The authorization outcome.</returns>
     public static EasyAuthAuthorizationResult Authorize(
         HttpRequest request,
         params string[] requiredRoles)
@@ -64,6 +77,13 @@ public static class EasyAuthPrincipalValidator
             : EasyAuthAuthorizationResult.Forbidden;
     }
 
+    /// <summary>Decodes and parses the Easy Auth principal header.</summary>
+    /// <remarks>
+    /// Missing, repeated, malformed, non-Entra, or claim-less headers are all treated as
+    /// unauthenticated rather than throwing, so malformed input cannot cause a server error.
+    /// </remarks>
+    /// <param name="request">The request to inspect.</param>
+    /// <returns>The non-empty claim list, or <see langword="null"/> when no valid principal exists.</returns>
     private static IReadOnlyList<(string Type, string Value)>? ReadClaims(HttpRequest request)
     {
         if (!request.Headers.TryGetValue(PrincipalHeader, out var values) || values.Count != 1)

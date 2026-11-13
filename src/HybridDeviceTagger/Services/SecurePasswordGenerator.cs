@@ -11,13 +11,27 @@ namespace HybridDeviceTagger.Services;
 public sealed class SecurePasswordGenerator : IPasswordGenerator
 {
     // Ambiguous characters are intentionally omitted to make emergency manual handling safer.
+
+    /// <summary>Upper-case letters without <c>I</c> and <c>O</c>.</summary>
     private const string Uppercase = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+
+    /// <summary>Lower-case letters without <c>l</c>.</summary>
     private const string Lowercase = "abcdefghijkmnopqrstuvwxyz";
+
+    /// <summary>Digits without <c>0</c> and <c>1</c>.</summary>
     private const string Digits = "23456789";
+
+    /// <summary>Special characters that count toward the Active Directory complexity requirement.</summary>
     private const string Symbols = "!#$%&*+-=?@_";
+
+    /// <summary>The combined alphabet used for all positions after the four guaranteed classes.</summary>
     private const string AllCharacters = Uppercase + Lowercase + Digits + Symbols;
 
     /// <inheritdoc />
+    /// <remarks>
+    /// One character from each class is placed first to satisfy AD complexity rules, then a
+    /// Fisher-Yates shuffle with a cryptographic RNG removes the predictable class positions.
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="length"/> is less than four characters.
     /// </exception>
@@ -50,6 +64,8 @@ public sealed class SecurePasswordGenerator : IPasswordGenerator
     }
 
     /// <summary>Selects one uniformly distributed character using a cryptographic RNG.</summary>
+    /// <param name="characters">The alphabet to choose from.</param>
+    /// <returns>The selected character.</returns>
     private static char Pick(string characters) =>
         characters[RandomNumberGenerator.GetInt32(characters.Length)];
 }

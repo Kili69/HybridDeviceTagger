@@ -6,6 +6,13 @@
 namespace HybridDeviceTagger.Models;
 
 /// <summary>Records Entra state owned by HybridDeviceTagger.</summary>
+/// <remarks>
+/// The ledger only tracks memberships and attributes this application added, so reconciliation can
+/// remove them later without touching memberships or values that administrators manage manually.
+/// </remarks>
+/// <param name="EntraObjectId">The Entra object identifier of the device.</param>
+/// <param name="EntraGroupIds">The Entra security groups to which this application added the device.</param>
+/// <param name="AdministrativeUnitIds">The administrative units to which this application added the device.</param>
 public sealed record ManagedDeviceMemberships(
     string EntraObjectId,
     HashSet<Guid> EntraGroupIds,
@@ -16,6 +23,8 @@ public sealed record ManagedDeviceMemberships(
         new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Creates an empty ownership record for an Entra device object.</summary>
+    /// <param name="entraObjectId">The Entra object identifier of the device.</param>
+    /// <returns>A record without owned memberships or extension attributes.</returns>
     public static ManagedDeviceMemberships Empty(string entraObjectId) =>
         new(entraObjectId, [], []);
 }

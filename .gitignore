@@ -262,3 +262,8 @@ paket-files/
 # Python Tools for Visual Studio (PTVS)
 __pycache__/
 *.pyc
+# HybridDeviceTagger build output and local installer answers
+artifacts/
+installationspackage/function/
+installationspackage/version.json
+installationspackage/installation-settings.json

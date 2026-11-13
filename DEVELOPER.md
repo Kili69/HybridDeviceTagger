@@ -17,17 +17,23 @@ The application separates trigger, management API, orchestration, directory, Gra
 |-- .githooks/                      Repository-local Git hooks
 |-- .github/                        GitHub Actions and Copilot instructions
 |-- .vscode/                        Recommended VS Code workspace configuration
-|-- Deployment/
-|   |-- HybridDeviceTagger.Management/
-|   |                                  PowerShell management module
-|   |-- Install-HybridDeviceTagger.ps1 Interactive validation and deployment
-|   |-- main.bicep                     Azure infrastructure definition
-|   `-- key-vault-role-assignment.bicep
-|                                      Existing Key Vault role assignment
+|-- artifacts/                       Package build output (not tracked)
 |-- docs/
 |   `-- management-api.openapi.yaml    Management API contract
+|-- installationspackage/             All files required for an installation
+|   |-- function/                      Prebuilt Function package (build output, not tracked)
+|   |-- HybridDeviceTagger.Management/
+|   |                                  PowerShell management module
+|   |-- Install.ps1                    Guided installation entry point
+|   |-- Install-HybridDeviceTagger.ps1 Validation and deployment engine
+|   |-- main.bicep                     Azure infrastructure definition
+|   |-- key-vault-role-assignment.bicep
+|   |                                  Secret-scoped Key Vault role assignments
+|   `-- README.md                      Installation reference
 |-- scripts/
-|   `-- Assert-CommitMetadata.ps1      Version and changelog commit guard
+|   |-- Assert-CommitMetadata.ps1      Changelog and file-header commit guard
+|   |-- Build-InstallationPackage.ps1  Test, publish, stamp, and archive a release package
+|   `-- Get-ProductVersion.ps1         Tag-based product version calculation
 |-- src/
 |   `-- HybridDeviceTagger/            Azure Functions application
 |       |-- Models/                    Workflow and persistence data contracts
@@ -38,7 +44,8 @@ The application separates trigger, management API, orchestration, directory, Gra
 |   `-- HybridDeviceTagger.Tests/      Focused unit and entry-point tests
 |-- CHANGELOG.md                       Version history
 |-- DEVELOPER.md                       Developer and architecture documentation
-|-- Directory.Build.props              Shared version and package metadata
+|-- Directory.Build.props              Shared package metadata
+|-- Directory.Build.targets            Product version resolution for every build
 |-- global.json                        .NET SDK selection
 |-- HybridDeviceTagger.sln             Build and test solution
 |-- LICENSE                            Apache License 2.0
@@ -47,9 +54,19 @@ The application separates trigger, management API, orchestration, directory, Gra
 
 The production application lives entirely under `src/HybridDeviceTagger`. Function entry points remain thin and delegate work to services registered in `Program.cs`. The `Services` directory contains both abstractions and production implementations for Active Directory, Microsoft Graph, Azure Key Vault, Blob Storage, authentication, tracing, and workflow orchestration. Keeping these dependencies behind interfaces allows the test project to exercise workflows with in-memory substitutes.
 
-Deployment assets are intentionally separate from runtime code. `Deployment/main.bicep` defines the Azure resources, `Install-HybridDeviceTagger.ps1` validates prerequisites and coordinates deployment, and `Deployment/HybridDeviceTagger.Management` provides the reusable operator-facing PowerShell module. The OpenAPI contract under `docs` describes the same management endpoints consumed by that module.
+Installation assets are intentionally separate from runtime code and live only in `installationspackage`. `main.bicep` defines the Azure resources, `Install-HybridDeviceTagger.ps1` validates prerequisites and coordinates deployment, `Install.ps1` collects all parameters interactively and drives the engine, and `HybridDeviceTagger.Management` provides the reusable operator-facing PowerShell module. The engine deploys `function/HybridDeviceTagger.zip` when present and otherwise builds `src/HybridDeviceTagger`. The OpenAPI contract under `docs` describes the same management endpoints consumed by that module.
 
-Repository-wide build, version, and release metadata is centralized in `Directory.Build.props`, `CHANGELOG.md`, and `scripts/Assert-CommitMetadata.ps1`. Generated `bin` and `obj` directories are build outputs and are not tracked.
+Repository-wide build and package metadata is centralized in `Directory.Build.props`. Generated `bin`, `obj`, `artifacts`, `installationspackage/function`, and `installationspackage/version.json` are build outputs and are not tracked.
+
+## Versioning and Release Build
+
+The product version has the format `<YYYY><MM>.<counter>` and is never stored in a file. `scripts/Get-ProductVersion.ps1` derives it from Git: a release tag `v<YYYY><MM>.<counter>` on `HEAD` defines the version; otherwise the counter is the highest release counter of the current UTC month plus one. Outside `main`, the sanitized branch name is appended (`202611.3-dev`); in a detached checkout the branch is read from `GITHUB_HEAD_REF`, `GITHUB_REF_NAME`, or `BUILD_SOURCEBRANCHNAME`.
+
+`Directory.Build.targets` runs the script before `GetAssemblyVersion` unless `ProductVersion` is passed explicitly, and falls back to `<YYYY><MM>.0-local` when `pwsh` or Git is unavailable. `InformationalVersion` and `Version` carry the full product version. Because .NET assembly version parts are limited to 65535, `AssemblyVersion` and `FileVersion` are `<YYYY>.<M>.<counter>.0`.
+
+`scripts/Build-InstallationPackage.ps1` tests and publishes the Function with `-p:ProductVersion`, stores it as `installationspackage/function/HybridDeviceTagger.zip`, writes `version.json`, copies the package to `artifacts/HybridDeviceTagger-<version>/`, replaces `# Project-Version: source` and the manifest `ModuleVersion` (plus a `Prerelease` label outside `main`), and creates `artifacts/HybridDeviceTagger-<version>.zip`. `-Release` additionally requires `main`, a clean tree, and a matching `CHANGELOG.md` section, and creates the annotated tag. The CI workflow checks out the full history so the tags are available.
+
+`scripts/Assert-CommitMetadata.ps1`, run by the `.githooks/pre-commit` hook, requires a changelog entry for every change and the version marker and author header in changed production files.
 
 ## Runtime Architecture
 
@@ -70,8 +87,16 @@ flowchart LR
     API[ManagementApiFunction] --> TCS[TaggingConfigurationService]
     API --> OSS[IOperationStatusStore]
     API --> RTR[IRunTraceReader]
-    API --> DTR[IDeviceTaggingRunner]
-    API --> PRR[IPasswordRotationRunner]
+    API --> OL[IOperationLock]
+    API --> ORQ[IOperationRequestQueue]
+    ORQ --> SQ[StorageOperationRequestQueue]
+    SQ --> QUEUE[Azure Queue Storage]
+    QUEUE --> DT
+    QUEUE --> RT
+    DT --> OL
+    RT --> OL
+    OL --> BOL[BlobOperationLock]
+    BOL --> BLOB
     TCS --> BTC[BlobTaggingConfigurationStore]
     OSS --> BOS[BlobOperationStatusStore]
     RTR --> BRT
@@ -102,25 +127,28 @@ flowchart LR
 - constructs the Key Vault `SecretClient`;
 - maps every service interface to its production implementation;
 - configures the Graph `HttpClient` with `https://graph.microsoft.com/v1.0/` as its base address.
-- creates Blob clients for the private membership ledger and latest-run trace containers.
+- creates Blob clients for the private membership ledger and latest-run trace containers;
+- creates a Base64-encoding `QueueServiceClient` for management-API run requests.
 
 The Azure clients, LDAP adapters, credential store, dynamic rule provider, operation status store, password generator, and `TimeProvider` are singletons. The workflow orchestrators and management API are transient. `MicrosoftGraphDeviceClient` is created through `HttpClientFactory`.
 
 ## Management API
 
-`ManagementApiFunction` exposes twelve protected HTTP operations for rule management, trusted LDAPS certificate management, both latest-run statuses, streamed latest-trace download, immediate tagging, and forced password rotation. `ManagementApiAuthenticationFunction` exposes the public delegated token scope at `GET /api/management/authentication`. This discovery route is the only Easy Auth exclusion. The protected HTTP triggers are anonymous at the Functions host layer because App Service Easy Auth authenticates and validates the Entra token first. `EasyAuthPrincipalValidator` then requires one valid AAD `X-MS-CLIENT-PRINCIPAL` header and authorizes the route from its `roles` claims. Missing authentication returns HTTP `401`; an authenticated principal without an accepted role receives HTTP `403`.
+`ManagementApiFunction` exposes nine protected HTTP operations for rule management, both latest-run statuses, streamed latest-trace download, queued immediate tagging, and queued forced password rotation. `ManagementApiAuthenticationFunction` exposes the public delegated token scope at `GET /api/management/authentication`. This discovery route is the only Easy Auth exclusion. The protected HTTP triggers are anonymous at the Functions host layer because App Service Easy Auth authenticates and validates the Entra token first. `EasyAuthPrincipalValidator` then requires one valid AAD `X-MS-CLIENT-PRINCIPAL` header and authorizes the route from its `roles` claims. Missing authentication returns HTTP `401`; an authenticated principal without an accepted role receives HTTP `403`.
 
-The API app registration defines `HybridDeviceTagger.Reader`, `HybridDeviceTagger.RuleAdministrator`, `HybridDeviceTagger.TaggingOperator`, `HybridDeviceTagger.PasswordRotationAdministrator`, and `HybridDeviceTagger.CertificateAdministrator`. The installer assigns approved users, groups, or service principals before enabling `appRoleAssignmentRequired` on the Enterprise Application. This is the API authorization plane; Azure subscription RBAC does not grant API access.
+The API app registration defines `HybridDeviceTagger.Reader`, `HybridDeviceTagger.RuleAdministrator`, `HybridDeviceTagger.TaggingOperator`, and `HybridDeviceTagger.PasswordRotationAdministrator`. The retired `HybridDeviceTagger.CertificateAdministrator` role is removed by the installer. The installer assigns approved users, groups, or service principals before enabling `appRoleAssignmentRequired` on the Enterprise Application. This is the API authorization plane; Azure subscription RBAC does not grant API access.
 
-The two action endpoints reuse `IDeviceTaggingRunner` and `IPasswordRotationRunner`, so timer and HTTP execution share orchestration, status persistence, trace behavior, and non-blocking operation locks. Forced rotation bypasses only the password-age gate. Credential verification, secure LDAP, next-secret staging, changed-credential validation, and promotion remain mandatory. A concurrent invocation returns HTTP `409`.
+The two action endpoints do not execute the workflow inside the HTTP request. They return HTTP `409` when `IOperationLock` reports an active run; otherwise they record a `Queued` status, enqueue an `OperationRequest` through `IOperationRequestQueue`, and return HTTP `202` with the invocation ID and status URI. `DeviceTaggingRequestFunction` and `PasswordRotationRequestFunction` are queue triggers in the same classes as the timers, so timer and requested runs share orchestration, status persistence, and trace behavior. `host.json` sets `maxDequeueCount` to `1`, so a failed requested run is moved to the poison queue instead of being retried. Forced rotation bypasses only the password-age gate. Credential verification, secure LDAP, next-secret staging, changed-credential validation, and promotion remain mandatory.
+
+`BlobOperationLock` serializes each operation across all instances with a 60-second Blob lease on `run-traces/locks/<queue>.lock` that is renewed every 20 seconds. Flex Consumption scales timer, queue, and HTTP functions in separate instance groups, so an in-process lock is insufficient. Each renewal call has a 10-second timeout. A watchdog cancels the run's `LeaseLost` token 45 seconds after the last successful renewal, which is before the 60-second lease can expire, even if a renewal call hangs; a `409` on renewal cancels it immediately. A timer run that cannot acquire the lease is skipped with a warning; a requested run marks its own still-queued status as failed, also when acquiring the lease throws, without overwriting a newer status.
 
 `BlobTaggingConfigurationStore` stores `tagging-configuration.json` in the private `run-traces` container. Before its first API mutation, `OptionsTaggingRuleProvider` supplies the validated `Tagging__RulesJson` startup fallback. Mutations normalize and validate the complete result and use Blob ETags. API clients can send the ETag returned by `GET` in `If-Match`; a stale write returns HTTP `409`.
 
-`BlobActiveDirectoryTrustStore` stores public DER certificates as base64 in `run-traces/active-directory-trust-certificates.json`. It exposes metadata only through the API, uses the packaged certificate before the first mutation, rejects an empty resulting collection, and applies Blob ETags to concurrent changes. `ActiveDirectoryLdapConnectionFactory` reads the current set for every new connection. Windows chain validation adds every certificate to `CustomTrustStore`; Linux writes an atomically replaced PEM bundle for OpenLDAP.
+The LDAPS trust anchor is immutable package content. `ActiveDirectoryLdapConnectionFactory` loads the optional DER or PEM file from `ActiveDirectory__TrustedCertificatePath` once at construction. On Windows, chain validation adds those certificates to `CustomTrustStore` and checks the DNS name; without a configured file, the operating system trust store applies. On Linux, OpenLDAP validates against `LDAPTLS_CACERT`, which the deployment points at the packaged file or the system CA bundle, with `LDAPTLS_REQCERT=DEMAND`. No runtime path can change trust, because a substituted trust anchor would expose the service-account password to a rogue LDAPS server.
 
-`BlobOperationStatusStore` writes separate JSON documents for device tagging and password rotation. Timer entry points record `Running`, then `Succeeded` or a sanitized `Failed` state. Password status preserves the timestamp of the last actual password change across checks that do not rotate. Status persistence failures are warnings and do not fail the directory workflow.
+`BlobOperationStatusStore` writes separate JSON documents for device tagging and password rotation. Requested runs start as `Queued`; timer and queue entry points record `Running`, then `Succeeded` or a sanitized `Failed` state. Password status preserves the timestamp of the last actual password change across checks that do not rotate. Status persistence failures are warnings and do not fail the directory workflow.
 
-`Deployment/HybridDeviceTagger.Management` owns the REST client. `Connect-HybridDeviceTagger` stores the API URI, REST-discovered token scope, token, and expiry in module scope and refreshes the token from Azure CLI when required. The module contains no deployment-specific client ID. It accepts only discovered scopes matching `api://<GUID>/.default` before requesting a token. Public cmdlets cover rules, trusted LDAPS certificates, both statuses, parsed trace events, immediate tagging, and forced password rotation. `Add-HybridDeviceTaggerRule` performs the named single-rule upsert. `Get-HybridDeviceTaggerTrace` prepends the `HybridDeviceTagger.TraceEvent` type name to each parsed event. The module format file renders that type as the concise six-field trace line by default without converting the pipeline value to text. Mutations use `ShouldProcess`, ETag-protected writes, and high confirmation impact for destructive rule replacement, removal, and password rotation. No standalone REST wrapper scripts are required.
+`installationspackage/HybridDeviceTagger.Management` owns the REST client. `Connect-HybridDeviceTagger` stores the API URI, REST-discovered token scope, token, and expiry in module scope and refreshes the token from Azure CLI when required. The module contains no deployment-specific client ID. It accepts only discovered scopes matching `api://<GUID>/.default` before requesting a token. Public cmdlets cover rules, both statuses, parsed trace events, queued immediate tagging, and queued forced password rotation. The two action cmdlets return the accepted request or, with `-Wait`, poll the status endpoint until that invocation finishes. `Add-HybridDeviceTaggerRule` performs the named single-rule upsert. `Get-HybridDeviceTaggerTrace` prepends the `HybridDeviceTagger.TraceEvent` type name to each parsed event. The module format file renders that type as the concise six-field trace line by default without converting the pipeline value to text. Mutations use `ShouldProcess`, ETag-protected writes, and high confirmation impact for destructive rule replacement, removal, and password rotation. No standalone REST wrapper scripts are required.
 
 ## Device Tagging Workflow
 

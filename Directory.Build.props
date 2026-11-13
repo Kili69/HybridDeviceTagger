@@ -1,14 +1,11 @@
 <Project>
+  <!--
+    The product version (<YYYY><MM>.<counter>[-<branch>]) is calculated from Git tags by
+    scripts/Get-ProductVersion.ps1 in Directory.Build.targets. Release builds pass it explicitly
+    with -p:ProductVersion=<version>.
+  -->
   <PropertyGroup>
-    <VersionMajor Condition="'$(VersionMajor)' == ''">0</VersionMajor>
-    <VersionMinor Condition="'$(VersionMinor)' == ''">1</VersionMinor>
-    <VersionDate Condition="'$(VersionDate)' == ''">20261005</VersionDate>
-    <VersionCounter Condition="'$(VersionCounter)' == ''">1</VersionCounter>
-    <Version>$(VersionMajor).$(VersionMinor).$(VersionDate).$(VersionCounter)</Version>
-    <InformationalVersion>$(Version)</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
-    <AssemblyVersion>$(VersionMajor).$(VersionMinor).0.0</AssemblyVersion>
-    <FileVersion>$(VersionMajor).$(VersionMinor).0.$(VersionCounter)</FileVersion>
     <Authors>Andreas Lucas (aka Kili)</Authors>
     <AuthorEmail>andreas.lucas@outlook.com</AuthorEmail>
     <Company>Andreas Lucas</Company>

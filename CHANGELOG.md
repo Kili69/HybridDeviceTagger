@@ -2,9 +2,37 @@
 
 All notable changes to HybridDeviceTagger are documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions use the project format `<major>.<minor>.<yyyyMMdd>.<counter>`.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Since 202611, versions use the format `<YYYY><MM>.<counter>` and are derived from the Git release tag `v<YYYY><MM>.<counter>`; builds outside `main` append the branch name, for example `202611.1-dev`. Earlier releases used `<major>.<minor>.<yyyyMMdd>.<counter>`.
 
 ## [Unreleased]
+
+### Added
+
+- Add the `installationspackage` directory as the single source of all installation files. It contains the Bicep templates, the installation engine `Install-HybridDeviceTagger.ps1`, the `HybridDeviceTagger.Management` module, and the new guided installer `Install.ps1`.
+- Add `Install.ps1`, which checks the prerequisites, asks for every installation parameter with validation and defaults, saves the answers without secrets in `installation-settings.json`, asks for the service-account password once, and runs validation, optional What-If, and installation in sequence.
+- Add `scripts/Build-InstallationPackage.ps1`, which tests and publishes the Function, adds it as `installationspackage/function/HybridDeviceTagger.zip`, stamps the version into all package scripts, and creates `artifacts/HybridDeviceTagger-<version>.zip`. `-Release` builds from a clean `main` and creates the release tag.
+- Add `scripts/Get-ProductVersion.ps1` and `Directory.Build.targets`, which derive the product version `<YYYY><MM>.<counter>` from the release tags of the month and append the branch name outside `main`. Assemblies use `<YYYY>.<M>.<counter>.0` because .NET version parts are limited to 65535.
+- Document all production source code, including private members, PowerShell helper functions, and Bicep resources.
+- Add a README header with the project logo, status and platform badges, a support link, and an in-page navigation, aligned with the other Kili69 projects.
+
+### Changed
+
+- Rename `Deployment` to `installationspackage`.
+- The installation engine uses the prebuilt Function package when present, so a release installation no longer requires the .NET SDK. Without it, the engine still builds from source.
+- The installation engine exits with code 1 after a compactly reported failure so callers and CI runners detect it.
+- Replace the version bump in `Directory.Build.props` with tag-based versioning. `scripts/Assert-CommitMetadata.ps1` now requires a changelog entry and the `# Project-Version: source` marker that the package build replaces.
+- Version the OpenAPI contract independently as `1.0.0`.
+
+- Load the Active Directory LDAPS trust anchor only from the immutable Function package so storage or API access can no longer substitute a certificate and capture the service-account password during the LDAPS bind. Without a packaged certificate, the operating system trust store applies.
+- Assign `Key Vault Secrets Officer` to the Function managed identity on the current and staged password secrets only instead of the whole Key Vault. The installer creates a missing staged secret with an unusable placeholder and removes the superseded vault-wide assignment.
+- Serialize device tagging and password rotation across all instances and Flex Consumption scale groups with renewable Blob leases, and default `maximumInstanceCount` to `1`. A timer run that cannot acquire the lease is skipped with a warning.
+- Run management-API actions asynchronously: the action endpoints return HTTP `202` with the invocation ID and status URI and enqueue the run in a private Storage queue processed by queue-triggered functions. Failed requested runs are not retried. Operation status adds the `Queued` state.
+- Add `-Wait` and `-TimeoutSeconds` to `Invoke-HybridDeviceTagging` and `Invoke-HybridDeviceTaggerPasswordRotation`.
+- Grant the managed identity `Storage Blob Data Contributor` and `Storage Queue Data Contributor` instead of `Storage Blob Data Owner`; the installer removes the superseded assignment. A Queue private endpoint is added, which requires private DNS for `privatelink.queue.core.windows.net`.
+
+### Removed
+
+- Remove the runtime trusted-certificate store, its three management API endpoints, the `Get-`, `Add-`, and `Remove-HybridDeviceTaggerTrustedCertificate` cmdlets, the `HybridDeviceTagger.CertificateAdministrator` application role, and the installer parameter `ManagementApiCertificateAdministratorPrincipalObjectId`. The installer unassigns and removes the retired role. Replace trust anchors by rerunning the installer with `-ActiveDirectoryTrustedCertificatePath`.
 
 ## [0.1.20261005.1] - 2026-10-05
 

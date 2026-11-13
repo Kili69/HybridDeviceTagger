@@ -18,6 +18,7 @@ namespace HybridDeviceTagger.Services;
 /// </remarks>
 internal static partial class ActiveDirectorySearchPath
 {
+    /// <summary>The maximum accepted path length, limiting parser work on untrusted input.</summary>
     internal const int MaximumDistinguishedNameLength = 2048;
 
     /// <summary>Determines whether a path omits domain components and must be resolved forest-wide.</summary>
@@ -54,6 +55,14 @@ internal static partial class ActiveDirectorySearchPath
             DomainComponentValue().Matches(distinguishedName)
                 .Select(match => match.Groups[1].Value.Trim()));
 
+    /// <summary>Validates that a path consists of OU components optionally followed by DC components.</summary>
+    /// <remarks>
+    /// Only <c>OU</c> and <c>DC</c> component types are accepted, and an <c>OU</c> after a <c>DC</c> is
+    /// rejected, so a search base can never point at containers such as <c>CN=Users</c>.
+    /// </remarks>
+    /// <param name="path">The path to validate.</param>
+    /// <param name="hasDomainComponent">Receives whether at least one <c>DC=</c> component was found.</param>
+    /// <returns><see langword="true"/> when the path is valid.</returns>
     private static bool TryValidateBaseDn(string path, out bool hasDomainComponent)
     {
         hasDomainComponent = false;
@@ -91,6 +100,13 @@ internal static partial class ActiveDirectorySearchPath
         return true;
     }
 
+    /// <summary>Splits a distinguished name at unescaped commas.</summary>
+    /// <param name="path">The path to split.</param>
+    /// <param name="components">Receives the trimmed, still-escaped components on success.</param>
+    /// <returns>
+    /// <see langword="false"/> when the path is empty, too long, contains control characters, has an
+    /// empty component, or ends with a dangling escape.
+    /// </returns>
     private static bool TrySplitComponents(string path, out string[] components)
     {
         components = [];
@@ -141,6 +157,10 @@ internal static partial class ActiveDirectorySearchPath
         return true;
     }
 
+    /// <summary>Appends the trimmed buffered component and clears the buffer.</summary>
+    /// <param name="components">The list that receives the component.</param>
+    /// <param name="component">The buffer holding the current component.</param>
+    /// <returns><see langword="false"/> when the component is empty.</returns>
     private static bool AddComponent(List<string> components, StringBuilder component)
     {
         var value = component.ToString().Trim();
@@ -154,6 +174,12 @@ internal static partial class ActiveDirectorySearchPath
         return true;
     }
 
+    /// <summary>Validates an attribute value against RFC 4514 escaping rules.</summary>
+    /// <param name="value">The raw value after the <c>=</c> separator.</param>
+    /// <returns>
+    /// <see langword="true"/> when the value is non-empty, has no control characters, no leading space
+    /// or <c>#</c>, no trailing space, no unescaped special characters, and no dangling escape.
+    /// </returns>
     private static bool IsValidComponentValue(string value)
     {
         if (string.IsNullOrEmpty(value) ||
@@ -187,10 +213,12 @@ internal static partial class ActiveDirectorySearchPath
     }
 
     /// <summary>Matches an unescaped domain component marker.</summary>
+    /// <returns>The source-generated regular expression.</returns>
     [GeneratedRegex(@"(?:^|(?<!\\),)\s*DC\s*=", RegexOptions.IgnoreCase)]
     private static partial Regex DomainComponent();
 
     /// <summary>Captures values from unescaped domain components in their original order.</summary>
+    /// <returns>The source-generated regular expression.</returns>
     [GeneratedRegex(@"(?:^|(?<!\\),)\s*DC\s*=\s*([^,]+)", RegexOptions.IgnoreCase)]
     private static partial Regex DomainComponentValue();
 

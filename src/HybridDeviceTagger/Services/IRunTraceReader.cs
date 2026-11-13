@@ -6,6 +6,9 @@
 namespace HybridDeviceTagger.Services;
 
 /// <summary>Represents a streamed latest-run trace download.</summary>
+/// <param name="Content">The trace content stream, owned and disposed by the HTTP response.</param>
+/// <param name="ContentType">The MIME content type of the trace.</param>
+/// <param name="FileName">The suggested download file name.</param>
 public sealed record RunTraceDownload(
     Stream Content,
     string ContentType,
@@ -15,5 +18,7 @@ public sealed record RunTraceDownload(
 public interface IRunTraceReader
 {
     /// <summary>Opens the latest trace, or returns <see langword="null"/> before the first run.</summary>
+    /// <param name="cancellationToken">Cancels opening the trace.</param>
+    /// <returns>The streamed trace, or <see langword="null"/> when none exists.</returns>
     Task<RunTraceDownload?> OpenLatestAsync(CancellationToken cancellationToken);
 }

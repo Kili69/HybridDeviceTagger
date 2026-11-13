@@ -18,8 +18,11 @@ public interface IEntraDeviceClient
 
     /// <summary>Sets one or more extension attributes on an Entra device.</summary>
     /// <param name="entraObjectId">The Entra object identifier.</param>
-    /// <param name="extensionAttributes">The Graph attribute names and values to write.</param>
+    /// <param name="extensionAttributes">
+    /// The Graph attribute names and values to write; a <see langword="null"/> value clears the attribute.
+    /// </param>
     /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous update.</returns>
     Task SetExtensionAttributesAsync(
         string entraObjectId,
         IReadOnlyDictionary<string, string?> extensionAttributes,

@@ -77,10 +77,10 @@ param taggingSchedule string = '0 */15 * * * *'
 @description('Timer schedule for password rotation checks.')
 param rotationSchedule string = '0 30 2 * * *'
 
-@description('Maximum FC1 instance count.')
+@description('Maximum FC1 instance count per function scale group. Runs are additionally serialized by Blob leases.')
 @minValue(1)
 @maxValue(1000)
-param maximumInstanceCount int = 10
+param maximumInstanceCount int = 1
 
 @description('Memory allocated to each FC1 instance in MB.')
 @allowed([
@@ -93,34 +93,55 @@ param instanceMemoryMB int = 2048
 @description('Tags applied to newly created resources.')
 param tags object = {}
 
+@description('Name of the Flex Consumption (FC1) App Service plan.')
 var servicePlanName = '${functionAppName}-plan'
+@description('Name of the Log Analytics workspace that stores Application Insights telemetry.')
 var logAnalyticsWorkspaceName = '${functionAppName}-law'
+@description('Name of the workspace-based Application Insights component.')
 var applicationInsightsName = '${functionAppName}-appi'
+@description('Deterministic, deployment-specific blob container name for Flex Consumption deployment packages.')
 var deploymentContainerName = 'app-package-${uniqueString(resourceGroup().id, functionAppName)}'
+@description('Name of the private endpoint for the storage Blob service.')
 var storagePrivateEndpointName = 'pe-${storageAccountName}-blob'
+@description('Name of the private endpoint for the storage Queue service.')
+var storageQueuePrivateEndpointName = 'pe-${storageAccountName}-queue'
+@description('Key Vault Secrets Officer role definition ID in the Key Vault subscription, which may differ from the deployment subscription.')
 var keyVaultSecretsOfficerRoleDefinitionId = '/subscriptions/${keyVaultSubscriptionId}/providers/Microsoft.Authorization/roleDefinitions/b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
-var storageBlobDataOwnerRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b')
+@description('Storage Blob Data Contributor role definition ID.')
+var storageBlobDataContributorRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
+@description('Storage Queue Data Contributor role definition ID.')
+var storageQueueDataContributorRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
+@description('Storage queues that receive manually requested device-tagging and password-rotation runs from the management API.')
+var requestQueueNames = [
+  'device-tagging-requests'
+  'password-rotation-requests'
+]
 
+@description('Existing virtual network that hosts the integration and private endpoint subnets; referenced, never modified.')
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' existing = {
   name: virtualNetworkName
   scope: resourceGroup(virtualNetworkSubscriptionId, virtualNetworkResourceGroupName)
 }
 
+@description('Existing subnet delegated to Microsoft.App/environments for Function App VNet integration.')
 resource integrationSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existing = {
   name: subnetName
   parent: virtualNetwork
 }
 
+@description('Existing subnet that hosts the storage private endpoints.')
 resource privateEndpointSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existing = {
   name: privateEndpointSubnetName
   parent: virtualNetwork
 }
 
+@description('Existing Key Vault that stores the current and staged Active Directory passwords; referenced, never modified.')
 resource keyVault 'Microsoft.KeyVault/vaults@2024-11-01' existing = {
   name: keyVaultName
   scope: resourceGroup(keyVaultSubscriptionId, keyVaultResourceGroupName)
 }
 
+@description('Function storage account for host storage, deployment packages, the membership ledger, run traces, and run-request queues. Public network access is disabled.')
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
   location: location
@@ -139,11 +160,13 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
+@description('Blob service of the Function storage account.')
 resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
   name: 'default'
   parent: storageAccount
 }
 
+@description('Private container that stores the Flex Consumption deployment package.')
 resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   name: deploymentContainerName
   parent: blobService
@@ -152,6 +175,7 @@ resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/con
   }
 }
 
+@description('Private container that records the Entra group and administrative-unit memberships owned by HybridDeviceTagger.')
 resource membershipLedgerContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   name: 'membership-ledger'
   parent: blobService
@@ -160,6 +184,7 @@ resource membershipLedgerContainer 'Microsoft.Storage/storageAccounts/blobServic
   }
 }
 
+@description('Private container that stores device-tagging run traces.')
 resource runTraceContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   name: 'run-traces'
   parent: blobService
@@ -168,6 +193,19 @@ resource runTraceContainer 'Microsoft.Storage/storageAccounts/blobServices/conta
   }
 }
 
+@description('Queue service of the Function storage account.')
+resource queueService 'Microsoft.Storage/storageAccounts/queueServices@2023-05-01' = {
+  name: 'default'
+  parent: storageAccount
+}
+
+@description('Queues that carry manually requested operation runs.')
+resource requestQueues 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-05-01' = [for queueName in requestQueueNames: {
+  name: queueName
+  parent: queueService
+}]
+
+@description('Private endpoint that exposes the storage Blob service in the private endpoint subnet.')
 resource storagePrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
   name: storagePrivateEndpointName
   location: location
@@ -190,6 +228,30 @@ resource storagePrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' 
   }
 }
 
+@description('Private endpoint that exposes the storage Queue service in the private endpoint subnet.')
+resource storageQueuePrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
+  name: storageQueuePrivateEndpointName
+  location: location
+  tags: tags
+  properties: {
+    privateLinkServiceConnections: [
+      {
+        name: '${storageQueuePrivateEndpointName}-connection'
+        properties: {
+          groupIds: [
+            'queue'
+          ]
+          privateLinkServiceId: storageAccount.id
+        }
+      }
+    ]
+    subnet: {
+      id: privateEndpointSubnet.id
+    }
+  }
+}
+
+@description('Linux Flex Consumption (FC1) plan that hosts the Function App.')
 resource servicePlan 'Microsoft.Web/serverfarms@2024-04-01' = {
   name: servicePlanName
   location: location
@@ -205,6 +267,7 @@ resource servicePlan 'Microsoft.Web/serverfarms@2024-04-01' = {
   }
 }
 
+@description('Log Analytics workspace with 30-day retention for Function telemetry.')
 resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: logAnalyticsWorkspaceName
   location: location
@@ -222,6 +285,7 @@ resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09
   }
 }
 
+@description('Workspace-based Application Insights component for Function monitoring.')
 resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
   name: applicationInsightsName
   location: location
@@ -237,6 +301,7 @@ resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
   }
 }
 
+@description('Linux .NET 8 isolated Function App with a system-assigned identity, VNet integration, identity-based deployment storage, and the HybridDeviceTagger configuration.')
 resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
   name: functionAppName
   location: location
@@ -381,6 +446,7 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
   }
 }
 
+@description('App Service Authentication that requires Entra tokens for the management API audience, except for the anonymous authentication metadata endpoint.')
 resource functionAppAuthentication 'Microsoft.Web/sites/config@2022-09-01' = {
   name: 'authsettingsV2'
   parent: functionApp
@@ -422,27 +488,51 @@ resource functionAppAuthentication 'Microsoft.Web/sites/config@2022-09-01' = {
   }
 }
 
-resource deploymentStorageRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(storageAccount.id, functionApp.id, storageBlobDataOwnerRoleDefinitionId)
+@description('Grants the Function App identity Storage Blob Data Contributor on the storage account.')
+resource storageBlobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, functionApp.id, storageBlobDataContributorRoleDefinitionId)
   scope: storageAccount
   properties: {
     principalId: functionApp.identity.principalId
     principalType: 'ServicePrincipal'
-    roleDefinitionId: storageBlobDataOwnerRoleDefinitionId
+    roleDefinitionId: storageBlobDataContributorRoleDefinitionId
   }
 }
 
+@description('Grants the Function App identity Storage Queue Data Contributor on the storage account.')
+resource storageQueueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, functionApp.id, storageQueueDataContributorRoleDefinitionId)
+  scope: storageAccount
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: storageQueueDataContributorRoleDefinitionId
+  }
+}
+
+// The role is scoped to the two password secrets only; other secrets in a shared vault stay
+// inaccessible to the Function App. Both secrets must exist before deployment.
+@description('Grants the Function App identity Key Vault Secrets Officer on the current and staged password secrets only.')
 module keyVaultRoleAssignment 'key-vault-role-assignment.bicep' = {
   scope: resourceGroup(keyVaultSubscriptionId, keyVaultResourceGroupName)
   params: {
     keyVaultName: keyVaultName
+    secretNames: [
+      currentPasswordSecretName
+      nextPasswordSecretName
+    ]
     principalId: functionApp.identity.principalId
     roleDefinitionId: keyVaultSecretsOfficerRoleDefinitionId
   }
 }
 
+@description('Name of the deployed Function App.')
 output functionAppName string = functionApp.name
+@description('Object ID of the Function App system-assigned managed identity, used by the installer for Microsoft Graph permissions.')
 output functionAppPrincipalId string = functionApp.identity.principalId
+@description('Resource ID of the deployed Function App.')
 output functionAppResourceId string = functionApp.id
+@description('Name of the deployment package container.')
 output deploymentContainerName string = deploymentContainer.name
+@description('Name of the Function storage account.')
 output storageAccountName string = storageAccount.name

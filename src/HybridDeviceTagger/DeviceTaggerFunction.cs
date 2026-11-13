@@ -10,29 +10,41 @@ using Microsoft.Extensions.Logging;
 
 namespace HybridDeviceTagger;
 
-/// <summary>Runs the scheduled hybrid-device tagging workflow.</summary>
-public class DeviceTaggerFunction : IDeviceTaggingRunner
+/// <summary>Runs the scheduled and requested hybrid-device tagging workflow.</summary>
+public class DeviceTaggerFunction
 {
-    private static readonly SemaphoreSlim ExecutionLock = new(1, 1);
+    /// <summary>The orchestrator that discovers, tags, and reconciles hybrid devices.</summary>
     private readonly DeviceTaggingService _deviceTaggingService;
+
+    /// <summary>Creates the per-invocation diagnostic trace session.</summary>
     private readonly IRunTraceStore _runTraceStore;
+
+    /// <summary>Persists the latest-run status shown by the management API.</summary>
     private readonly IOperationStatusStore _statusStore;
+
+    /// <summary>Prevents concurrent device-tagging runs across Function instances.</summary>
+    private readonly IOperationLock _operationLock;
+
+    /// <summary>The structured logger for invocation-level events.</summary>
     private readonly ILogger<DeviceTaggerFunction> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="DeviceTaggerFunction"/> class.</summary>
     /// <param name="deviceTaggingService">The device-tagging orchestrator.</param>
     /// <param name="runTraceStore">The latest-run diagnostic trace store.</param>
     /// <param name="statusStore">The latest-run status store.</param>
+    /// <param name="operationLock">The cross-instance operation lock.</param>
     /// <param name="logger">The structured logger.</param>
     public DeviceTaggerFunction(
         DeviceTaggingService deviceTaggingService,
         IRunTraceStore runTraceStore,
         IOperationStatusStore statusStore,
+        IOperationLock operationLock,
         ILogger<DeviceTaggerFunction> logger)
     {
         _deviceTaggingService = deviceTaggingService;
         _runTraceStore = runTraceStore;
         _statusStore = statusStore;
+        _operationLock = operationLock;
         _logger = logger;
     }
 
@@ -46,35 +58,87 @@ public class DeviceTaggerFunction : IDeviceTaggingRunner
         [TimerTrigger("%TaggingSchedule%")] TimerInfo timer,
         FunctionContext context,
         CancellationToken cancellationToken)
-        => await RunOperationAsync(context.InvocationId, timer.IsPastDue, cancellationToken);
+        => await RunOperationAsync(context.InvocationId, timer.IsPastDue, false, cancellationToken);
 
-    /// <inheritdoc />
-    Task<TaggingResult> IDeviceTaggingRunner.RunAsync(
-        string invocationId,
-        bool isPastDue,
+    /// <summary>Runs device tagging requested through the management API.</summary>
+    /// <param name="request">The queued run request.</param>
+    /// <param name="cancellationToken">Cancels the invocation.</param>
+    /// <returns>A task representing the asynchronous invocation.</returns>
+    [Function("DeviceTaggingRequestFunction")]
+    public async Task RunRequestedAsync(
+        [QueueTrigger(OperationQueues.DeviceTagging)] OperationRequest request,
         CancellationToken cancellationToken)
-        => RunOperationAsync(invocationId, isPastDue, cancellationToken);
+        => await RunOperationAsync(request.InvocationId, false, true, cancellationToken);
 
-    private async Task<TaggingResult> RunOperationAsync(
+    /// <summary>Runs device tagging when no other instance holds the operation lock.</summary>
+    /// <remarks>
+    /// The run is cancelled when either the host cancels the invocation or the blob lease backing the
+    /// operation lock is lost, so a second instance can never tag devices concurrently. Requested runs
+    /// that cannot start record a rejected status so the queued request does not remain pending.
+    /// </remarks>
+    /// <param name="invocationId">The identifier used to correlate logs, trace, and status.</param>
+    /// <param name="isPastDue">Whether the timer invocation was late.</param>
+    /// <param name="isRequested">
+    /// <see langword="true"/> when the run was queued through the management API.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the invocation.</param>
+    /// <returns>The run result, or <see langword="null"/> when another run is active.</returns>
+    internal async Task<TaggingResult?> RunOperationAsync(
         string invocationId,
         bool isPastDue,
+        bool isRequested,
         CancellationToken cancellationToken)
     {
-        if (!await ExecutionLock.WaitAsync(0, cancellationToken))
-        {
-            throw new OperationAlreadyRunningException(OperationNames.DeviceTagging);
-        }
-
+        IOperationLease? lease;
         try
         {
-            return await RunCoreAsync(invocationId, isPastDue, cancellationToken);
+            lease = await _operationLock.TryAcquireAsync(OperationNames.DeviceTagging, cancellationToken);
         }
-        finally
+        catch (Exception exception) when (isRequested)
         {
-            ExecutionLock.Release();
+            // The run never started, so RunCoreAsync cannot record the failure for this request.
+            await TryRecordStatusAsync(() => _statusStore.RejectQueuedAsync(
+                OperationNames.DeviceTagging,
+                invocationId,
+                exception,
+                CancellationToken.None));
+            throw;
         }
+
+        await using var leaseScope = lease;
+        if (lease is null)
+        {
+            _logger.LogWarning(
+                "Device tagging skipped because another run is active. Invocation ID: {InvocationId}",
+                invocationId);
+            if (isRequested)
+            {
+                await TryRecordStatusAsync(() => _statusStore.RejectQueuedAsync(
+                    OperationNames.DeviceTagging,
+                    invocationId,
+                    new OperationAlreadyRunningException(OperationNames.DeviceTagging),
+                    CancellationToken.None));
+            }
+
+            return null;
+        }
+
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            lease.LeaseLost);
+        return await RunCoreAsync(invocationId, isPastDue, linkedCancellation.Token);
     }
 
+    /// <summary>
+    /// Executes the tagging workflow while holding the lease and records trace, status, and log output.
+    /// </summary>
+    /// <param name="invocationId">The identifier used to correlate logs, trace, and status.</param>
+    /// <param name="isPastDue">Whether the timer invocation was late.</param>
+    /// <param name="cancellationToken">Cancels the run, including when the lease is lost.</param>
+    /// <returns>The aggregate tagging result.</returns>
+    /// <exception cref="Exception">
+    /// Any failure from the tagging workflow is recorded as a failed run and rethrown.
+    /// </exception>
     private async Task<TaggingResult> RunCoreAsync(
         string invocationId,
         bool isPastDue,
@@ -168,6 +232,9 @@ public class DeviceTaggerFunction : IDeviceTaggingRunner
         }
     }
 
+    /// <summary>Writes run status without letting status-store failures fail the run itself.</summary>
+    /// <param name="writeStatus">The status write to execute.</param>
+    /// <returns>A task that completes after the write succeeded or the failure was logged.</returns>
     private async Task TryRecordStatusAsync(Func<Task> writeStatus)
     {
         try

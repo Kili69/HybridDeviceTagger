@@ -11,9 +11,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The product version is derived from the release tags, so the full history is required.
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-      - run: dotnet restore HybridDeviceTagger.sln
-      - run: dotnet build HybridDeviceTagger.sln --configuration Release --no-restore
-      - run: dotnet test HybridDeviceTagger.sln --configuration Release --no-build
+      - name: Build, test, and package
+        shell: pwsh
+        run: ./scripts/Build-InstallationPackage.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installation-package
+          path: artifacts/*.zip

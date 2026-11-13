@@ -10,25 +10,35 @@ using Microsoft.Extensions.Logging;
 
 namespace HybridDeviceTagger;
 
-/// <summary>Runs the scheduled Active Directory password-rotation check.</summary>
-public sealed class PasswordRotationFunction : IPasswordRotationRunner
+/// <summary>Runs the scheduled and requested Active Directory password-rotation workflow.</summary>
+public sealed class PasswordRotationFunction
 {
-    private static readonly SemaphoreSlim ExecutionLock = new(1, 1);
+    /// <summary>The orchestrator that rotates or recovers the directory service credential.</summary>
     private readonly PasswordRotationService _rotationService;
+
+    /// <summary>Persists the latest-run status shown by the management API.</summary>
     private readonly IOperationStatusStore _statusStore;
+
+    /// <summary>Prevents concurrent password-rotation runs across Function instances.</summary>
+    private readonly IOperationLock _operationLock;
+
+    /// <summary>The structured logger for invocation-level events.</summary>
     private readonly ILogger<PasswordRotationFunction> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="PasswordRotationFunction"/> class.</summary>
     /// <param name="rotationService">The password-rotation orchestrator.</param>
     /// <param name="statusStore">The latest-run status store.</param>
+    /// <param name="operationLock">The cross-instance operation lock.</param>
     /// <param name="logger">The structured logger.</param>
     public PasswordRotationFunction(
         PasswordRotationService rotationService,
         IOperationStatusStore statusStore,
+        IOperationLock operationLock,
         ILogger<PasswordRotationFunction> logger)
     {
         _rotationService = rotationService;
         _statusStore = statusStore;
+        _operationLock = operationLock;
         _logger = logger;
     }
 
@@ -44,35 +54,83 @@ public sealed class PasswordRotationFunction : IPasswordRotationRunner
         CancellationToken cancellationToken)
         => await RunOperationAsync(context.InvocationId, timer.IsPastDue, false, cancellationToken);
 
-    /// <inheritdoc />
-    Task<PasswordRotationResult> IPasswordRotationRunner.RunAsync(
-        string invocationId,
-        bool isPastDue,
-        bool force,
+    /// <summary>Forces a password rotation requested through the management API.</summary>
+    /// <param name="request">The queued run request.</param>
+    /// <param name="cancellationToken">Cancels the invocation.</param>
+    /// <returns>A task representing the asynchronous invocation.</returns>
+    [Function("PasswordRotationRequestFunction")]
+    public async Task RunRequestedAsync(
+        [QueueTrigger(OperationQueues.PasswordRotation)] OperationRequest request,
         CancellationToken cancellationToken)
-        => RunOperationAsync(invocationId, isPastDue, force, cancellationToken);
+        => await RunOperationAsync(request.InvocationId, false, true, cancellationToken);
 
-    private async Task<PasswordRotationResult> RunOperationAsync(
+    /// <summary>Runs password rotation when no other instance holds the operation lock.</summary>
+    /// <remarks>
+    /// The lock prevents a second run from overwriting the staged secret while the first run is
+    /// changing the Active Directory password, which would make recovery impossible.
+    /// </remarks>
+    /// <param name="invocationId">The identifier used to correlate logs and status.</param>
+    /// <param name="isPastDue">Whether the timer invocation was late.</param>
+    /// <param name="force">
+    /// <see langword="true"/> to rotate regardless of password age; used for API-requested runs.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the invocation.</param>
+    /// <returns>The rotation result, or <see langword="null"/> when another run is active.</returns>
+    internal async Task<PasswordRotationResult?> RunOperationAsync(
         string invocationId,
         bool isPastDue,
         bool force,
         CancellationToken cancellationToken)
     {
-        if (!await ExecutionLock.WaitAsync(0, cancellationToken))
-        {
-            throw new OperationAlreadyRunningException(OperationNames.PasswordRotation);
-        }
-
+        IOperationLease? lease;
         try
         {
-            return await RunCoreAsync(invocationId, isPastDue, force, cancellationToken);
+            lease = await _operationLock.TryAcquireAsync(OperationNames.PasswordRotation, cancellationToken);
         }
-        finally
+        catch (Exception exception) when (force)
         {
-            ExecutionLock.Release();
+            // The run never started, so RunCoreAsync cannot record the failure for this request.
+            await TryRecordStatusAsync(() => _statusStore.RejectQueuedAsync(
+                OperationNames.PasswordRotation,
+                invocationId,
+                exception,
+                CancellationToken.None));
+            throw;
         }
+
+        await using var leaseScope = lease;
+        if (lease is null)
+        {
+            _logger.LogWarning(
+                "Password rotation skipped because another run is active. Invocation ID: {InvocationId}",
+                invocationId);
+            if (force)
+            {
+                await TryRecordStatusAsync(() => _statusStore.RejectQueuedAsync(
+                    OperationNames.PasswordRotation,
+                    invocationId,
+                    new OperationAlreadyRunningException(OperationNames.PasswordRotation),
+                    CancellationToken.None));
+            }
+
+            return null;
+        }
+
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            lease.LeaseLost);
+        return await RunCoreAsync(invocationId, isPastDue, force, linkedCancellation.Token);
     }
 
+    /// <summary>Executes the rotation while holding the lease and records status and log output.</summary>
+    /// <param name="invocationId">The identifier used to correlate logs and status.</param>
+    /// <param name="isPastDue">Whether the timer invocation was late.</param>
+    /// <param name="force"><see langword="true"/> to rotate regardless of password age.</param>
+    /// <param name="cancellationToken">Cancels the run, including when the lease is lost.</param>
+    /// <returns>The rotation result.</returns>
+    /// <exception cref="Exception">
+    /// Any failure from the rotation workflow is recorded as a failed run and rethrown.
+    /// </exception>
     private async Task<PasswordRotationResult> RunCoreAsync(
         string invocationId,
         bool isPastDue,
@@ -126,6 +184,9 @@ public sealed class PasswordRotationFunction : IPasswordRotationRunner
         }
     }
 
+    /// <summary>Writes run status without letting status-store failures fail the run itself.</summary>
+    /// <param name="writeStatus">The status write to execute.</param>
+    /// <returns>A task that completes after the write succeeded or the failure was logged.</returns>
     private async Task TryRecordStatusAsync(Func<Task> writeStatus)
     {
         try

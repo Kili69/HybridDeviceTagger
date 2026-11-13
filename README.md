@@ -1,5 +1,21 @@
 # HybridDeviceTagger
 
+<p align="center"><img src="./docs/images/kjitlogo.png" alt="HybridDeviceTagger logo" width="180"></p>
+<p align="center"><strong>OU-basierte Kennzeichnung hybrider Geräte in Microsoft Entra ID</strong></p>
+<p align="center"><a href="https://github.com/Kili69/HybridDeviceTagger/actions/workflows/ci.yml"><img src="https://github.com/Kili69/HybridDeviceTagger/actions/workflows/ci.yml/badge.svg" alt="CI"></a> <a href="#versionierung-und-release"><img src="https://img.shields.io/badge/version-YYYYMM.counter-0A66C2" alt="Version YYYYMM.counter"></a> <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-2C3E50" alt="Apache License 2.0"></a> <img src="https://img.shields.io/badge/platform-Azure%20Functions-0078D4?logo=microsoftazure" alt="Azure Functions"> <img src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white" alt=".NET 8"> <img src="https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 7.2 or newer"></p>
+
+---
+
+<p align="center"><a href="https://buymeacoffee.com/andreaslmuz"><img src="https://img.shields.io/badge/%E2%98%95-Buy_me_a_coffee-FFDD00?style=for-the-badge&logoColor=000000" alt="Buy me a coffee"></a></p>
+
+<br>
+
+## In diesem Artikel
+
+<p align="center"><a href="#überblick">Überblick</a> &bull; <a href="#die-lösung">Funktionsweise</a> &bull; <a href="#voraussetzungen">Voraussetzungen</a> &bull; <a href="#installation">Installation</a> &bull; <a href="#powershell-modul-verfügbare-kommandos">PowerShell-Modul</a> &bull; <a href="#monitoring-des-hybriddevicetagger">Monitoring</a> &bull; <a href="#management-rest-api">REST API</a> &bull; <a href="#versionierung-und-release">Versionierung</a> &bull; <a href="#troubleshooting">Troubleshooting</a></p>
+
+## Überblick
+
 Microsoft Entra Connect kann Computerobjekte aus einem lokalen Active Directory mit Microsoft Entra ID synchronisieren. Die hierarchische Struktur des Active Directory wird dabei jedoch nicht übernommen. In Entra ID werden Geräteobjekte flach verwaltet und enthalten keine Information darüber, aus welcher Organisationseinheit (Organizational Unit, OU) sie stammen.
 
 Im Active Directory lässt sich aus dem Distinguished Name (DN) eines Computers beispielsweise dessen administrativer  Tier-Level ableiten. In Entra ID muss eine vergleichbare Einordnung über Extension-Attribute, Gruppenmitgliedschaften oder administrative Einheiten erfolgen. Zwar können Gruppen mit Entra Connect synchronisiert werden, für gerätespezifische Extension-Attribute und Restricted Management Administrative Units (RMAUs) gibt es jedoch keine entsprechende automatische Zuordnung anhand der lokalen OU-Struktur.
@@ -48,116 +64,142 @@ I --> J[Extension-Attribute sowie Gruppen-<br/>und AU-Mitgliedschaften abgleiche
 - Ein Active-Directory-Servicekonto mit Leserechten auf die konfigurierten OUs und Computerobjekte sowie dem Recht, das eigene Kennwort zu ändern
 - Ein vorhandener Azure Key Vault zur sicheren Speicherung des Kennworts des AD-Servicekontos
 
-Die Azure-Ressourcen für die Function App, den Storage Account, die Managed Identity und die Überwachung werden durch das Installationsskript bereitgestellt. Das VNet, die erforderlichen Subnetze und der Key Vault müssen bereits vorhanden sein. Die erforderlichen Azure-, Entra- und Active-Directory-Berechtigungen sind in der [Installationsanleitung](Deployment/README.md#required-permissions) beschrieben.
+Die Azure-Ressourcen für die Function App, den Storage Account, die Managed Identity und die Überwachung werden durch das Installationsskript bereitgestellt. Das VNet, die erforderlichen Subnetze und der Key Vault müssen bereits vorhanden sein. Die erforderlichen Azure-, Entra- und Active-Directory-Berechtigungen sind in der [Installationsreferenz](installationspackage/README.md#required-permissions) beschrieben.
+
+Vor der Installation müssen außerdem vorhanden sein:
+
+- eine Single-Tenant-App-Registrierung in Microsoft Entra ID für die Management API mit dem Application ID URI `api://<client-id>`;
+- private DNS-Zonen `privatelink.blob.core.windows.net` und `privatelink.queue.core.windows.net`, die aus dem VNet aufgelöst werden;
+- das Root-CA-Zertifikat der LDAPS-Zertifikate als `.cer`- oder `.pem`-Datei, wenn die Domain Controller Zertifikate einer privaten CA verwenden.
 
 ### Installationsrechner
 
-Für die Installation mit `Deployment/Install-HybridDeviceTagger.ps1` werden benötigt:
+Für die Installation werden benötigt:
 
-- PowerShell 7
+- Windows mit PowerShell 7.2 oder neuer
 - Azure CLI 2.60.0 oder neuer
-- .NET 8 SDK
+- das PowerShell-Modul `ActiveDirectory` (RSAT: Active Directory-Tools)
+- Netzwerkzugriff auf mindestens einen Domain Controller über LDAPS (Port 636)
+
+Ein .NET SDK wird für die Installation aus einem Release-Paket nicht benötigt, weil das Paket die vorkompilierte Function enthält. Nur wer direkt aus dem Quellcode installiert, benötigt das .NET 8 SDK.
 
 Managed Identity authentifiziert den Zugriff auf Microsoft Graph und Azure Key Vault. Sie ersetzt keine LDAP-Anmeldedaten. Die Function liest das AD-Kennwort bei jedem Lauf direkt aus Key Vault, damit ein Versionswechsel sofort wirksam wird.
 
 ## Installation
 
-Die Installation erfolgt mit `.\Deployment\Install-HybridDeviceTagger.ps1`. Das Skript führt die Prüfungen und die Bereitstellung in getrennten Schritten aus. Wird es ohne Installationsparameter aufgerufen, fragt es die benötigten Werte interaktiv ab.
+### Das Installationspaket
 
-### Schritt 1: Voraussetzungen validieren
+Alle für die Installation notwendigen Dateien liegen im Verzeichnis [installationspackage](installationspackage). Ein Release-Paket `HybridDeviceTagger-<Version>.zip` enthält genau dieses Verzeichnis zuzüglich der vorkompilierten Function:
 
-Jede Installation beginnt mit einem reinen Validierungslauf:
+| Datei | Zweck |
+| --- | --- |
+| `Install.ps1` | Geführte Installation. Fragt alle Parameter ab und führt Validierung, What-if und Installation nacheinander aus. **Einstiegspunkt für die Installation.** |
+| `Install-HybridDeviceTagger.ps1` | Installations-Engine. Wird von `Install.ps1` aufgerufen und kann für unbeaufsichtigte Installationen und Pipelines direkt mit Parametern verwendet werden. |
+| `main.bicep`, `key-vault-role-assignment.bicep` | Azure-Infrastruktur als Code |
+| `function/HybridDeviceTagger.zip` | Vorkompilierte Function App (nur im Release-Paket) |
+| `HybridDeviceTagger.Management/` | PowerShell-Modul für den Betrieb nach der Installation |
+| `version.json` | Version, Branch und Commit des Pakets (nur im Release-Paket) |
+| `README.md` | Englische Installationsreferenz mit Berechtigungen, allen Engine-Parametern und Fehleranalyse |
 
-```powershell
-.\Deployment\Install-HybridDeviceTagger.ps1 -ValidateOnly
-```
+Das Release-Paket wird mit `scripts/Build-InstallationPackage.ps1` erstellt (siehe [Versionierung und Release](#versionierung-und-release)). Entpacken Sie das ZIP auf dem Installationsrechner und öffnen Sie PowerShell 7 im entpackten Verzeichnis.
 
-Der Installer zeigt Vorschlagswerte in eckigen Klammern an. Mit **Enter** wird der jeweilige Vorschlag übernommen. Pflichtwerte ohne Vorschlag müssen eingegeben werden. Nicht vorhandene oder ungeeignete Netzwerkressourcen werden unmittelbar gemeldet und erneut abgefragt.
-
-Die interaktiven Abfragen erfolgen in dieser Reihenfolge:
-
-| Nr. | Abfrage | Bedeutung und Prüfung |
-| ---: | --- | --- |
-| 1 | **Azure subscription ID** | Ziel-Subscription für die Function App. Vorgeschlagen wird die Subscription der aktuellen `az login`-Sitzung. Die Auswahl wird sofort aktiviert und validiert. |
-| 2 | **Resource group name** | Resource Group für die durch den Installer verwalteten Ressourcen. Vorgabe ist `rg-HybridDeviceTagger`. Die Resource Group kann bei der späteren Installation optional erstellt werden. |
-| 3 | **Azure location** | Azure-Region der Function App. Vorgabe ist `westeurope`; die Region muss Flex Consumption (FC1) unterstützen. |
-| 4 | **Function App name** | Global eindeutiger Name der Function App. Der Vorschlag folgt dem Muster `func-devtagger-yyyyMMdd`. |
-| 5 | **Storage account name** | Global eindeutiger Name des neuen Storage Accounts. Der Vorschlag wird aus dem Namen der Function App abgeleitet und an die Azure-Namensregeln angepasst. |
-| 6 | **Virtual network subscription ID** | Subscription des vorhandenen VNets. Vorgeschlagen wird die Ziel-Subscription aus Abfrage 1; ein VNet in einer anderen Subscription desselben Entra-Tenants ist möglich. |
-| 7 | **Virtual network resource group name** | Resource Group des vorhandenen VNets. Sie wird unmittelbar über Azure abgefragt und muss existieren. |
-| 8 | **Virtual network name** | Name des vorhandenen VNets. Das VNet muss in derselben Azure-Region wie die Function App liegen. |
-| 9 | **Flex Consumption integration subnet name** | Vorhandenes Subnetz für die VNet-Integration. Der Installer prüft unter anderem Größe, IPv4-Konfiguration, exklusive Delegierung an `Microsoft.App/environments` und das Fehlen von Service- und Private Endpoints. |
-| 10 | **Private endpoint subnet name** | Vorhandenes, nicht delegiertes IPv4-Subnetz für den Storage Private Endpoint. Es muss sich vom Integrationssubnetz unterscheiden. |
-| 11 | **Key Vault resource group name** | Resource Group des vorhandenen Key Vaults. Vorgeschlagen wird die Resource Group aus Abfrage 2. |
-| 12 | **Key Vault name** | Name des vorhandenen Key Vaults. Der Vorschlag wird aus dem Function-App-Namen abgeleitet; der Key Vault wird nicht durch den Installer erstellt. |
-| 13 | **Active Directory forest DNS name** | DNS-Name des AD-Forests. Wenn möglich, wird der Forest des angemeldeten Windows-Benutzers vorgeschlagen. Dieser Name dient standardmäßig auch als LDAP-/LDAPS-Endpunkt. |
-| 14 | **Service Account** | UPN des AD-Servicekontos. Vorgeschlagen wird `HybridDeviceTagger@<Forest-DNS-Name>`. |
-| 15 | **Active Directory bind user distinguished name** | Distinguished Name des Servicekontos. Diese Abfrage erscheint nur, wenn der Installer den DN nicht automatisch über den UPN ermitteln kann. |
-| 16 | **Active Directory service-account password** | Das Kennwort wird in einem geschützten Anmeldedialog erfasst und ausschließlich für Bind-, Secret- und Lesetests verwendet. Es wird nicht im Installationsprotokoll ausgegeben. |
-| 17 | **Management API Entra application (client) ID** | Client-ID der Entra-App-Registrierung, welche die Management API repräsentiert. Die Eingabe muss eine gültige GUID sein. |
-| 18 | **Management API allowed Entra principal object ID** | Objekt-ID des zunächst zugelassenen Benutzers, der Gruppe oder des Service Principals. Kann der aktuell über Azure CLI angemeldete Entra-Benutzer ermittelt werden, verwendet der Installer dessen Objekt-ID automatisch und zeigt keine Abfrage an. |
-
-Nach der Eingabe prüft der Installer zusätzlich Ressourcenanbieter, Ressourcennamen, Key-Vault-Sicherheit und das vorhandene Kennwort-Secret, DNS und LDAP/LDAPS, die Zertifikatskette, den Forest sowie die Anmeldung des Servicekontos. Ist LDAPS nicht erreichbar, wird ein LDAP-Fallback nur nach ausdrücklicher Zustimmung geprüft. Tagging-Regeln, Ziel-OUs, Gruppen, administrative Einheiten und RMAUs sind nicht Teil der Installation.
-
-Dieser Aufruf nimmt keine Änderungen an Azure, Microsoft Entra ID oder Active Directory vor. Die abschließende Zusammenfassung nennt den Modus **Validation only (no changes)** und alle geprüften Bestandsressourcen.
-
-Fehler müssen behoben werden, bevor mit dem nächsten Schritt fortgefahren wird.
-
-### Schritt 2: AD-Servicekonto vorbereiten, falls erforderlich
-
-Ist das vorgesehene AD-Servicekonto noch nicht vorhanden oder muss sein initiales Kennwort gesetzt werden, kann es getrennt von der Azure-Installation vorbereitet werden:
+### Schritt 1: Anmelden
 
 ```powershell
-.\Deployment\Install-HybridDeviceTagger.ps1 -PrepareActiveDirectoryAccountOnly
+az login
 ```
 
-Im interaktiven Modus läuft die Vorbereitung so ab:
+Das angemeldete Konto benötigt die in der [Installationsreferenz](installationspackage/README.md#required-permissions) genannten Azure- und Entra-Berechtigungen. Fehlt die Anmeldung, bietet `Install.ps1` sie selbst an.
 
-1. Der Installer fragt die Angaben zur Azure-Umgebung, zum vorhandenen Key Vault und zu Active Directory erneut ab. Fragen zur Management API entfallen.
-2. Eine Zusammenfassung zeigt, welches AD-Servicekonto und welches Key-Vault-Secret geändert werden. Bestätigen Sie den Vorgang erst nach der Prüfung.
-3. Geben Sie in der geschützten Anmeldeabfrage ein AD-Konto an, das Servicekonten erstellen oder deren Kennwort zurücksetzen darf.
-4. Existiert das Servicekonto bereits, wählen Sie ein automatisch erzeugtes Kennwort oder geben ein neues Kennwort ein. Existiert das Servicekonto noch nicht, legt der Installer das Konto mit einem zufälligen Kennwort an.
-5. Der Installer speichert das neue Kennwort im vorhandenen Key Vault und prüft anschließend, ob die Anmeldung mit dem Servicekonto funktioniert.
-
-### Schritt 3: Azure-Änderungen prüfen (optional)
-
-Nach erfolgreicher Validierung kann ein optionaler What-if-Lauf die geplanten Änderungen anzeigen, ohne sie anzuwenden:
+### Schritt 2: Geführte Installation starten
 
 ```powershell
-.\Deployment\Install-HybridDeviceTagger.ps1 -WhatIf
+.\Install.ps1
 ```
 
-Die Ausgabe zeigt die zu erstellenden oder zu aktualisierenden Azure-Ressourcen sowie die referenzierten Bestandsressourcen. Dazu gehören insbesondere Function App, Flex-Consumption-Plan, Storage Account, Private Endpoint, Log Analytics, Application Insights, Managed Identity und die erforderlichen Rollenzuweisungen. VNet, Subnetze und Key Vault werden nur referenziert und nicht erstellt oder verändert.
+`Install.ps1` prüft zuerst die Voraussetzungen und fragt danach alle Parameter ab. Vorschläge stehen in eckigen Klammern und werden mit **Enter** übernommen. Ungültige Eingaben, etwa eine falsch formatierte GUID, werden sofort gemeldet und erneut abgefragt. Bei optionalen Werten löscht die Eingabe `-` einen gespeicherten Wert.
 
-### Schritt 4: Installation ausführen
-
-Ist die Validierung aus Schritt 1 ohne Fehler abgeschlossen, kann die Installation ohne Modusschalter gestartet werden. Wurde der optionale What-if-Lauf ausgeführt, sollten dessen angezeigte Änderungen zuvor geprüft werden:
-
-```powershell
-.\Deployment\Install-HybridDeviceTagger.ps1
-```
-
-Der Validierungslauf aus Schritt 1 speichert die eingegebenen Werte nicht. Der Live-Lauf fragt deshalb die Abfragen 1 bis 18 aus Schritt 1 erneut in derselben Reihenfolge ab. Verwenden Sie dabei dieselben geprüften Werte. Dazu gehören das Azure-Ziel, VNet und Subnetze, Key Vault, AD-Forest und Servicekonto sowie die Entra-App- und Principal-IDs.
-
-Während des Live-Laufs erscheinen anschließend folgende regulären oder bedingten Rückfragen:
-
-| Abfrage | Wann erscheint sie? | Bedeutung und Auswahl |
+| Bereich | Abfrage | Vorschlag und Bedeutung |
 | --- | --- | --- |
-| **Active Directory service-account password** | Immer, wenn kein Kennwort als Parameter übergeben wurde | Ein geschützter Anmeldedialog fragt das aktuelle Kennwort des AD-Servicekontos ab. Es wird für LDAP-/LDAPS-, Lese- und Key-Vault-Prüfungen verwendet und weder angezeigt noch in das Installationsprotokoll geschrieben. Der Live-Lauf setzt dieses Kennwort nicht zurück. |
-| **Approve unencrypted LDAP fallback?** | Nur wenn LDAPS nicht erreichbar ist | **Yes** erlaubt LDAP auf Port 389 mit Negotiate, Signierung und Verschlüsselung der LDAP-Sitzung. Die Kennwortrotation bleibt deaktiviert, bis LDAPS wieder verfügbar ist. **No** ist die Vorgabe und beendet die Installation ohne Bereitstellung. |
-| **Installation summary / Execute the installation plan shown above** | Nach allen Prüfungen und vor der ersten Änderung | Die Zusammenfassung nennt Subscription, Resource Group, Region, alle zu erstellenden oder zu aktualisierenden Ressourcen, Rollen und Berechtigungen. **Yes** beziehungsweise **Yes to All** startet die Installation. **No** beziehungsweise **No to All** beendet sie, bevor Änderungen vorgenommen werden. |
+| Azure | **Azure subscription ID** | Subscription der aktuellen `az login`-Sitzung |
+| | **Resource group** | `rg-HybridDeviceTagger`; wird angelegt, falls sie fehlt |
+| | **Azure region** | `westeurope`; muss Flex Consumption unterstützen und der Region des VNets entsprechen |
+| | **Function App name** | `func-hybriddevicetagger`; global eindeutig |
+| | **Storage account name** | Aus dem Function-App-Namen abgeleitet; global eindeutig |
+| Netzwerk | **Virtual network subscription ID** | Ziel-Subscription |
+| | **Virtual network resource group / name** | Vorhandenes VNet mit Verbindung zum Active Directory |
+| | **Integration subnet** | Vorhandenes, an `Microsoft.App/environments` delegiertes Subnetz |
+| | **Private endpoint subnet** | Vorhandenes, nicht delegiertes Subnetz für die Storage Private Endpoints |
+| Key Vault | **Key Vault subscription ID / resource group / name** | Vorhandener Key Vault mit RBAC, Soft Delete und Purge Protection |
+| Active Directory | **Active Directory forest DNS name** | Forest des angemeldeten Windows-Benutzers |
+| | **LDAPS server** | Forest-Name; alternativ ein bestimmter Domain Controller |
+| | **Service account UPN** | `HybridDeviceTagger@<Forest>` |
+| | **Service account distinguished name** | Optional; wird bei vorhandenem Konto automatisch ermittelt |
+| | **Path to the LDAPS root CA certificate** | Optional; erforderlich bei Zertifikaten einer privaten CA. Das Zertifikat wird in das Function-Paket übernommen |
+| Management API | **Application (client) ID** | Client-ID der App-Registrierung der Management API |
+| | **Object ID of the user or group** | Angemeldeter Benutzer; erhält alle Rollen der Management API |
+| Betrieb | **Device-tagging schedule** | `0 */15 * * * *` (alle 15 Minuten, UTC) |
+| | **Password-rotation check schedule** | `0 30 2 * * *` (täglich 02:30 UTC) |
+| | **Register missing Azure resource providers** | Ja |
 
-Nach der zentralen Bestätigung führt das Skript die folgenden Schritte ohne weitere reguläre Rückfragen aus:
+Die Antworten werden ohne Kennwörter in `installation-settings.json` neben dem Skript gespeichert und beim nächsten Aufruf als Vorschläge angeboten. Mit `.\Install.ps1 -UseSavedSettings` werden sie ohne erneute Abfrage übernommen, etwa für ein Update.
 
-1. Fehlende Ressourcenanbieter registrieren, sofern der Lauf mit `-RegisterProviders` gestartet wurde.
-2. Die Resource Group prüfen oder mit `-CreateResourceGroup` anlegen.
-3. Das Bicep-Deployment nochmals validieren.
-4. Die fünf Anwendungsrollen der Management API konfigurieren und den angegebenen Principals zuweisen.
-5. Function App, Flex-Consumption-Plan, Storage Account, Private Endpoint und Monitoring-Ressourcen bereitstellen oder aktualisieren.
-6. Der Managed Identity die benötigten Microsoft-Graph-Berechtigungen zuweisen.
-7. Den Function-Code mit `dotnet publish` erstellen und in die Function App hochladen.
+Anschließend wählen Sie die Aktion:
 
-Bei Erfolg endet der Lauf mit `Installation completed for Function App '<Name>'`. Die Function ist dann vollständig bereitgestellt, bleibt ohne Regeln jedoch inaktiv: Tagging-Läufe greifen weder auf Ziel-OUs zu noch ändern oder bereinigen sie Entra-Geräte. Das Installationsskript ist idempotent und kann für spätere Aktualisierungen erneut mit denselben Schritten ausgeführt werden.
+| Auswahl | Aktion |
+| --- | --- |
+| **1 Install or update** | Validierung ohne Änderungen, danach optional Azure What-if, danach nach Bestätigung die Installation. Empfohlen für Erstinstallation und Updates. |
+| **2 Validate only** | Prüft alle Voraussetzungen ohne Änderungen |
+| **3 Show Azure What-If only** | Zeigt die geplanten Azure-Änderungen ohne Änderungen |
+| **4 Prepare the Active Directory service account** | Legt das AD-Servicekonto an oder setzt sein Kennwort zurück und speichert es im Key Vault |
+
+Außer bei Auswahl 4 fragt `Install.ps1` einmal das Kennwort des AD-Servicekontos ab. Es wird nur im Speicher an die Installations-Engine übergeben und dort für den LDAPS-Bind-Test verwendet, aber weder gespeichert noch protokolliert.
+
+### Schritt 3: AD-Servicekonto vorbereiten, falls erforderlich
+
+Existiert das AD-Servicekonto noch nicht oder liegt sein Kennwort noch nicht als Secret `hybrid-device-tagger-ad-password-current` im Key Vault, führen Sie zuerst Auswahl **4** aus:
+
+```powershell
+.\Install.ps1 -Mode PrepareActiveDirectoryAccount
+```
+
+1. Eine Zusammenfassung zeigt, welches AD-Servicekonto und welches Key-Vault-Secret geändert werden.
+2. Geben Sie in der Anmeldeabfrage ein AD-Konto an, das Servicekonten erstellen oder deren Kennwort zurücksetzen darf. Dieses Konto wird nicht gespeichert.
+3. Existiert das Servicekonto bereits, wählen Sie ein zufällig erzeugtes oder ein selbst eingegebenes Kennwort. Ein neues Konto erhält ein zufälliges Kennwort; für ein neues Konto muss der Distinguished Name angegeben sein.
+4. Das Kennwort wird direkt im Key Vault gespeichert und die Anmeldung des Servicekontos geprüft. Es wird nicht angezeigt.
+
+Das Konto benötigt Leserechte auf die Ziel-OUs sowie `SELF / Change Password`.
+
+### Schritt 4: Validieren und installieren
+
+```powershell
+.\Install.ps1 -Mode Install -UseSavedSettings
+```
+
+Der Ablauf von **Install or update**:
+
+1. **Validierung** ohne Änderungen. Geprüft werden unter anderem Ressourcenanbieter und Namen, VNet und Subnetze, Key-Vault-Konfiguration und das Kennwort-Secret, DNS, LDAPS und Zertifikatskette, Forest, Servicekonto sowie das Bicep-Deployment. Ist LDAPS nicht erreichbar, wird ein LDAP-Fallback nur nach ausdrücklicher Zustimmung geprüft. Bei einem Fehler endet der Ablauf ohne Änderungen.
+2. **Azure What-if** (optional): Anzeige der zu erstellenden oder zu ändernden Azure-Ressourcen.
+3. **Rückfrage `Start the installation now?`**: Erst mit **y** beginnt die Installation.
+4. **Installationszusammenfassung** der Engine mit allen Ressourcen, Rollen und Berechtigungen und der abschließenden Bestätigung **Execute the installation plan shown above**.
+
+Danach führt die Engine ohne weitere Rückfragen aus:
+
+1. fehlende Ressourcenanbieter registrieren und die Resource Group bei Bedarf anlegen;
+2. die vier Anwendungsrollen der Management API konfigurieren und zuweisen. Die frühere Rolle `HybridDeviceTagger.CertificateAdministrator` wird mitsamt ihren Zuweisungen entfernt;
+3. ein fehlendes Secret `hybrid-device-tagger-ad-password-next` mit einem unbrauchbaren Zufallswert anlegen, damit die Managed Identity nur auf die beiden Kennwort-Secrets berechtigt werden kann;
+4. Function App, Flex-Consumption-Plan, Storage Account mit Run-Request-Queues, Private Endpoints für Blob und Queue sowie Monitoring bereitstellen oder aktualisieren;
+5. ersetzte Rollenzuweisungen der Managed Identity entfernen (`Storage Blob Data Owner` und `Key Vault Secrets Officer` auf dem gesamten Key Vault);
+6. die Microsoft-Graph-Berechtigungen der Managed Identity zuweisen;
+7. die vorkompilierte Function aus `function/HybridDeviceTagger.zip` (gegebenenfalls ergänzt um das LDAPS-Root-Zertifikat) in die Function App hochladen.
+
+Bei Erfolg zeigt `Install.ps1` die nächsten Schritte an. Die Function ist dann bereitgestellt, bleibt ohne Tagging-Regeln aber inaktiv: Sie greift weder auf Ziel-OUs zu noch ändert sie Entra-Geräte. Die Installation ist idempotent; für ein Update wird sie mit einem neueren Paket und `-UseSavedSettings` erneut ausgeführt.
+
+Jeder Engine-Lauf schreibt ein Protokoll nach `%TEMP%\HybridDeviceTagger-Install.log`.
+
+### Unbeaufsichtigte Installation
+
+Für Pipelines wird die Engine direkt mit allen Parametern und `-Confirm:$false` aufgerufen. Alle Parameter sind in der [Installationsreferenz](installationspackage/README.md) und mit `Get-Help .\Install-HybridDeviceTagger.ps1 -Full` beschrieben. Bei einem Fehler endet die Engine mit Exit-Code `1`.
 
 ### Schritt 5: Entra-Konto berechtigen
 
@@ -175,12 +217,12 @@ Für die laufende Administration sollten nach Möglichkeit Sicherheitsgruppen st
 
 ### Schritt 6: HybridDeviceTagger konfigurieren
 
-Nach der Installation werden die Tagging-Regeln über das PowerShell-Modul `HybridDeviceTagger.Management` erstellt. Melden Sie sich mit dem zuvor berechtigten Entra-Konto an, importieren Sie anschließend das Modul und verbinden Sie sich mit der bereitgestellten Function App:
+Nach der Installation werden die Tagging-Regeln über das PowerShell-Modul `HybridDeviceTagger.Management` aus dem Installationspaket erstellt. Melden Sie sich mit dem zuvor berechtigten Entra-Konto an, importieren Sie anschließend im Paketverzeichnis das Modul und verbinden Sie sich mit der bereitgestellten Function App:
 
 ```powershell
 az login
 
-Import-Module .\Deployment\HybridDeviceTagger.Management
+Import-Module .\HybridDeviceTagger.Management
 Connect-HybridDeviceTagger `
     -ApiBaseUri 'https://<function-app-name>.azurewebsites.net/api/management'
 ```
@@ -231,7 +273,7 @@ Add-HybridDeviceTaggerRule -Rule $rule -WhatIf
 Add-HybridDeviceTaggerRule -Rule $rule
 ```
 
-Ausführliche Parameterbeispiele, Berechtigungen und Hinweise zur Fehleranalyse stehen in der [Installationsanleitung](Deployment/README.md).
+Ausführliche Parameterbeispiele, Berechtigungen und Hinweise zur Fehleranalyse stehen in der [Installationsreferenz](installationspackage/README.md).
 
 ## PowerShell-Modul: verfügbare Kommandos
 
@@ -251,14 +293,11 @@ Get-Help Connect-HybridDeviceTagger -Full
 | `Add-HybridDeviceTaggerRule` | Erstellt eine neue Regel oder ersetzt eine vorhandene Regel mit demselben Namen vollständig. Ohne Parameter startet die geführte Eingabe. | `-Interactive` fordert den Dialog explizit an. `-Rule` übernimmt alternativ ein vollständiges PowerShell-Objekt oder Pipelineobjekt. Unterstützt `-WhatIf` und `-Confirm`. |
 | `Remove-HybridDeviceTaggerRule` | Entfernt eine Regel. Die API verhindert, dass die letzte verbliebene Regel gelöscht wird. | `-Name` gibt die zu löschende Regel an. Unterstützt `-WhatIf` und `-Confirm`. |
 | `Set-HybridDeviceTaggerRuleConfiguration` | Ersetzt den gesamten Regelsatz atomar. Nicht übergebene bisherige Regeln werden entfernt. | `-Rule` erwartet ein Array mit 1 bis 100 vollständigen Regeln. Unterstützt `-WhatIf` und `-Confirm`. |
-| `Invoke-HybridDeviceTagging` | Startet unmittelbar denselben Geräteabgleich, den sonst der Timer ausführt. | Keine fachlichen Parameter. Unterstützt `-WhatIf` und `-Confirm`. Bei einem bereits laufenden Abgleich meldet die API einen Konflikt. |
+| `Invoke-HybridDeviceTagging` | Stellt denselben Geräteabgleich, den sonst der Timer ausführt, zur sofortigen Ausführung in die Warteschlange und gibt die Invocation ID zurück. | `-Wait` wartet auf das Ende des Laufs und gibt den finalen Status zurück; `-TimeoutSeconds` begrenzt die Wartezeit (Standard 1.800). Unterstützt `-WhatIf` und `-Confirm`. Bei einem bereits laufenden Abgleich meldet die API einen Konflikt. |
 | `Get-HybridDeviceTaggerLastRunStatus` | Zeigt Status, Invocation ID, Zeitstempel, Ergebniszähler und gegebenenfalls bereinigte Fehlerinformationen des letzten Tagging-Laufs. | Keine Parameter. |
 | `Get-HybridDeviceTaggerTrace` | Lädt den letzten Tagging-Trace und gibt jede JSONL-Zeile als strukturiertes PowerShell-Objekt aus. | Keine Parameter. Die Ereignisse können mit `Where-Object`, `Select-Object` oder `Export-Csv` weiterverarbeitet werden. |
-| `Invoke-HybridDeviceTaggerPasswordRotation` | Erzwingt eine sofortige Rotation des AD-Servicekonto-Kennworts. Nur die Altersgrenze wird übersprungen; LDAPS-, Credential- und Key-Vault-Prüfungen bleiben aktiv. | Keine fachlichen Parameter. Unterstützt `-WhatIf` und fordert wegen der tatsächlichen Kennwortänderung eine Bestätigung an. |
+| `Invoke-HybridDeviceTaggerPasswordRotation` | Stellt eine erzwungene Rotation des AD-Servicekonto-Kennworts in die Warteschlange. Nur die Altersgrenze wird übersprungen; LDAPS-, Credential- und Key-Vault-Prüfungen bleiben aktiv. | `-Wait` und `-TimeoutSeconds` (Standard 600) wie oben. Unterstützt `-WhatIf` und fordert wegen der tatsächlichen Kennwortänderung eine Bestätigung an. |
 | `Get-HybridDeviceTaggerPasswordRotationStatus` | Zeigt den letzten Rotationsstatus und den Zeitpunkt der letzten tatsächlichen Kennwortänderung. | Keine Parameter. Kennwörter werden niemals zurückgegeben. |
-| `Get-HybridDeviceTaggerTrustedCertificate` | Listet Metadaten aller aktuell für neue LDAPS-Verbindungen vertrauenswürdigen Zertifikate auf. | Keine Parameter. Zertifikatsinhalt und private Schlüssel werden nicht ausgegeben. |
-| `Add-HybridDeviceTaggerTrustedCertificate` | Fügt ein öffentliches DER- oder PEM-Zertifikat als zusätzlichen LDAPS Trust Anchor hinzu. Bestehende Zertifikate bleiben erhalten. | `-Path` verweist auf die Zertifikatsdatei. Unterstützt Pipelineübergabe über die Eigenschaft `Path`, `-WhatIf` und `-Confirm`. |
-| `Remove-HybridDeviceTaggerTrustedCertificate` | Entfernt einen LDAPS Trust Anchor. Das letzte Zertifikat kann nicht entfernt werden. | `-CertificateThumbprint` beziehungsweise der Alias `-Thumbprint` wählt das Zertifikat. Unterstützt Pipelineübergabe, `-WhatIf` und `-Confirm`. |
 
 ### Regeln verwalten
 
@@ -279,13 +318,15 @@ Set-HybridDeviceTaggerRuleConfiguration -Rule $rules -WhatIf
 Set-HybridDeviceTaggerRuleConfiguration -Rule $rules -Confirm
 ```
 
+Ändernde Regel-Kommandos lesen vor dem Schreiben den aktuellen ETag und senden ihn an die API. Parallele Änderungen werden dadurch als Konflikt abgelehnt, statt unbemerkt überschrieben zu werden. `-WhatIf` zeigt die geplante Operation ohne Änderung; `-Confirm` fordert unmittelbar vor der Änderung eine Bestätigung an.
+
 ### Betrieb prüfen und Aktionen starten
 
-Ein manueller Tagging-Lauf liefert die Invocation ID und seine Ergebniszähler zurück. Status und Trace können danach getrennt abgefragt werden:
+Manuelle Läufe werden asynchron ausgeführt, damit auch lange Läufe nicht am HTTP-Timeout scheitern. Die API antwortet sofort mit HTTP `202` und der Invocation ID. Mit `-Wait` fragt das Modul den Status ab, bis genau dieser Lauf beendet ist. Status und Trace können auch getrennt abgefragt werden:
 
 ```powershell
-$result = Invoke-HybridDeviceTagging -Confirm
-$result | Format-List
+$status = Invoke-HybridDeviceTagging -Wait -Confirm
+$status | Format-List
 
 Get-HybridDeviceTaggerLastRunStatus | Format-List
 Get-HybridDeviceTaggerTrace | Where-Object level -eq 'Error'
@@ -296,27 +337,18 @@ Die Kennwortrotation ändert das reale AD-Servicekonto-Kennwort und sollte zunä
 
 ```powershell
 Invoke-HybridDeviceTaggerPasswordRotation -WhatIf
-Invoke-HybridDeviceTaggerPasswordRotation -Confirm
+Invoke-HybridDeviceTaggerPasswordRotation -Wait -Confirm
 ```
 
-### LDAPS-Zertifikate verwalten
+### LDAPS-Zertifikate wechseln
 
-Beim Zertifikatswechsel wird zuerst das neue Zertifikat hinzugefügt und erst nach erfolgreicher LDAPS-Prüfung das alte entfernt. Dadurch bleibt jederzeit mindestens ein Trust Anchor vorhanden:
+Der LDAPS-Vertrauensanker ist unveränderlicher Bestandteil des Function-Pakets und kann zur Laufzeit weder über die API noch über den Storage Account geändert werden. Dadurch kann niemand mit Storage- oder API-Zugriff ein eigenes Zertifikat einschleusen und das AD-Kennwort beim LDAPS-Bind abgreifen. Für einen Zertifikatswechsel wird die Installation mit dem neuen Zertifikat erneut ausgeführt:
 
 ```powershell
-Add-HybridDeviceTaggerTrustedCertificate `
-    -Path '.\contoso-root-ca.cer' `
-    -Confirm
-
-Get-HybridDeviceTaggerTrustedCertificate |
-    Format-Table thumbprint, subject, notAfterUtc
-
-Remove-HybridDeviceTaggerTrustedCertificate `
-    -Thumbprint '00112233445566778899AABBCCDDEEFF00112233' `
-    -Confirm
+.\Install.ps1 -Mode Install
 ```
 
-Ändernde Kommandos lesen vor dem Schreiben den aktuellen ETag und senden ihn an die API. Parallele Änderungen werden dadurch als Konflikt abgelehnt, statt unbemerkt überschrieben zu werden. `-WhatIf` zeigt die geplante Operation ohne Änderung; `-Confirm` fordert unmittelbar vor der Änderung eine Bestätigung an.
+Übernehmen Sie die gespeicherten Antworten mit **Enter** und geben Sie bei **Path to the LDAPS root CA certificate** die neue Zertifikatsdatei an. Die Validierung prüft LDAPS vorab gegen das neue Zertifikat; die Installation paketiert es anschließend mit dem Function-Code.
 
 ## Monitoring des HybridDeviceTagger
 
@@ -444,7 +476,7 @@ Connect-MgGraph -Scopes 'Application.Read.All', 'AppRoleAssignment.ReadWrite.All
 
 $apiClientId = '<Application-(Client)-ID der Management API>'
 $principalObjectId = '<Objekt-ID des Benutzers, der Gruppe oder des Service Principals>'
-$roleValue = 'HybridDeviceTagger.CertificateAdministrator'
+$roleValue = 'HybridDeviceTagger.Reader'
 
 $api = Invoke-MgGraphRequest -Method GET -Uri (
     "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$apiClientId'&`$select=id,appRoles"
@@ -501,9 +533,9 @@ Connect-HybridDeviceTagger
 
 ### Erstmalige Einrichtung des AD-Kennworts
 
-Vor dem ersten Start muss das bestehende Kennwort des Servicekontos einmalig als Secret `hybrid-device-tagger-ad-password-current` im Key Vault angelegt werden. `next` wird von der Rotation automatisch erstellt und darf nicht manuell als primäres Kennwort verwendet werden.
+Vor dem ersten Start muss das bestehende Kennwort des Servicekontos einmalig als Secret `hybrid-device-tagger-ad-password-current` im Key Vault angelegt werden. Fehlt `hybrid-device-tagger-ad-password-next`, legt der Installer es mit einem unbrauchbaren Zufallswert an; die Rotation überschreibt es. `next` darf nicht manuell als primäres Kennwort verwendet werden.
 
-Die Managed Identity benötigt auf Secret-Ebene mindestens die Data Actions zum Lesen und Setzen von Secrets. `Key Vault Secrets User` reicht nicht aus, weil diese Rolle kein neues Secret setzen kann. Verwenden Sie eine eng begrenzte benutzerdefinierte Rolle oder, falls das organisatorisch nicht möglich ist, `Key Vault Secrets Officer`.
+Die Managed Identity erhält `Key Vault Secrets Officer` ausschließlich auf diesen beiden Secrets, nicht auf dem gesamten Key Vault. Andere Secrets in einem gemeinsam genutzten Key Vault bleiben für die Function unerreichbar. Da eine Rollenzuweisung auf Secret-Ebene ein vorhandenes Secret voraussetzt, müssen beide Secrets vor dem ARM-Deployment existieren.
 
 Das Laufzeitkonto bleibt reguläres Mitglied von `Domain Users`. Zusätzlich müssen auf dem Konto `SELF / Change Password` erlaubt und `User cannot change password` deaktiviert sein. Das Laufzeitkonto selbst benötigt weder administrative AD-Gruppen noch Reset-Password-Rechte; nur das getrennte Provisioning-Credential benötigt die Rechte zum Erstellen beziehungsweise Zurücksetzen.
 
@@ -529,32 +561,26 @@ Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unt
 | `GET /api/management/status/device-tagging` | Status und Ergebniszähler des letzten Tagging-Laufs lesen | `Reader` oder `TaggingOperator` |
 | `GET /api/management/status/password-rotation` | Status des letzten Checks und Zeitpunkt des letzten tatsächlichen Kennwortwechsels lesen | `Reader` oder `PasswordRotationAdministrator` |
 | `GET /api/management/traces/device-tagging/latest` | Letzten JSONL-Trace als Download abrufen | `Reader` oder `TaggingOperator` |
-| `POST /api/management/actions/device-tagging` | Einen Tagging-Lauf sofort ausführen | `TaggingOperator` |
-| `POST /api/management/actions/password-rotation` | Das AD-Servicekonto-Kennwort sofort und unabhängig vom Alter sicher rotieren | `PasswordRotationAdministrator` |
-| `GET /api/management/trusted-certificates` | Metadaten der aktuellen LDAPS-Vertrauenszertifikate lesen | `Reader` oder `CertificateAdministrator` |
-| `POST /api/management/trusted-certificates` | Ein öffentliches DER-/PEM-Zertifikat hinzufügen | `CertificateAdministrator` |
-| `DELETE /api/management/trusted-certificates/{thumbprint}` | Ein Zertifikat entfernen; mindestens eines muss verbleiben | `CertificateAdministrator` |
+| `POST /api/management/actions/device-tagging` | Einen Tagging-Lauf zur sofortigen Ausführung einreihen (HTTP `202`) | `TaggingOperator` |
+| `POST /api/management/actions/password-rotation` | Eine sichere, altersunabhängige Rotation des AD-Servicekonto-Kennworts einreihen (HTTP `202`) | `PasswordRotationAdministrator` |
 
-Die vollständigen Rollenwerte beginnen jeweils mit `HybridDeviceTagger.`, beispielsweise `HybridDeviceTagger.Reader`. Der Installer weist die bisherige Bootstrap-Liste standardmäßig allen fünf Rollen zu; für Least Privilege stehen fünf rollenbezogene Principal-Parameter zur Verfügung. Sicherheitsgruppen sind für die laufende Administration vorzuziehen.
+Die vollständigen Rollenwerte beginnen jeweils mit `HybridDeviceTagger.`, beispielsweise `HybridDeviceTagger.Reader`. Der Installer weist die bisherige Bootstrap-Liste standardmäßig allen vier Rollen zu; für Least Privilege stehen vier rollenbezogene Principal-Parameter zur Verfügung. Sicherheitsgruppen sind für die laufende Administration vorzuziehen.
 
 Die API speichert dynamische Regeln als `tagging-configuration.json` im privaten Container `run-traces`. Solange die API noch keine Änderung gespeichert hat, verwendet sie `Tagging__RulesJson` als Fallback. Jeder Tagging-Lauf liest zu Beginn genau einen aktuellen Snapshot; ein Function-Restart ist nach Änderungen nicht erforderlich. ETags verhindern, dass parallele Änderungen unbemerkt überschrieben werden. Die vollständige OpenAPI-3.0-Spezifikation steht in [docs/management-api.openapi.yaml](docs/management-api.openapi.yaml).
 
-Das Modul `Deployment/HybridDeviceTagger.Management` hält die mit `Connect-HybridDeviceTagger` aufgebaute REST-Verbindung für nachfolgende Cmdlets. Es verwendet die bestehende Anmeldung von `az login`; Subscription, Resource Group und ARM-Abfragen sind nicht erforderlich:
+Das Modul `installationspackage/HybridDeviceTagger.Management` hält die mit `Connect-HybridDeviceTagger` aufgebaute REST-Verbindung für nachfolgende Cmdlets. Es verwendet die bestehende Anmeldung von `az login`; Subscription, Resource Group und ARM-Abfragen sind nicht erforderlich:
 
 ```powershell
-Import-Module ./Deployment/HybridDeviceTagger.Management
+Import-Module ./installationspackage/HybridDeviceTagger.Management
 Connect-HybridDeviceTagger
 Get-HybridDeviceTaggerRule
 Get-HybridDeviceTaggerLastRunStatus
 Add-HybridDeviceTaggerRule -Rule $rule -WhatIf
-Invoke-HybridDeviceTagging
-Invoke-HybridDeviceTaggerPasswordRotation -Confirm
-Get-HybridDeviceTaggerTrustedCertificate
-Add-HybridDeviceTaggerTrustedCertificate -Path ./contoso-root-ca.cer
-Remove-HybridDeviceTaggerTrustedCertificate -CertificateThumbprint $oldThumbprint -Confirm
+Invoke-HybridDeviceTagging -Wait
+Invoke-HybridDeviceTaggerPasswordRotation -Wait -Confirm
 ```
 
-`Invoke-HybridDeviceTaggerPasswordRotation` umgeht ausschließlich die Altersprüfung. Aktueller Bind, LDAPS, Staging, Validierung und Promotion bleiben verpflichtend. Beide Aktionen laufen synchron, schreiben denselben Status wie die Timer und antworten mit HTTP `409`, wenn die jeweilige Operation bereits läuft.
+`Invoke-HybridDeviceTaggerPasswordRotation` umgeht ausschließlich die Altersprüfung. Aktueller Bind, LDAPS, Staging, Validierung und Promotion bleiben verpflichtend. Beide Aktionen antworten sofort mit HTTP `202`, der Invocation ID und dem Status-URI im `Location`-Header. Die API legt dazu eine Nachricht in der privaten Storage-Queue `device-tagging-requests` beziehungsweise `password-rotation-requests` ab; eine Queue-getriggerte Function führt den Lauf aus und schreibt denselben Status wie der Timer (`Queued` → `Running` → `Succeeded`/`Failed`). Fehlgeschlagene Läufe werden nicht automatisch wiederholt. Läuft die Operation bereits, antwortet die API mit HTTP `409`.
 
 Die Leseoperationen stehen direkt im Modul zur Verfügung:
 
@@ -566,8 +592,6 @@ Get-HybridDeviceTaggerTrace
 ```
 
 `Get-HybridDeviceTaggerTrace` zeigt jedes Trace-Ereignis als eine logische Zeile im Format `<Zeit>,<Severity>,<Phase>,<Status>,<Action>,<Details>` an, liefert in der Pipeline aber vollständige `HybridDeviceTagger.TraceEvent`-Objekte. Dadurch funktionieren beispielsweise Zuweisung, `Where-Object`, `Select-Object`, `ConvertTo-Json` und `Export-Csv` ohne Informationsverlust.
-
-Die Zertifikatsverwaltung speichert ausschließlich öffentliche DER-Daten im privaten Blob `run-traces/active-directory-trust-certificates.json`. Bis zur ersten API-Änderung dient das bei der Installation paketierte Zertifikat als Fallback. Jede neue LDAP-Verbindung verwendet den aktuellen Satz; doppelte Ergänzungen sind idempotent, parallele Änderungen ETag-geschützt und das Löschen des letzten Trust-Ankers ist gesperrt.
 
 Das PowerShell-Modul ermittelt den Token-Scope automatisch über `GET /api/management/authentication`. Bei direkten REST-Aufrufen muss das Bearer-Token als Audience die konfigurierte API-App-ID oder `api://<client-id>` besitzen:
 
@@ -594,6 +618,8 @@ Die Rotation prüft das aktuelle Secret täglich und rotiert regulär ab einem A
 
 Wenn `current` nach einem unterbrochenen Lauf nicht mehr funktioniert, testet die Function zuerst `next` und übernimmt es bei Erfolg als `current`. Auch die Geräteabfrage verwendet diesen Fallback.
 
+Tagging und Rotation laufen nie parallel: Jeder Lauf erwirbt vorher eine erneuerbare Blob-Lease (`run-traces/locks/*.lock`, 60 Sekunden, alle 20 Sekunden verlängert). Das gilt über alle Instanzen hinweg, auch wenn Flex Consumption Timer-, Queue- und HTTP-Functions auf getrennten Instanzen ausführt. Ein Timer-Lauf, der die Lease nicht erhält, wird mit einer Warnung übersprungen. Stürzt eine Instanz ab, läuft die Lease automatisch aus. Zusätzlich ist `maximumInstanceCount` standardmäßig auf `1` je Scale-Gruppe begrenzt.
+
 Kennwortänderungen über `unicodePwd` und die anschließende Validierung bleiben immer LDAPS-pflichtig. Ist eine Rotation fällig, aber LDAPS nicht verfügbar, wird sie mit `DeferredNoSecureConnection` ohne neues `next`-Secret und ohne Änderung in AD zurückgestellt. Der nächste geplante Lauf versucht die Rotation erneut.
 
 ## Lokal ausführen
@@ -617,11 +643,47 @@ Die Unit-Tests prüfen Geräteabgleich, Fälligkeit, reguläre Rotation, Recover
 
 Der GitHub-Actions-Workflow wird nur manuell über `workflow_dispatch` gestartet. Automatische Läufe bei Pushes und Pull Requests sind deaktiviert, weil die Enterprise-Richtlinie dieses privaten Repositorys keine GitHub-hosted Runner zulässt. Für automatische CI muss ein freigegebener Self-hosted Runner eingerichtet und im Workflow als `runs-on` eingetragen werden.
 
-## Versionierung und Autor
+## Versionierung und Release
 
-Das Projekt verwendet die Produktversion `<major>.<minor>.<yyyyMMdd>.<counter>`, aktuell `0.1.20261005.1`. Der Zähler beginnt für jede Veröffentlichung am selben Datum bei `1` und wird bei weiteren Veröffentlichungen an diesem Tag erhöht. Die zentrale Definition steht in `Directory.Build.props` und wird als Paket- und Informational-Version in die Build-Ausgabe übernommen.
+Die Produktversion hat das Format `<YYYY><MM>.<counter>`, zum Beispiel `202611.3`. Sie wird nicht in Dateien gepflegt, sondern bei jedem Build von [scripts/Get-ProductVersion.ps1](scripts/Get-ProductVersion.ps1) aus den Git-Tags berechnet:
 
-Vor jedem Commit müssen die Version in `Directory.Build.props` erhöht und ein datierter Abschnitt für exakt diese Version in [CHANGELOG.md](CHANGELOG.md) ergänzt werden. Das eingecheckte Prüfskript validiert beide Bedingungen gegen `HEAD`. Der Repository-Hook wird einmalig pro Clone aktiviert:
+- Trägt der aktuelle Commit einen Release-Tag `v<YYYY><MM>.<counter>`, ist das die Version.
+- Sonst ist der Zähler die höchste Release-Nummer des aktuellen Monats plus 1, bzw. `1` für die erste Version im Monat.
+- Außerhalb des Branches `main` wird der Branchname angehängt, zum Beispiel `202611.3-dev` oder `202611.3-feature-new-installer`. Nicht erlaubte Zeichen werden durch `-` ersetzt.
+
+```powershell
+./scripts/Get-ProductVersion.ps1            # z. B. 202611.1-dev
+./scripts/Get-ProductVersion.ps1 -Detailed  # alle Bestandteile
+```
+
+[Directory.Build.targets](Directory.Build.targets) übernimmt die Version automatisch in jeden `dotnet build`. Die Informational-Version enthält die vollständige Produktversion. Da .NET-Assembly-Versionen pro Stelle höchstens 65535 erlauben, lauten `AssemblyVersion` und `FileVersion` `<YYYY>.<M>.<counter>.0`, zum Beispiel `2026.11.3.0`.
+
+PowerShell-Dateien tragen im Quellcode die Markierung `# Project-Version: source` und das Modul-Manifest `ModuleVersion = '0.0'`. Der Paket-Build ersetzt beides durch die Produktversion; außerhalb von `main` erhält das Modul zusätzlich ein Prerelease-Label.
+
+### Installationspaket bauen
+
+```powershell
+./scripts/Build-InstallationPackage.ps1
+```
+
+Das Skript führt die Tests aus, veröffentlicht die Function mit der berechneten Version als `installationspackage/function/HybridDeviceTagger.zip`, erzeugt `version.json` und erstellt daraus `artifacts/HybridDeviceTagger-<Version>/` sowie das Release-Archiv `artifacts/HybridDeviceTagger-<Version>.zip`. Mit `-SkipTests` werden die Tests übersprungen.
+
+### Release erstellen
+
+1. Auf `main` die Einträge unter `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) in einen Abschnitt `## [<Version>] - <yyyy-MM-dd>` verschieben. Die nächste Version zeigt `./scripts/Get-ProductVersion.ps1 -Branch main`.
+2. Die Änderung committen.
+3. Das Release bauen und taggen:
+
+   ```powershell
+   ./scripts/Build-InstallationPackage.ps1 -Release
+   git push origin v<Version>
+   ```
+
+`-Release` verlangt den Branch `main`, ein sauberes Arbeitsverzeichnis und den passenden Changelog-Abschnitt und legt danach den annotierten Tag `v<Version>` an.
+
+### Commit-Konventionen
+
+Jeder Commit beschreibt seine Änderungen unter `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Geänderte PowerShell-Dateien müssen die Versionsmarkierung und die Autorzeile enthalten, geänderte C#- und Bicep-Dateien die Autorzeile. Der Repository-Hook wird einmalig pro Clone aktiviert:
 
 ```powershell
 git config core.hooksPath .githooks
@@ -631,16 +693,6 @@ Nach dem Staging kann dieselbe Prüfung manuell ausgeführt werden:
 
 ```powershell
 pwsh -NoProfile -File scripts/Assert-CommitMetadata.ps1 -Staged
-```
-
-Da CLR-Assembly- und Dateiversionen nur Zahlenwerte bis `65534` je Segment unterstützen, bleiben diese separat kompatibel: `AssemblyVersion` ist `0.1.0.0`, `FileVersion` ist `0.1.0.2`. Ein Build- oder Releaseprozess kann die Produktversion ohne Dateiänderung setzen:
-
-```powershell
-dotnet build HybridDeviceTagger.sln --configuration Release `
-	-p:VersionMajor=0 `
-	-p:VersionMinor=1 `
-	-p:VersionDate=20260904 `
-	-p:VersionCounter=2
 ```
 
 Autor und Ansprechpartner ist Andreas Lucas (aka Kili), `andreas.lucas@outlook.com`.
@@ -657,7 +709,7 @@ Eine englische Beschreibung der Architektur, Abläufe sowie der Verantwortlichke
 
 ## Azure-Betrieb
 
-Die Function App muss aus ihrem virtuellen Netzwerk den konfigurierten Domain Controller sowie die über die Forest-CrossRefs ermittelten Domain-DNS-Namen auflösen und per LDAPS erreichen, beispielsweise über Site-to-Site-VPN oder ExpressRoute. Optional kann LDAP auf Port 389 als Fallback erreichbar sein. Legen Sie alle Werte aus der Konfiguration als Function-App-Settings an und aktivieren Sie Managed Identity. Weisen Sie deren Service Principal die drei beschriebenen Graph-App-Rollen sowie die Key-Vault- und Blob-Rechte zu. Soll eine nach der Installation erstellte Regel Geräte in eingeschränkten administrativen Einheiten verwalten, muss ein Entra-Administrator der Managed Identity die dafür erforderliche Rolle separat am jeweiligen RMAU-Scope zuweisen.
+Die Function App muss aus ihrem virtuellen Netzwerk den konfigurierten Domain Controller sowie die über die Forest-CrossRefs ermittelten Domain-DNS-Namen auflösen und per LDAPS erreichen, beispielsweise über Site-to-Site-VPN oder ExpressRoute. Optional kann LDAP auf Port 389 als Fallback erreichbar sein. Legen Sie alle Werte aus der Konfiguration als Function-App-Settings an und aktivieren Sie Managed Identity. Weisen Sie deren Service Principal die drei beschriebenen Graph-App-Rollen, `Key Vault Secrets Officer` auf den beiden Kennwort-Secrets sowie `Storage Blob Data Contributor` und `Storage Queue Data Contributor` auf dem Storage Account zu. Soll eine nach der Installation erstellte Regel Geräte in eingeschränkten administrativen Einheiten verwalten, muss ein Entra-Administrator der Managed Identity die dafür erforderliche Rolle separat am jeweiligen RMAU-Scope zuweisen.
 
 Die Funktion markiert Geräte innerhalb der Ziel-OUs. Verlässt ein Computer alle konfigurierten Ziel-OUs, entfernt der nächste Lauf die noch unveränderten verwalteten Extension Attributes sowie die vom Tagger angelegten Gruppen-, AU- und RMAU-Mitgliedschaften.
 

@@ -16,35 +16,62 @@ namespace HybridDeviceTagger;
 /// <summary>Provides the Entra-authenticated operational management API.</summary>
 public sealed class ManagementApiFunction
 {
+    /// <summary>
+    /// The maximum accepted request-body size in bytes (64 KiB), enforced while streaming so oversized
+    /// bodies are rejected before they are fully buffered.
+    /// </summary>
     private const int MaximumRequestBytes = 65536;
+
+    /// <summary>Web-default JSON options with case-insensitive property matching for request bodies.</summary>
     private static readonly JsonSerializerOptions SerializerOptions =
         new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
 
+    /// <summary>Reads and mutates the persisted tagging-rule configuration.</summary>
     private readonly TaggingConfigurationService _configurationService;
+
+    /// <summary>Reads and records latest-run status for each operation.</summary>
     private readonly IOperationStatusStore _statusStore;
+
+    /// <summary>Opens the latest device-tagging trace for download.</summary>
     private readonly IRunTraceReader _traceReader;
-    private readonly IActiveDirectoryTrustStore _trustStore;
-    private readonly IDeviceTaggingRunner _deviceTaggingRunner;
-    private readonly IPasswordRotationRunner _passwordRotationRunner;
+
+    /// <summary>Detects operations that are already running before a new request is queued.</summary>
+    private readonly IOperationLock _operationLock;
+
+    /// <summary>Queues run requests for the queue-triggered workers.</summary>
+    private readonly IOperationRequestQueue _requestQueue;
+
+    /// <summary>Supplies the request timestamp written into queued run requests.</summary>
+    private readonly TimeProvider _timeProvider;
 
     /// <summary>Initializes the management API.</summary>
+    /// <param name="configurationService">The tagging-rule configuration service.</param>
+    /// <param name="statusStore">The latest-run status store.</param>
+    /// <param name="traceReader">The latest device-tagging trace reader.</param>
+    /// <param name="operationLock">The cross-instance operation lock.</param>
+    /// <param name="requestQueue">The queue that dispatches requested runs.</param>
+    /// <param name="timeProvider">The clock used to timestamp run requests.</param>
     public ManagementApiFunction(
         TaggingConfigurationService configurationService,
         IOperationStatusStore statusStore,
         IRunTraceReader traceReader,
-        IActiveDirectoryTrustStore trustStore,
-        IDeviceTaggingRunner deviceTaggingRunner,
-        IPasswordRotationRunner passwordRotationRunner)
+        IOperationLock operationLock,
+        IOperationRequestQueue requestQueue,
+        TimeProvider timeProvider)
     {
         _configurationService = configurationService;
         _statusStore = statusStore;
         _traceReader = traceReader;
-        _trustStore = trustStore;
-        _deviceTaggingRunner = deviceTaggingRunner;
-        _passwordRotationRunner = passwordRotationRunner;
+        _operationLock = operationLock;
+        _requestQueue = requestQueue;
+        _timeProvider = timeProvider;
     }
 
     /// <summary>Gets the effective tagging-rule configuration.</summary>
+    /// <remarks>Requires the Reader or RuleAdministrator role. The response sets the <c>ETag</c> header.</remarks>
+    /// <param name="request">The incoming HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>HTTP 200 with the rules, ETag, last-modified time, and source; or 401/403.</returns>
     [Function("GetTaggingConfiguration")]
     public async Task<IActionResult> GetTaggingConfigurationAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/tagging-rules")]
@@ -62,6 +89,13 @@ public sealed class ManagementApiFunction
     }
 
     /// <summary>Replaces the complete tagging-rule configuration.</summary>
+    /// <remarks>
+    /// Requires the RuleAdministrator role. An optional <c>If-Match</c> header enables optimistic
+    /// concurrency so concurrent administrators cannot silently overwrite each other's changes.
+    /// </remarks>
+    /// <param name="request">The incoming HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>HTTP 200 with the new configuration; or 400, 401, 403, 409, or 413.</returns>
     [Function("ReplaceTaggingConfiguration")]
     public async Task<IActionResult> ReplaceTaggingConfigurationAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "management/tagging-rules")]
@@ -82,6 +116,14 @@ public sealed class ManagementApiFunction
     }
 
     /// <summary>Adds or completely replaces one named tagging rule.</summary>
+    /// <remarks>
+    /// Requires the RuleAdministrator role. The route name must match the body's rule name
+    /// (case-insensitive); an optional <c>If-Match</c> header enables optimistic concurrency.
+    /// </remarks>
+    /// <param name="request">The incoming HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="ruleName">The rule name from the route.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>HTTP 200 with the new configuration; or 400, 401, 403, 409, or 413.</returns>
     [Function("UpsertTaggingRule")]
     public async Task<IActionResult> UpsertTaggingRuleAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "management/tagging-rules/{ruleName}")]
@@ -111,6 +153,11 @@ public sealed class ManagementApiFunction
     }
 
     /// <summary>Removes one named tagging rule.</summary>
+    /// <remarks>Requires the RuleAdministrator role and honors an optional <c>If-Match</c> header.</remarks>
+    /// <param name="request">The incoming HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="ruleName">The name of the rule to remove.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>HTTP 200 with the new configuration; or 400, 401, 403, 404, or 409.</returns>
     [Function("RemoveTaggingRule")]
     public async Task<IActionResult> RemoveTaggingRuleAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "management/tagging-rules/{ruleName}")]
@@ -132,6 +179,10 @@ public sealed class ManagementApiFunction
     }
 
     /// <summary>Gets the status of the latest device-tagging run.</summary>
+    /// <remarks>Requires the Reader or TaggingOperator role.</remarks>
+    /// <param name="request">The incoming HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>HTTP 200 with the status; 404 when no run was recorded; or 401/403.</returns>
     [Function("GetDeviceTaggingStatus")]
     public Task<IActionResult> GetDeviceTaggingStatusAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/status/device-tagging")]
@@ -145,6 +196,10 @@ public sealed class ManagementApiFunction
             ManagementApiRoles.TaggingOperator);
 
     /// <summary>Gets the latest password-rotation check and actual password-change time.</summary>
+    /// <remarks>Requires the Reader or PasswordRotationAdministrator role.</remarks>
+    /// <param name="request">The incoming HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>HTTP 200 with the status; 404 when no run was recorded; or 401/403.</returns>
     [Function("GetPasswordRotationStatus")]
     public Task<IActionResult> GetPasswordRotationStatusAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/status/password-rotation")]
@@ -157,7 +212,11 @@ public sealed class ManagementApiFunction
             ManagementApiRoles.Reader,
             ManagementApiRoles.PasswordRotationAdministrator);
 
-    /// <summary>Immediately runs device tagging.</summary>
+    /// <summary>Queues an immediate device-tagging run.</summary>
+    /// <remarks>Requires the TaggingOperator role.</remarks>
+    /// <param name="request">The incoming HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>HTTP 202 with the invocation ID and status URI; 409 when a run is active; or 401/403.</returns>
     [Function("RunDeviceTagging")]
     public async Task<IActionResult> RunDeviceTaggingAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/actions/device-tagging")]
@@ -169,13 +228,17 @@ public sealed class ManagementApiFunction
             return authorizationFailure;
         }
 
-        var invocationId = Guid.NewGuid().ToString("D");
-        return await ExecuteOperationAsync(
-            invocationId,
-            () => _deviceTaggingRunner.RunAsync(invocationId, false, cancellationToken));
+        return await QueueOperationAsync(OperationNames.DeviceTagging, cancellationToken);
     }
 
-    /// <summary>Immediately rotates the Active Directory service-account password.</summary>
+    /// <summary>Queues an immediate Active Directory service-account password rotation.</summary>
+    /// <remarks>
+    /// Requires the PasswordRotationAdministrator role. The queued run rotates regardless of the
+    /// current password age.
+    /// </remarks>
+    /// <param name="request">The incoming HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>HTTP 202 with the invocation ID and status URI; 409 when a run is active; or 401/403.</returns>
     [Function("RunPasswordRotation")]
     public async Task<IActionResult> RunPasswordRotationAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/actions/password-rotation")]
@@ -187,13 +250,14 @@ public sealed class ManagementApiFunction
             return authorizationFailure;
         }
 
-        var invocationId = Guid.NewGuid().ToString("D");
-        return await ExecuteOperationAsync(
-            invocationId,
-            () => _passwordRotationRunner.RunAsync(invocationId, false, true, cancellationToken));
+        return await QueueOperationAsync(OperationNames.PasswordRotation, cancellationToken);
     }
 
     /// <summary>Downloads the latest device-tagging JSONL trace.</summary>
+    /// <remarks>Requires the Reader or TaggingOperator role.</remarks>
+    /// <param name="request">The incoming HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The trace as a file download; 404 when no trace exists; or 401/403.</returns>
     [Function("DownloadLatestDeviceTaggingTrace")]
     public async Task<IActionResult> DownloadLatestDeviceTaggingTraceAsync(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/traces/device-tagging/latest")]
@@ -214,86 +278,12 @@ public sealed class ManagementApiFunction
             };
     }
 
-    /// <summary>Gets metadata for the effective Active Directory LDAPS trust certificates.</summary>
-    [Function("GetTrustedCertificates")]
-    public async Task<IActionResult> GetTrustedCertificatesAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/trusted-certificates")]
-        HttpRequest request,
-        CancellationToken cancellationToken)
-    {
-        if (Authorize(
-            request,
-            ManagementApiRoles.Reader,
-            ManagementApiRoles.CertificateAdministrator) is { } authorizationFailure)
-        {
-            return authorizationFailure;
-        }
-
-        return TrustedCertificateResult(
-            request,
-            await _trustStore.GetSnapshotAsync(cancellationToken));
-    }
-
-    /// <summary>Adds one public Active Directory LDAPS trust certificate.</summary>
-    [Function("AddTrustedCertificate")]
-    public async Task<IActionResult> AddTrustedCertificateAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/trusted-certificates")]
-        HttpRequest request,
-        CancellationToken cancellationToken)
-    {
-        if (Authorize(request, ManagementApiRoles.CertificateAdministrator) is { } authorizationFailure)
-        {
-            return authorizationFailure;
-        }
-
-        return await ExecuteTrustedCertificateMutationAsync(request, async () =>
-        {
-            var input = await ReadJsonAsync<AddTrustedCertificateRequest>(request, cancellationToken);
-            if (string.IsNullOrWhiteSpace(input.Certificate))
-            {
-                throw new TrustedCertificateValidationException(
-                    "Certificate must contain base64-encoded DER or PEM data.");
-            }
-            byte[] certificateBytes;
-            try
-            {
-                certificateBytes = Convert.FromBase64String(input.Certificate);
-            }
-            catch (FormatException exception)
-            {
-                throw new TrustedCertificateValidationException(
-                    "Certificate must be a base64-encoded DER or PEM X.509 certificate.",
-                    exception);
-            }
-
-            return await _trustStore.AddAsync(
-                certificateBytes,
-                GetExpectedETag(request),
-                cancellationToken);
-        });
-    }
-
-    /// <summary>Removes one Active Directory LDAPS trust certificate.</summary>
-    [Function("RemoveTrustedCertificate")]
-    public async Task<IActionResult> RemoveTrustedCertificateAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "management/trusted-certificates/{thumbprint}")]
-        HttpRequest request,
-        string thumbprint,
-        CancellationToken cancellationToken)
-    {
-        if (Authorize(request, ManagementApiRoles.CertificateAdministrator) is { } authorizationFailure)
-        {
-            return authorizationFailure;
-        }
-
-        return await ExecuteTrustedCertificateMutationAsync(
-            request,
-            () => _trustStore.RemoveAsync(
-                thumbprint,
-                GetExpectedETag(request),
-                cancellationToken));
-    }
-
+    /// <summary>Authorizes the caller and returns the latest status of one operation.</summary>
+    /// <param name="request">The incoming HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="operation">The operation name, for example <see cref="OperationNames.DeviceTagging"/>.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <param name="requiredRoles">Roles of which the caller must hold at least one.</param>
+    /// <returns>HTTP 200 with the status; 404 when no status exists; or 401/403.</returns>
     private async Task<IActionResult> GetStatusAsync(
         HttpRequest request,
         string operation,
@@ -311,24 +301,58 @@ public sealed class ManagementApiFunction
             : new OkObjectResult(status);
     }
 
-    private static async Task<IActionResult> ExecuteOperationAsync<T>(
-        string invocationId,
-        Func<Task<T>> operation)
+    /// <summary>Accepts a run request and leaves execution to the queue-triggered worker.</summary>
+    /// <remarks>
+    /// Runs can exceed the HTTP gateway timeout, so the caller polls the status endpoint with the
+    /// returned invocation ID instead of waiting for the result. The lock check is a best-effort
+    /// early rejection; the worker re-acquires the lock and records a rejection if it lost the race.
+    /// When enqueueing fails, the queued status is marked failed and the exception is rethrown.
+    /// </remarks>
+    /// <param name="operation">The operation name used for the lock, status, and queue.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>HTTP 202 with the invocation ID and status URI, or 409 when the operation is running.</returns>
+    private async Task<IActionResult> QueueOperationAsync(
+        string operation,
+        CancellationToken cancellationToken)
     {
+        if (await _operationLock.IsHeldAsync(operation, cancellationToken))
+        {
+            return new ConflictObjectResult(
+                new { error = new OperationAlreadyRunningException(operation).Message });
+        }
+
+        var invocationId = Guid.NewGuid().ToString("D");
+        await _statusStore.QueueAsync(operation, invocationId, cancellationToken);
         try
         {
-            return new OkObjectResult(new
-            {
-                invocationId,
-                result = await operation()
-            });
+            await _requestQueue.EnqueueAsync(
+                operation,
+                new OperationRequest(invocationId, _timeProvider.GetUtcNow()),
+                cancellationToken);
         }
-        catch (OperationAlreadyRunningException exception)
+        catch (Exception exception)
         {
-            return new ConflictObjectResult(new { error = exception.Message });
+            await _statusStore.FailAsync(operation, invocationId, exception, CancellationToken.None);
+            throw;
         }
+
+        var statusUri = $"/api/management/status/{operation}";
+        return new AcceptedResult(statusUri, new
+        {
+            invocationId,
+            state = OperationRunState.Queued,
+            statusUri
+        });
     }
 
+    /// <summary>Runs a configuration mutation and maps expected failures to HTTP error results.</summary>
+    /// <remarks>
+    /// Validation and malformed JSON map to 400, oversized bodies to 413, ETag conflicts to 409, and
+    /// unknown rules to 404. Other exceptions propagate to the Functions host.
+    /// </remarks>
+    /// <param name="request">The request whose response receives the new <c>ETag</c> header.</param>
+    /// <param name="mutation">The mutation that reads the request body and persists the change.</param>
+    /// <returns>HTTP 200 with the new configuration, or the mapped error result.</returns>
     private async Task<IActionResult> ExecuteConfigurationMutationAsync(
         HttpRequest request,
         Func<Task<TaggingConfigurationSnapshot>> mutation)
@@ -370,43 +394,10 @@ public sealed class ManagementApiFunction
         }
     }
 
-    private async Task<IActionResult> ExecuteTrustedCertificateMutationAsync(
-        HttpRequest request,
-        Func<Task<TrustedCertificateSnapshot>> mutation)
-    {
-        try
-        {
-            return TrustedCertificateResult(request, await mutation());
-        }
-        catch (TrustedCertificateValidationException exception)
-        {
-            return new BadRequestObjectResult(new { error = exception.Message });
-        }
-        catch (JsonException exception)
-        {
-            return new BadRequestObjectResult(new
-            {
-                error = "The request body is not valid JSON.",
-                detail = exception.Message
-            });
-        }
-        catch (RequestBodyTooLargeException)
-        {
-            return new ObjectResult(new { error = $"The request body cannot exceed {MaximumRequestBytes} bytes." })
-            {
-                StatusCode = StatusCodes.Status413PayloadTooLarge
-            };
-        }
-        catch (TrustedCertificateConflictException exception)
-        {
-            return new ConflictObjectResult(new { error = exception.Message });
-        }
-        catch (KeyNotFoundException exception)
-        {
-            return new NotFoundObjectResult(new { error = exception.Message });
-        }
-    }
-
+    /// <summary>Creates the HTTP 200 configuration response and sets the <c>ETag</c> header when known.</summary>
+    /// <param name="request">The request whose response headers are updated.</param>
+    /// <param name="snapshot">The configuration snapshot to return.</param>
+    /// <returns>An HTTP 200 result with rules, ETag, last-modified time, and source.</returns>
     private static IActionResult ConfigurationResult(
         HttpRequest request,
         TaggingConfigurationSnapshot snapshot)
@@ -425,24 +416,17 @@ public sealed class ManagementApiFunction
         });
     }
 
-    private static IActionResult TrustedCertificateResult(
-        HttpRequest request,
-        TrustedCertificateSnapshot snapshot)
-    {
-        if (snapshot.ETag is not null)
-        {
-            request.HttpContext.Response.Headers.ETag = snapshot.ETag;
-        }
-
-        return new OkObjectResult(new
-        {
-            snapshot.Certificates,
-            snapshot.ETag,
-            snapshot.LastModifiedUtc,
-            snapshot.Source
-        });
-    }
-
+    /// <summary>Reads and deserializes a size-limited JSON request body.</summary>
+    /// <remarks>
+    /// The body is read in chunks and the limit is checked both against <c>Content-Length</c> and the
+    /// bytes actually received, so chunked requests cannot bypass it.
+    /// </remarks>
+    /// <typeparam name="T">The type to deserialize.</typeparam>
+    /// <param name="request">The request whose body is read.</param>
+    /// <param name="cancellationToken">Cancels reading the body.</param>
+    /// <returns>The deserialized body.</returns>
+    /// <exception cref="RequestBodyTooLargeException">The body exceeds <see cref="MaximumRequestBytes"/>.</exception>
+    /// <exception cref="JsonException">The body is not valid JSON, is empty, or is <c>null</c>.</exception>
     private static async Task<T> ReadJsonAsync<T>(
         HttpRequest request,
         CancellationToken cancellationToken)
@@ -476,15 +460,25 @@ public sealed class ManagementApiFunction
                throw new JsonException("The request body cannot be empty or null.");
     }
 
+    /// <summary>Creates the HTTP 401 result returned when no valid Entra principal is present.</summary>
+    /// <returns>An HTTP 401 result with a generic error message.</returns>
     private static UnauthorizedObjectResult Unauthorized() =>
         new(new { error = "Microsoft Entra authentication is required." });
 
+    /// <summary>Creates the HTTP 403 result returned when the principal lacks every required role.</summary>
+    /// <returns>An HTTP 403 result with a generic error message.</returns>
     private static ObjectResult Forbidden() =>
         new(new { error = "The authenticated principal lacks the required management API role." })
         {
             StatusCode = StatusCodes.Status403Forbidden
         };
 
+    /// <summary>Validates the Easy Auth principal and its app roles.</summary>
+    /// <param name="request">The request carrying the Easy Auth principal header.</param>
+    /// <param name="requiredRoles">Roles of which the caller must hold at least one.</param>
+    /// <returns>
+    /// <see langword="null"/> when authorized; otherwise the HTTP 401 or 403 result to return.
+    /// </returns>
     private static IActionResult? Authorize(HttpRequest request, params string[] requiredRoles) =>
         EasyAuthPrincipalValidator.Authorize(request, requiredRoles) switch
         {
@@ -493,6 +487,12 @@ public sealed class ManagementApiFunction
             _ => Unauthorized()
         };
 
+    /// <summary>Reads the optional <c>If-Match</c> header used for optimistic concurrency.</summary>
+    /// <param name="request">The request whose headers are read.</param>
+    /// <returns>The expected ETag, or <see langword="null"/> when the header is absent.</returns>
+    /// <exception cref="TaggingConfigurationValidationException">
+    /// The header occurs more than once or is empty.
+    /// </exception>
     private static string? GetExpectedETag(HttpRequest request)
     {
         var values = request.Headers.IfMatch;
@@ -505,7 +505,6 @@ public sealed class ManagementApiFunction
         return values.Count == 1 ? values[0] : null;
     }
 
+    /// <summary>Signals that a request body exceeded <see cref="MaximumRequestBytes"/>; mapped to HTTP 413.</summary>
     private sealed class RequestBodyTooLargeException : Exception;
-
-    private sealed record AddTrustedCertificateRequest(string Certificate);
 }

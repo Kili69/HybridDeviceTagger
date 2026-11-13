@@ -31,5 +31,6 @@ public interface IActiveDirectoryCredentialStore
     /// <summary>Promotes a validated password to the active credential slot.</summary>
     /// <param name="password">The validated password.</param>
     /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous promotion.</returns>
     Task PromoteAsync(string password, CancellationToken cancellationToken);
 }

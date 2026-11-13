@@ -2,6 +2,7 @@ using HybridDeviceTagger.Models;
 using HybridDeviceTagger.Options;
 using HybridDeviceTagger.Services;
 using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 
 namespace HybridDeviceTagger.Tests;
 
@@ -103,6 +104,89 @@ public sealed class PasswordRotationServiceTests
         Assert.Contains(password, char.IsLower);
         Assert.Contains(password, char.IsDigit);
         Assert.Contains(password, character => "!#$%&*+-=?@_".Contains(character));
+    }
+
+    [Fact]
+    public async Task PasswordRotationFunction_DoesNotRotateWhileAnotherInstanceHoldsLock()
+    {
+        var store = new StubCredentialStore(CreateCredential("current", Now.AddDays(-30)), Now);
+        var passwordClient = new StubPasswordClient("current");
+        var statusStore = new Mock<IOperationStatusStore>();
+        var operationLock = new Mock<IOperationLock>();
+        operationLock
+            .Setup(value => value.TryAcquireAsync(OperationNames.PasswordRotation, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IOperationLease?)null);
+        var function = new PasswordRotationFunction(
+            CreateService(store, passwordClient),
+            statusStore.Object,
+            operationLock.Object,
+            NullLogger<PasswordRotationFunction>.Instance);
+
+        var result = await function.RunOperationAsync("request", false, true, CancellationToken.None);
+
+        Assert.Null(result);
+        Assert.Equal(0, passwordClient.ChangeCount);
+        Assert.Equal(0, store.StageCount);
+        statusStore.Verify(
+            value => value.RejectQueuedAsync(
+                OperationNames.PasswordRotation,
+                "request",
+                It.IsAny<OperationAlreadyRunningException>(),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task PasswordRotationFunction_RotatesAndReleasesAcquiredLock()
+    {
+        var store = new StubCredentialStore(CreateCredential("current", Now.AddDays(-30)), Now);
+        var passwordClient = new StubPasswordClient("current");
+        var lease = new Mock<IOperationLease>();
+        lease.SetupGet(value => value.LeaseLost).Returns(CancellationToken.None);
+        var operationLock = new Mock<IOperationLock>();
+        operationLock
+            .Setup(value => value.TryAcquireAsync(OperationNames.PasswordRotation, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(lease.Object);
+        var function = new PasswordRotationFunction(
+            CreateService(store, passwordClient),
+            new Mock<IOperationStatusStore>().Object,
+            operationLock.Object,
+            NullLogger<PasswordRotationFunction>.Instance);
+
+        var result = await function.RunOperationAsync("timer", false, false, CancellationToken.None);
+
+        Assert.Equal(PasswordRotationOutcome.Rotated, result?.Outcome);
+        lease.Verify(value => value.DisposeAsync(), Times.Once);
+    }
+
+    [Fact]
+    public async Task PasswordRotationFunction_MarksQueuedRequestFailedWhenLockCannotBeRequested()
+    {
+        var failure = new InvalidOperationException("storage unavailable");
+        var statusStore = new Mock<IOperationStatusStore>();
+        var operationLock = new Mock<IOperationLock>();
+        operationLock
+            .Setup(value => value.TryAcquireAsync(OperationNames.PasswordRotation, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(failure);
+        var function = new PasswordRotationFunction(
+            CreateService(
+                new StubCredentialStore(CreateCredential("current", Now.AddDays(-30)), Now),
+                new StubPasswordClient("current")),
+            statusStore.Object,
+            operationLock.Object,
+            NullLogger<PasswordRotationFunction>.Instance);
+
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            function.RunOperationAsync("request", false, true, CancellationToken.None));
+
+        Assert.Same(failure, thrown);
+        statusStore.Verify(
+            value => value.RejectQueuedAsync(
+                OperationNames.PasswordRotation,
+                "request",
+                failure,
+                It.IsAny<CancellationToken>()),
+            Times.Once);
     }
 
     private static PasswordRotationService CreateService(

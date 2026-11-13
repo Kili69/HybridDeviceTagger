@@ -3,12 +3,25 @@
  * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
  */
 
+// Composition root of the HybridDeviceTagger Azure Functions app (.NET 8 isolated worker, Functions v4).
+//
+// These top-level statements configure the host and its dependency-injection container:
+// - OpenTelemetry with the optional Azure Monitor exporter for Application Insights.
+// - Strongly typed options (Active Directory, tagging, Key Vault, password rotation, management API)
+//   that are validated at startup so misconfiguration stops the host instead of causing partial runs.
+// - DefaultAzureCredential as the single TokenCredential for Key Vault, Microsoft Graph, Blob, and
+//   Queue access; no Azure credential is stored in configuration.
+// - Active Directory (LDAP), Microsoft Graph, and Blob/Queue-backed services behind interfaces so the
+//   orchestration services and Functions stay independent of their infrastructure and testable.
+// Function classes are discovered by the Functions SDK and resolve their dependencies from this container.
+
 using Azure.Core;
 using Azure.Identity;
 using Azure.Monitor.OpenTelemetry.Exporter;
 using Azure.Security.KeyVault.Secrets;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Specialized;
+using Azure.Storage.Queues;
 using HybridDeviceTagger;
 using HybridDeviceTagger.Options;
 using HybridDeviceTagger.Services;
@@ -136,13 +149,34 @@ builder.Services.AddSingleton<IOperationStatusStore>(serviceProvider =>
         serviceProvider.GetRequiredService<BlobServiceClient>()
             .GetBlobContainerClient("run-traces"),
         serviceProvider.GetRequiredService<TimeProvider>()));
-builder.Services.AddSingleton<IActiveDirectoryTrustStore>(serviceProvider =>
-    new BlobActiveDirectoryTrustStore(
+builder.Services.AddSingleton<IOperationLock>(serviceProvider =>
+    new BlobOperationLock(
         serviceProvider.GetRequiredService<BlobServiceClient>()
-            .GetBlobContainerClient("run-traces")
-            .GetBlobClient(BlobActiveDirectoryTrustStore.BlobName),
-        serviceProvider.GetRequiredService<
-            Microsoft.Extensions.Options.IOptions<ActiveDirectoryOptions>>()));
+            .GetBlobContainerClient("run-traces"),
+        serviceProvider.GetRequiredService<Microsoft.Extensions.Logging.ILogger<BlobOperationLock>>()));
+builder.Services.AddSingleton(serviceProvider =>
+{
+    // The Functions queue trigger expects Base64-encoded messages by default.
+    var options = new QueueClientOptions { MessageEncoding = QueueMessageEncoding.Base64 };
+    var connectionString = builder.Configuration["AzureWebJobsStorage"];
+    if (!string.IsNullOrWhiteSpace(connectionString))
+    {
+        return new QueueServiceClient(connectionString, options);
+    }
+
+    var accountName = builder.Configuration["AzureWebJobsStorage:accountName"];
+    if (string.IsNullOrWhiteSpace(accountName))
+    {
+        throw new InvalidOperationException(
+            "AzureWebJobsStorage or AzureWebJobsStorage__accountName must be configured.");
+    }
+
+    return new QueueServiceClient(
+        new Uri($"https://{accountName}.queue.core.windows.net"),
+        serviceProvider.GetRequiredService<TokenCredential>(),
+        options);
+});
+builder.Services.AddSingleton<IOperationRequestQueue, StorageOperationRequestQueue>();
 builder.Services.AddSingleton<OptionsTaggingRuleProvider>();
 builder.Services.AddSingleton<BlobTaggingConfigurationStore>(serviceProvider =>
     new BlobTaggingConfigurationStore(
@@ -157,11 +191,5 @@ builder.Services.AddSingleton<ITaggingRuleProvider>(serviceProvider =>
 builder.Services.AddSingleton<TaggingConfigurationService>();
 builder.Services.AddScoped<DeviceMembershipReconciliationService>();
 builder.Services.AddTransient<DeviceTaggingService>();
-builder.Services.AddScoped<DeviceTaggerFunction>();
-builder.Services.AddScoped<IDeviceTaggingRunner>(serviceProvider =>
-    serviceProvider.GetRequiredService<DeviceTaggerFunction>());
-builder.Services.AddScoped<PasswordRotationFunction>();
-builder.Services.AddScoped<IPasswordRotationRunner>(serviceProvider =>
-    serviceProvider.GetRequiredService<PasswordRotationFunction>());
 
 builder.Build().Run();

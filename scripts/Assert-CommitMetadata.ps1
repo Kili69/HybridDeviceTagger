@@ -1,8 +1,32 @@
 #Requires -Version 7.2
-# Project-Version: 0.1.20261005.1
+# Project-Version: source
 # Author: andreas.lucas@outlook.com (aka Kili)
 
 <#
+.SYNOPSIS
+Verifies the changelog and file-header conventions before a commit.
+
+.DESCRIPTION
+The product version is calculated from Git tags at build time (see Get-ProductVersion.ps1), so a
+commit no longer changes a version number. Instead, this check enforces:
+
+- every commit that changes files other than CHANGELOG.md also updates CHANGELOG.md;
+- CHANGELOG.md contains an "## [Unreleased]" section with at least one entry, or a release
+  section in the format "## [<YYYY><MM>.<counter>] - <yyyy-MM-dd>";
+- every changed production PowerShell file carries the source version marker
+  "# Project-Version: source" and the author line, which the package build replaces with the
+  product version;
+- every changed production C# and Bicep file carries the author line.
+
+.PARAMETER Staged
+Checks the staged changes instead of the working tree.
+
+.EXAMPLE
+pwsh -NoProfile -File scripts/Assert-CommitMetadata.ps1 -Staged
+
+Validates the staged changes before git commit.
+
+.NOTES
 DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
 #>
 
@@ -14,10 +38,14 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+$powerShellAuthorLine = '# Author: andreas.lucas@outlook.com (aka Kili)'
+$sourceAuthorLine = 'Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>'
+$versionMarker = '# Project-Version: source'
+
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Push-Location $repositoryRoot
 try {
-    $diffArguments = @('diff', '--name-only')
+    $diffArguments = @('diff', '--name-only', '--diff-filter=ACMR')
     if ($Staged) {
         $diffArguments += '--cached'
     }
@@ -33,51 +61,55 @@ try {
         }
     }
 
-    $requiredFiles = @('Directory.Build.props', 'CHANGELOG.md')
-    $missingFiles = @($requiredFiles | Where-Object { $_ -notin $changedFiles })
-    if ($missingFiles.Count -gt 0) {
-        throw "Every commit must update: $($missingFiles -join ', ')."
+    $failures = [System.Collections.Generic.List[string]]::new()
+    $otherChanges = @($changedFiles | Where-Object { $_ -ne 'CHANGELOG.md' })
+    if ($otherChanges.Count -gt 0 -and 'CHANGELOG.md' -notin $changedFiles) {
+        $failures.Add('Every commit must describe its changes in CHANGELOG.md.')
     }
 
-    [xml]$currentProps = Get-Content 'Directory.Build.props' -Raw
-    $versionProperties = @('VersionMajor', 'VersionMinor', 'VersionDate', 'VersionCounter')
-    $currentVersionParts = @($versionProperties | ForEach-Object {
-        $currentProps.SelectSingleNode("/Project/PropertyGroup/$_").InnerText
-    })
-    $currentVersion = $currentVersionParts -join '.'
-    $currentVersionNumbers = @($currentVersionParts | ForEach-Object { [long]$_ })
+    $changelog = Get-Content -LiteralPath 'CHANGELOG.md'
+    $unreleasedIndex = [array]::IndexOf($changelog, '## [Unreleased]')
+    if ($unreleasedIndex -lt 0) {
+        $failures.Add('CHANGELOG.md must contain an "## [Unreleased]" section.')
+    }
+    else {
+        $nextSection = @($changelog[($unreleasedIndex + 1)..($changelog.Count - 1)] |
+            Select-String -Pattern '^## ' | Select-Object -First 1)
+        $sectionEnd = if ($nextSection.Count -gt 0) { $unreleasedIndex + $nextSection[0].LineNumber } else { $changelog.Count }
+        $unreleasedEntries = @($changelog[($unreleasedIndex + 1)..($sectionEnd - 1)] | Where-Object { $_ -match '^- ' })
+        $latestRelease = $nextSection.Count -gt 0 -and $nextSection[0].Line -match '^## \[\d{6}\.\d+\] - \d{4}-\d{2}-\d{2}$'
+        if ($otherChanges.Count -gt 0 -and $unreleasedEntries.Count -eq 0 -and -not $latestRelease) {
+            $failures.Add('Add an entry below "## [Unreleased]" or a "## [<YYYY><MM>.<counter>] - <yyyy-MM-dd>" release section.')
+        }
+    }
 
-    $previousPropsText = & git show 'HEAD:Directory.Build.props' 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        [xml]$previousProps = $previousPropsText -join [Environment]::NewLine
-        $previousVersionParts = @($versionProperties | ForEach-Object {
-            $previousProps.SelectSingleNode("/Project/PropertyGroup/$_").InnerText
-        })
-        $previousVersion = $previousVersionParts -join '.'
-        $previousVersionNumbers = @($previousVersionParts | ForEach-Object { [long]$_ })
-        $versionIncreased = $false
-        for ($index = 0; $index -lt $currentVersionNumbers.Count; $index++) {
-            if ($currentVersionNumbers[$index] -eq $previousVersionNumbers[$index]) {
-                continue
+    foreach ($file in $changedFiles) {
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or $file -like 'tests/*') {
+            continue
+        }
+        $header = @(Get-Content -LiteralPath $file -TotalCount 8)
+        switch -Regex ($file) {
+            '\.(ps1|psm1|psd1)$' {
+                if ($versionMarker -notin $header) {
+                    $failures.Add("$file must contain the line '$versionMarker' in its header.")
+                }
+                if ($powerShellAuthorLine -notin $header) {
+                    $failures.Add("$file must contain the line '$powerShellAuthorLine' in its header.")
+                }
             }
-            $versionIncreased = $currentVersionNumbers[$index] -gt $previousVersionNumbers[$index]
-            break
-        }
-        if (-not $versionIncreased) {
-            throw "Directory.Build.props must advance the version beyond $previousVersion."
+            '\.(cs|bicep)$' {
+                if (-not ($header | Where-Object { $_.Contains($sourceAuthorLine) })) {
+                    $failures.Add("$file must contain '$sourceAuthorLine' in its header.")
+                }
+            }
         }
     }
 
-    $versionPattern = [regex]::Escape($currentVersion)
-    $versionDate = [datetime]::ParseExact(
-        $currentVersionParts[2],
-        'yyyyMMdd',
-        [Globalization.CultureInfo]::InvariantCulture).ToString('yyyy-MM-dd')
-    if (-not (Select-String -Path 'CHANGELOG.md' -Pattern "^## \[$versionPattern\] - $versionDate$" -Quiet)) {
-        throw "CHANGELOG.md must contain a $versionDate section for version $currentVersion."
+    if ($failures.Count -gt 0) {
+        throw ($failures -join [Environment]::NewLine)
     }
 
-    Write-Output "Commit metadata valid for version $currentVersion."
+    Write-Output 'Commit metadata valid.'
 }
 finally {
     Pop-Location

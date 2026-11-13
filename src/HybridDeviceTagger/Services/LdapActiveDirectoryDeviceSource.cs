@@ -14,12 +14,26 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Discovers hybrid-joined computers through paged LDAP searches.</summary>
 public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSource
 {
+    /// <summary>
+    /// The LDAP filter for computer objects with a populated <c>userCertificate</c>, which Microsoft
+    /// Entra Connect requires to synchronize a computer as a hybrid-joined device.
+    /// </summary>
     internal const string ComputerFilter =
         "(&(objectCategory=computer)(userCertificate=*))";
+
+    /// <summary>The AD attribute whose value equals the Entra <c>deviceId</c>.</summary>
     internal const string DeviceIdAttribute = "objectGUID";
+
+    /// <summary>Supplies the configured domain controller and page size.</summary>
     private readonly ActiveDirectoryOptions _options;
+
+    /// <summary>Supplies the active and staged bind credentials.</summary>
     private readonly IActiveDirectoryCredentialStore _credentialStore;
+
+    /// <summary>Creates bound LDAP connections.</summary>
     private readonly ActiveDirectoryLdapConnectionFactory _connectionFactory;
+
+    /// <summary>The structured logger.</summary>
     private readonly ILogger<LdapActiveDirectoryDeviceSource> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="LdapActiveDirectoryDeviceSource"/> class.</summary>
@@ -43,8 +57,13 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
     /// <remarks>
     /// OU-only paths are resolved through the forest configuration partition and searched in
     /// every domain. Queries use server-side paging, accept binary and string GUID values, and
-    /// fall back to the staged credential when the active credential can no longer bind.
+    /// fall back to the staged credential when the active credential can no longer bind. Devices
+    /// found in several targets are deduplicated by device ID.
     /// </remarks>
+    /// <exception cref="InvalidOperationException">
+    /// A forest-relative OU path does not exist in any forest domain.
+    /// </exception>
+    /// <exception cref="LdapException">No credential could bind to a domain controller.</exception>
     public async Task<IReadOnlyList<DirectoryDevice>> GetHybridJoinedDevicesAsync(
         string baseDn,
         CancellationToken cancellationToken)
@@ -97,6 +116,11 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
     /// Microsoft Entra Connect identifies synchronized domain-joined computers by a populated
     /// <c>userCertificate</c> and maps their AD <c>objectGUID</c> to the Entra <c>deviceId</c>.
     /// </remarks>
+    /// <param name="connection">The bound LDAP connection.</param>
+    /// <param name="baseDn">The domain-specific search base.</param>
+    /// <param name="cancellationToken">Cancels between pages.</param>
+    /// <returns>The computers below <paramref name="baseDn"/> with a valid device identifier.</returns>
+    /// <exception cref="DirectoryOperationException">The search base does not exist or the search failed.</exception>
     private IReadOnlyList<DirectoryDevice> SearchDevices(
         LdapConnection connection,
         string baseDn,
@@ -140,8 +164,13 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
     /// <summary>Resolves an OU-only path against every domain advertised by the forest.</summary>
     /// <remarks>
     /// The method reads domain <c>crossRef</c> objects from the configuration partition and pairs
-    /// each domain DNS root with the complete domain-specific OU distinguished name.
+    /// each domain DNS root with the complete domain-specific OU distinguished name. The
+    /// <c>systemFlags</c> bit filter (value 3) selects only Active Directory domain partitions.
     /// </remarks>
+    /// <param name="ouPath">The forest-relative OU-only path.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>One search target per forest domain, ordered by server name.</returns>
+    /// <exception cref="InvalidOperationException">The RootDSE lacks a configuration naming context.</exception>
     private async Task<IReadOnlyList<SearchTarget>> GetForestSearchTargetsAsync(
         string ouPath,
         CancellationToken cancellationToken)
@@ -182,6 +211,9 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
     }
 
     /// <summary>Uses the configured DC when it belongs to the domain being searched.</summary>
+    /// <remarks>Other domains are addressed by DNS name so the domain's DC locator picks a controller.</remarks>
+    /// <param name="domainDnsName">The DNS name of the domain to search.</param>
+    /// <returns>The configured server or the domain DNS name.</returns>
     private string GetLdapServer(string domainDnsName) =>
         _options.Server.EndsWith($".{domainDnsName}", StringComparison.OrdinalIgnoreCase)
             ? _options.Server
@@ -192,6 +224,10 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
     /// The active credential is tried first. If its bind fails during an interrupted rotation,
     /// the staged <c>next</c> credential is loaded and tried against the same server.
     /// </remarks>
+    /// <param name="server">The DNS name of the domain controller or domain.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A bound connection owned by the caller.</returns>
+    /// <exception cref="LdapException">Neither credential could bind.</exception>
     private async Task<LdapConnection> CreateConnectionAsync(
         string server,
         CancellationToken cancellationToken)
@@ -214,6 +250,9 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
     }
 
     /// <summary>Projects one LDAP entry when it contains a valid hybrid device identifier.</summary>
+    /// <param name="entry">The LDAP search result entry.</param>
+    /// <param name="device">Receives the projected device on success.</param>
+    /// <returns><see langword="true"/> when the entry has a readable <c>objectGUID</c>.</returns>
     private static bool TryReadDevice(SearchResultEntry entry, out DirectoryDevice device)
     {
         device = default!;
@@ -230,6 +269,9 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
     }
 
     /// <summary>Reads a device GUID from either its 16-byte LDAP form or textual form.</summary>
+    /// <param name="attribute">The <c>objectGUID</c> attribute, if present.</param>
+    /// <param name="value">Receives the GUID, or <see cref="Guid.Empty"/> on failure.</param>
+    /// <returns><see langword="true"/> when a GUID could be read.</returns>
     internal static bool TryReadGuid(DirectoryAttribute? attribute, out Guid value)
     {
         value = Guid.Empty;
@@ -247,6 +289,10 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
     }
 
     /// <summary>Constructs a GUID from a validated 16-byte value.</summary>
+    /// <remarks>The AD binary layout matches the little-endian layout expected by <see cref="Guid(byte[])"/>.</remarks>
+    /// <param name="bytes">The 16-byte value.</param>
+    /// <param name="value">Receives the GUID.</param>
+    /// <returns>Always <see langword="true"/>.</returns>
     private static bool TryCreateGuid(byte[] bytes, out Guid value)
     {
         value = new Guid(bytes);
@@ -254,11 +300,15 @@ public sealed class LdapActiveDirectoryDeviceSource : IActiveDirectoryDeviceSour
     }
 
     /// <summary>Reads the first LDAP attribute value as text, or returns <see langword="null"/>.</summary>
+    /// <param name="attribute">The attribute, if present.</param>
+    /// <returns>The first value as text, or <see langword="null"/> when absent.</returns>
     private static string? ReadString(DirectoryAttribute? attribute) =>
         attribute is null || attribute.Count == 0
             ? null
             : attribute[0]?.ToString();
 
     /// <summary>Pairs a domain DNS endpoint with its complete LDAP search base.</summary>
+    /// <param name="Server">The domain controller or domain DNS name to connect to.</param>
+    /// <param name="BaseDn">The domain-specific search base.</param>
     private sealed record SearchTarget(string Server, string BaseDn);
 }

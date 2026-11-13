@@ -30,6 +30,7 @@ public interface IActiveDirectoryPasswordClient
     /// <param name="currentCredential">The credential currently accepted by AD.</param>
     /// <param name="newPassword">The replacement password.</param>
     /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous password change.</returns>
     Task ChangePasswordAsync(
         StoredDirectoryCredential currentCredential,
         string newPassword,

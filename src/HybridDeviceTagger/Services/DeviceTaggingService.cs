@@ -14,11 +14,22 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Coordinates idempotent tagging of hybrid-joined Microsoft Entra devices.</summary>
 public sealed class DeviceTaggingService
 {
+    /// <summary>Discovers hybrid-joined computers below each rule's base DN.</summary>
     private readonly IActiveDirectoryDeviceSource _directoryDeviceSource;
+
+    /// <summary>Finds Entra devices and patches their extension attributes.</summary>
     private readonly IEntraDeviceClient _entraDeviceClient;
+
+    /// <summary>Reconciles owned group and administrative-unit memberships.</summary>
     private readonly DeviceMembershipReconciliationService _membershipService;
+
+    /// <summary>Records the Entra state owned by this application per device.</summary>
     private readonly IDeviceMembershipLedger _ledger;
+
+    /// <summary>Supplies the current tagging rules.</summary>
     private readonly ITaggingRuleProvider _ruleProvider;
+
+    /// <summary>The structured logger; attribute values are never logged.</summary>
     private readonly ILogger<DeviceTaggingService> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="DeviceTaggingService"/> class.</summary>
@@ -48,7 +59,20 @@ public sealed class DeviceTaggingService
     /// <param name="cancellationToken">Cancels the operation.</param>
     /// <param name="trace">The optional structured diagnostic trace for this run.</param>
     /// <returns>Aggregate discovery, update, and skip counts.</returns>
-    /// <remarks>Devices already carrying the exact configured value are not patched.</remarks>
+    /// <remarks>
+    /// <para>
+    /// Devices already carrying the exact configured value are not patched, which keeps reruns
+    /// idempotent. Owned attributes that no longer apply are cleared only while Entra still holds the
+    /// value this application wrote, so manual changes are preserved.
+    /// </para>
+    /// <para>
+    /// Devices in the ledger that no longer match any rule have their owned attributes and memberships
+    /// removed. Trace output contains SHA-256 fingerprints instead of attribute values.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">
+    /// Matching rules assign different values to the same attribute of one device.
+    /// </exception>
     public async Task<TaggingResult> TagDevicesAsync(
         CancellationToken cancellationToken,
         IRunTraceSession? trace = null)
@@ -395,6 +419,13 @@ public sealed class DeviceTaggingService
     /// Devices may match multiple rules. Different attributes are merged, while two different
     /// values for the same attribute fail the run to avoid order-dependent updates.
     /// </remarks>
+    /// <param name="rules">The validated tagging rules.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <param name="trace">The diagnostic trace for this run.</param>
+    /// <returns>The merged assignments keyed by device identifier.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// Two rules assign different values to the same attribute of one device.
+    /// </exception>
     private async Task<Dictionary<Guid, DeviceTagAssignment>> GetAssignmentsAsync(
         IReadOnlyList<TaggingRuleOptions> rules,
         CancellationToken cancellationToken,
@@ -480,6 +511,11 @@ public sealed class DeviceTaggingService
         return assignments;
     }
 
+    /// <summary>Builds the common structured trace details for one device.</summary>
+    /// <param name="deviceId">The device identifier shared by Active Directory and Entra.</param>
+    /// <param name="entraObjectId">The Entra object identifier, if known.</param>
+    /// <param name="machineName">The optional Active Directory computer name.</param>
+    /// <returns>A mutable dictionary to which callers may add details.</returns>
     private static Dictionary<string, object?> DeviceDetails(
         Guid deviceId,
         string? entraObjectId,
@@ -491,12 +527,20 @@ public sealed class DeviceTaggingService
             ["entraObjectId"] = entraObjectId
         };
 
+    /// <summary>Computes a lowercase hexadecimal SHA-256 hash of a UTF-8 value.</summary>
+    /// <remarks>
+    /// Traces record fingerprints so values can be compared across runs without exposing
+    /// potentially sensitive attribute contents.
+    /// </remarks>
+    /// <param name="value">The value to hash.</param>
+    /// <returns>The fingerprint, or <see langword="null"/> when <paramref name="value"/> is null.</returns>
     private static string? Fingerprint(string? value) =>
         value is null
             ? null
             : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
     /// <summary>Accumulates all desired extension attributes for one discovered device.</summary>
+    /// <param name="Device">The discovered Active Directory device.</param>
     private sealed record DeviceTagAssignment(DirectoryDevice Device)
     {
         /// <summary>Gets the case-insensitive assignment map merged from matching rules.</summary>

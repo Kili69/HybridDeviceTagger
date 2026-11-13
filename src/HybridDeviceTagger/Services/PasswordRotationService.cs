@@ -13,11 +13,22 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Coordinates recoverable, age-based Active Directory password rotation.</summary>
 public sealed class PasswordRotationService
 {
+    /// <summary>Holds the active (<c>current</c>) and staged (<c>next</c>) credentials.</summary>
     private readonly IActiveDirectoryCredentialStore _credentialStore;
+
+    /// <summary>Tests binds and changes the Active Directory password.</summary>
     private readonly IActiveDirectoryPasswordClient _passwordClient;
+
+    /// <summary>Generates the replacement password.</summary>
     private readonly IPasswordGenerator _passwordGenerator;
+
+    /// <summary>Supplies the rotation age threshold and password length.</summary>
     private readonly PasswordRotationOptions _options;
+
+    /// <summary>Supplies the UTC time used to compute credential age.</summary>
     private readonly TimeProvider _timeProvider;
+
+    /// <summary>The structured logger; passwords are never logged.</summary>
     private readonly ILogger<PasswordRotationService> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="PasswordRotationService"/> class.</summary>
@@ -50,6 +61,9 @@ public sealed class PasswordRotationService
     /// A generated password is staged before AD is changed and promoted only after a successful
     /// bind. If validation fails, the staged secret remains available for recovery.
     /// </remarks>
+    /// <exception cref="InvalidOperationException">
+    /// Neither stored credential can bind, or the changed password could not be validated.
+    /// </exception>
     public async Task<PasswordRotationResult> RotateIfDueAsync(
         CancellationToken cancellationToken) =>
         await RotateAsync(false, cancellationToken);
@@ -57,10 +71,30 @@ public sealed class PasswordRotationService
     /// <summary>Performs a rotation immediately while preserving recovery and secure-bind checks.</summary>
     /// <param name="cancellationToken">Cancels the operation.</param>
     /// <returns>The rotation outcome and known credential age.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// Neither stored credential can bind, or the changed password could not be validated.
+    /// </exception>
     public async Task<PasswordRotationResult> RotateNowAsync(
         CancellationToken cancellationToken) =>
         await RotateAsync(true, cancellationToken);
 
+    /// <summary>Runs the recovery, due-date, secure-channel, stage, change, validate, and promote sequence.</summary>
+    /// <remarks>
+    /// <para>
+    /// If <c>current</c> cannot bind, a previous rotation was interrupted after AD changed, so the
+    /// staged secret is recovered instead of rotating. A missing creation time is treated as due.
+    /// </para>
+    /// <para>
+    /// Rotation is deferred rather than failed when LDAPS is unavailable, because AD only accepts
+    /// password changes over an encrypted channel and the LDAP fallback must never carry them.
+    /// </para>
+    /// </remarks>
+    /// <param name="force"><see langword="true"/> to rotate regardless of the credential age.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The rotation outcome and the age of the credential that was active at the start.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// Neither stored credential can bind, or the changed password could not be validated.
+    /// </exception>
     private async Task<PasswordRotationResult> RotateAsync(
         bool force,
         CancellationToken cancellationToken)
@@ -107,6 +141,9 @@ public sealed class PasswordRotationService
     /// Recovery is attempted only after <c>current</c> can no longer bind. If neither credential
     /// works, the method fails without overwriting either secret so an operator can investigate.
     /// </remarks>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A <see cref="PasswordRotationOutcome.RecoveredFromNext"/> result with the staged credential age.</returns>
+    /// <exception cref="InvalidOperationException">Neither the current nor the next credential can bind.</exception>
     private async Task<PasswordRotationResult> RecoverFromNextAsync(
         CancellationToken cancellationToken)
     {
@@ -125,8 +162,9 @@ public sealed class PasswordRotationService
             GetAgeDays(next.CreatedOn));
     }
 
-            /// <summary>Calculates whole elapsed UTC days from Key Vault creation metadata.</summary>
-            /// <returns>The non-negative age, or <see langword="null"/> when metadata is unavailable.</returns>
+    /// <summary>Calculates whole elapsed UTC days from Key Vault creation metadata.</summary>
+    /// <param name="createdOn">The secret version creation time, if known.</param>
+    /// <returns>The non-negative age, or <see langword="null"/> when metadata is unavailable.</returns>
     private int? GetAgeDays(DateTimeOffset? createdOn) =>
         createdOn is null
             ? null

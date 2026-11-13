@@ -12,6 +12,8 @@ namespace HybridDeviceTagger.Services;
 public interface ITaggingRuleProvider
 {
     /// <summary>Gets a validated snapshot of the currently configured rules.</summary>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The ordered rules; empty when none are configured.</returns>
     Task<IReadOnlyList<TaggingRuleOptions>> GetRulesAsync(
         CancellationToken cancellationToken);
 }
@@ -19,9 +21,11 @@ public interface ITaggingRuleProvider
 /// <summary>Provides the startup configuration used before a dynamic configuration exists.</summary>
 public sealed class OptionsTaggingRuleProvider : ITaggingRuleProvider
 {
+    /// <summary>The startup-validated tagging options from app settings.</summary>
     private readonly TaggingOptions _options;
 
     /// <summary>Initializes a provider from validated application options.</summary>
+    /// <param name="options">The validated tagging options.</param>
     public OptionsTaggingRuleProvider(IOptions<TaggingOptions> options)
     {
         _options = options.Value;

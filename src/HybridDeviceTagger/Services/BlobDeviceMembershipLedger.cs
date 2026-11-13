@@ -13,9 +13,11 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Stores one JSON ownership record per hybrid device in Azure Blob Storage.</summary>
 public sealed class BlobDeviceMembershipLedger : IDeviceMembershipLedger
 {
+    /// <summary>The private container that stores <c>memberships/{deviceId}.json</c> records.</summary>
     private readonly BlobContainerClient _containerClient;
 
     /// <summary>Initializes a new instance of the <see cref="BlobDeviceMembershipLedger"/> class.</summary>
+    /// <param name="containerClient">The private ledger container.</param>
     public BlobDeviceMembershipLedger(BlobContainerClient containerClient)
     {
         _containerClient = containerClient;
@@ -76,6 +78,7 @@ public sealed class BlobDeviceMembershipLedger : IDeviceMembershipLedger
     }
 
     /// <inheritdoc />
+    /// <remarks>An empty record deletes the device's blob so the ledger does not grow unbounded.</remarks>
     public async Task SetAsync(
         Guid deviceId,
         ManagedDeviceMemberships memberships,
@@ -98,6 +101,9 @@ public sealed class BlobDeviceMembershipLedger : IDeviceMembershipLedger
             cancellationToken);
     }
 
+    /// <summary>Gets the ledger blob for one Active Directory device identifier.</summary>
+    /// <param name="deviceId">The device identifier shared by Active Directory and Entra.</param>
+    /// <returns>The blob client for the device's ownership record.</returns>
     private BlobClient GetBlobClient(Guid deviceId) =>
         _containerClient.GetBlobClient($"memberships/{deviceId:D}.json");
 }

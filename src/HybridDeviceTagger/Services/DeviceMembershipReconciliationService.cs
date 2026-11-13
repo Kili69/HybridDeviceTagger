@@ -10,10 +10,15 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Reconciles desired Entra memberships without deleting manually managed memberships.</summary>
 public sealed class DeviceMembershipReconciliationService
 {
+    /// <summary>Reads and changes Entra group and administrative-unit memberships.</summary>
     private readonly IEntraMembershipClient _membershipClient;
+
+    /// <summary>Records which memberships this application added and therefore owns.</summary>
     private readonly IDeviceMembershipLedger _ledger;
 
     /// <summary>Initializes a new instance of the reconciliation service.</summary>
+    /// <param name="membershipClient">The Entra membership client.</param>
+    /// <param name="ledger">The ownership ledger.</param>
     public DeviceMembershipReconciliationService(
         IEntraMembershipClient membershipClient,
         IDeviceMembershipLedger ledger)
@@ -31,6 +36,18 @@ public sealed class DeviceMembershipReconciliationService
     /// <param name="trace">The optional structured diagnostic trace for this run.</param>
     /// <param name="machineName">The optional Active Directory computer name for trace correlation.</param>
     /// <returns>The number of memberships added and removed.</returns>
+    /// <remarks>
+    /// <para>
+    /// A desired membership that already exists but was not added by this application is left
+    /// unclaimed, so it is never removed later. A ledger entry for a different Entra object ID (for
+    /// example after the device was re-registered) is discarded and ownership starts empty.
+    /// </para>
+    /// <para>
+    /// The ledger is persisted after every individual change, so an interrupted run never loses track
+    /// of a membership it added. Removals first check current membership, which keeps reruns
+    /// idempotent when a membership was already removed manually.
+    /// </para>
+    /// </remarks>
     public async Task<MembershipReconciliationResult> ReconcileAsync(
         Guid deviceId,
         string entraObjectId,
@@ -266,6 +283,14 @@ public sealed class DeviceMembershipReconciliationService
         return new MembershipReconciliationResult(added, removed);
     }
 
+    /// <summary>Builds the structured trace details for one membership operation.</summary>
+    /// <param name="deviceId">The device identifier shared by Active Directory and Entra.</param>
+    /// <param name="entraObjectId">The Entra directory object identifier.</param>
+    /// <param name="targetType">The membership target type, for example <c>Group</c>.</param>
+    /// <param name="targetId">The group or administrative-unit identifier, if applicable.</param>
+    /// <param name="ownedCount">A positive value when the target is recorded as owned.</param>
+    /// <param name="machineName">The optional Active Directory computer name.</param>
+    /// <returns>The trace details dictionary.</returns>
     private static Dictionary<string, object?> MembershipDetails(
         Guid deviceId,
         string entraObjectId,

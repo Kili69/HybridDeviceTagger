@@ -11,15 +11,24 @@ namespace HybridDeviceTagger.Services;
 public interface IDeviceMembershipLedger
 {
     /// <summary>Loads all managed device states keyed by hybrid device identifier.</summary>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The ownership records keyed by device identifier.</returns>
     Task<IReadOnlyDictionary<Guid, ManagedDeviceMemberships>> GetAllAsync(
         CancellationToken cancellationToken);
 
     /// <summary>Loads ownership state for a hybrid device identifier.</summary>
+    /// <param name="deviceId">The device identifier shared by Active Directory and Entra.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The ownership record, or <see langword="null"/> when nothing is owned.</returns>
     Task<ManagedDeviceMemberships?> GetAsync(
         Guid deviceId,
         CancellationToken cancellationToken);
 
     /// <summary>Persists or deletes empty ownership state for a hybrid device identifier.</summary>
+    /// <param name="deviceId">The device identifier shared by Active Directory and Entra.</param>
+    /// <param name="memberships">The complete ownership record; an empty record removes the entry.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous write.</returns>
     Task SetAsync(
         Guid deviceId,
         ManagedDeviceMemberships memberships,

@@ -1,6 +1,22 @@
-# Installation
+# Installation reference
 
-`Install-HybridDeviceTagger.ps1` validates the environment and installs the Function App by using `main.bicep`. Existing virtual networks, subnets, and Key Vaults are referenced but never created or modified by the template.
+This directory is the HybridDeviceTagger installation package. A release archive built by `scripts/Build-InstallationPackage.ps1` contains it together with the prebuilt Function (`function/HybridDeviceTagger.zip`), `version.json`, and `LICENSE`.
+
+| File | Purpose |
+| --- | --- |
+| `Install.ps1` | Guided installation and the recommended entry point. Checks the prerequisites, asks for every parameter with validation and defaults, saves the answers without secrets in `installation-settings.json`, asks for the service-account password once, and runs validation, optional What-If, and installation. |
+| `Install-HybridDeviceTagger.ps1` | Installation engine used by `Install.ps1`. Call it directly with parameters for unattended and pipeline installations. It exits with code 1 after a reported failure. |
+| `main.bicep`, `key-vault-role-assignment.bicep` | Azure infrastructure. Existing virtual networks, subnets, and Key Vaults are referenced but never created or modified. |
+| `HybridDeviceTagger.Management/` | PowerShell module for operating the installed Function through its management API. |
+
+```powershell
+./Install.ps1                                  # guided installation
+./Install.ps1 -Mode Validate -UseSavedSettings # repeat validation with saved answers
+```
+
+The engine deploys `function/HybridDeviceTagger.zip` when it exists, so installing from a release package requires PowerShell 7.2, Azure CLI 2.60.0 or newer, and the ActiveDirectory module, but no .NET SDK. When the prebuilt package is missing, for example in a repository checkout, the engine builds the Function from `src/` and requires the .NET 8 SDK.
+
+The remainder of this document describes the permissions, the engine parameters, and troubleshooting.
 
 ## Required permissions
 
@@ -8,18 +24,18 @@ Installation uses separate Azure, Entra, Active Directory, and runtime identitie
 
 | Identity | Required permission | Scope and purpose |
 | --- | --- | --- |
-| Azure installation user | `Contributor` | Target resource group; validates and deploys the Function App, FC1 plan, Storage, monitoring resources, and Storage private endpoint. |
-| Azure installation user | `Reader` plus `Microsoft.Network/virtualNetworks/subnets/join/action`, normally provided by `Network Contributor` | Existing VNet, Function integration subnet, and private-endpoint subnet. `Reader` alone is insufficient for attaching the Storage private endpoint. |
-| Azure installation user | `Microsoft.Authorization/roleAssignments/write`, normally provided by `Role Based Access Control Administrator`, `User Access Administrator`, or `Owner` | Target Storage account and existing Key Vault; assigns runtime roles to the Function managed identity. Limit the assignment to these resource scopes where possible. |
-| Azure installation user during AD bootstrap | `Key Vault Secrets Officer` | Existing Key Vault; creates or replaces the current AD password secret. This temporary assignment can be removed after installation verification. |
+| Azure installation user | `Contributor` | Target resource group; validates and deploys the Function App, FC1 plan, Storage with run-request queues, monitoring resources, and the Blob and Queue private endpoints. |
+| Azure installation user | `Reader` plus `Microsoft.Network/virtualNetworks/subnets/join/action`, normally provided by `Network Contributor` | Existing VNet, Function integration subnet, and private-endpoint subnet. `Reader` alone is insufficient for attaching the Storage private endpoints. |
+| Azure installation user | `Microsoft.Authorization/roleAssignments/write`, normally provided by `Role Based Access Control Administrator`, `User Access Administrator`, or `Owner` | Target Storage account and the two password secrets in the existing Key Vault; assigns runtime roles to the Function managed identity and removes superseded vault-wide and `Storage Blob Data Owner` assignments. Limit the assignment to these resource scopes where possible. |
+| Azure installation user during AD bootstrap | `Key Vault Secrets Officer` | Existing Key Vault; creates or replaces the current AD password secret and creates the staged secret placeholder when it is missing. This temporary assignment can be removed after installation verification. |
 | Entra administrator | `Privileged Role Administrator` or `Global Administrator` | Configures and assigns management API application roles, requires assignment on its Enterprise Application, and grants Microsoft Graph application roles `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All`. Any scoped role required for a restricted management administrative unit is assigned separately after installation. |
 | AD validation/runtime service account | Read access to the forest configuration partition, configured OUs and computer attributes; read access to its own account; `SELF / Change Password` | Forest-wide LDAP validation and device discovery. Password changes require LDAPS; the signed and sealed LDAP fallback is read/bind only. |
 | AD provisioning identity | Create user in the configured parent OU and enable/reset password on that account | Used only with `-PrepareActiveDirectoryAccountOnly`; it is not stored or used by the Function. Existing delegated AD permissions may be used instead of broad domain administration. |
-| DNS administrator | Create a private DNS zone and A record, or modify the existing private DNS service | Required when Storage public network access is disabled. The Function subnet must resolve `<storage-account>.blob.core.windows.net` through `<storage-account>.privatelink.blob.core.windows.net` to the Storage private endpoint IP. |
+| DNS administrator | Create a private DNS zone and A record, or modify the existing private DNS service | Required when Storage public network access is disabled. The Function subnet must resolve `<storage-account>.blob.core.windows.net` and `<storage-account>.queue.core.windows.net` through the `privatelink.blob.core.windows.net` and `privatelink.queue.core.windows.net` zones to the matching Storage private endpoint IPs. |
 
-The management REST API additionally requires a single-tenant Entra app registration whose Application ID URI is `api://<client-id>`. Pass its application/client ID as `ManagementApiClientId`. The installer creates five application roles, assigns approved users, security groups, or service principals, then enables **Assignment required** on the Enterprise Application. Easy Auth validates issuer, audience, and authentication; the Function returns HTTP `403` unless the principal has a role accepted by the requested operation.
+The management REST API additionally requires a single-tenant Entra app registration whose Application ID URI is `api://<client-id>`. Pass its application/client ID as `ManagementApiClientId`. The installer creates four application roles, assigns approved users, security groups, or service principals, then enables **Assignment required** on the Enterprise Application. Easy Auth validates issuer, audience, and authentication; the Function returns HTTP `403` unless the principal has a role accepted by the requested operation.
 
-`ManagementApiAllowedPrincipalObjectId` is the migration/bootstrap input. Its principals receive all five roles unless a role-specific list is supplied through `ManagementApiReaderPrincipalObjectId`, `ManagementApiRuleAdministratorPrincipalObjectId`, `ManagementApiTaggingOperatorPrincipalObjectId`, `ManagementApiPasswordRotationAdministratorPrincipalObjectId`, or `ManagementApiCertificateAdministratorPrincipalObjectId`. Prefer security-group assignments for ongoing administration. Azure subscription roles do not authorize this custom API.
+`ManagementApiAllowedPrincipalObjectId` is the migration/bootstrap input. Its principals receive all four roles unless a role-specific list is supplied through `ManagementApiReaderPrincipalObjectId`, `ManagementApiRuleAdministratorPrincipalObjectId`, `ManagementApiTaggingOperatorPrincipalObjectId`, or `ManagementApiPasswordRotationAdministratorPrincipalObjectId`. The retired `HybridDeviceTagger.CertificateAdministrator` role is unassigned, disabled, and removed from existing app registrations. Prefer security-group assignments for ongoing administration. Azure subscription roles do not authorize this custom API.
 
 | Application role | Permitted operations |
 | --- | --- |
@@ -27,7 +43,6 @@ The management REST API additionally requires a single-tenant Entra app registra
 | `HybridDeviceTagger.RuleAdministrator` | Read and change tagging rules |
 | `HybridDeviceTagger.TaggingOperator` | Read tagging status/trace and start immediate tagging |
 | `HybridDeviceTagger.PasswordRotationAdministrator` | Read rotation status and force password rotation |
-| `HybridDeviceTagger.CertificateAdministrator` | Read, add, and remove Active Directory LDAPS trust certificates |
 
 ### Managing API role assignments after deployment
 
@@ -41,7 +56,7 @@ Connect-MgGraph -Scopes 'Application.Read.All', 'AppRoleAssignment.ReadWrite.All
 
 $apiClientId = '<management API application client ID>'
 $principalObjectId = '<user, group, or service-principal object ID>'
-$roleValue = 'HybridDeviceTagger.CertificateAdministrator'
+$roleValue = 'HybridDeviceTagger.Reader'
 
 $api = Invoke-MgGraphRequest -Method GET -Uri (
     "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$apiClientId'&`$select=id,appRoles"
@@ -91,13 +106,13 @@ The Azure installation user also needs read access to the current Key Vault secr
 
 After deployment, Bicep grants the Function App's system-assigned managed identity:
 
-- `Storage Blob Data Owner` on the deployment Storage account;
-- `Key Vault Secrets Officer` on the configured Key Vault;
+- `Storage Blob Data Contributor` and `Storage Queue Data Contributor` on the deployment Storage account;
+- `Key Vault Secrets Officer` on the current and staged password secrets only, not on the whole Key Vault;
 - Microsoft Graph `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All`, when the signed-in Entra administrator is authorized to create app-role assignments.
 
 If the Azure deployment user cannot grant Graph application roles, an Entra administrator must perform that step separately for the managed-identity service principal returned by the deployment. Code deployment can proceed after private Storage DNS is working, but device updates will fail until `Device.ReadWrite.All` is assigned.
 
-The script does not persist or pass the AD password to Azure Resource Manager. It uses `ActiveDirectoryCredential` only for preflight directory queries and bind validation. When this parameter is omitted during an interactive run, the installer opens a credential prompt for the configured `ADServiceAccount`. Being signed in as a domain user is sufficient for some discovery queries but does not prove that the Function App's service account can bind with its own password. Noninteractive runs must supply `ActiveDirectoryCredential` explicitly. The current password must already exist in the Key Vault.
+The script does not persist or pass the AD password to Azure Resource Manager. It uses `ActiveDirectoryCredential` only for preflight directory queries and bind validation. When this parameter is omitted during an interactive run, the installer opens a credential prompt for the configured `ADServiceAccount`. Being signed in as a domain user is sufficient for some discovery queries but does not prove that the Function App's service account can bind with its own password. Noninteractive runs must supply `ActiveDirectoryCredential` explicitly. The current password must already exist in the Key Vault. If the staged secret is missing, the installer creates it with an unusable random placeholder before the ARM deployment, because secret-scoped role assignments require existing secrets. The placeholder cannot bind to Active Directory and is overwritten by the next rotation.
 
 Account creation and password resets are isolated in `-PrepareActiveDirectoryAccountOnly`. The script checks the configured service-account DN using a separate `ActiveDirectoryProvisioningCredential`. If the account is absent, it asks before creating and enabling it with a cryptographically randomized complex password. If the account exists, it offers a randomized complex password or secure manual entry before resetting it. The selected password is written directly to the current Key Vault secret without being displayed. If the provisioning credential parameter is omitted, the installer requests it in a local credential dialog. Both operations require LDAPS. The installer explicitly sets `pwdLastSet=-1`, so **User must change password at next logon** is never enabled. Validation, What-if, and normal deployment never create an account or reset a password.
 
@@ -105,12 +120,12 @@ For a new service account, run once with `-PrepareActiveDirectoryAccountOnly`. T
 
 ## Validation
 
-Run validation first. This checks the Azure account and subscription, CLI and SDK versions, provider registration, FC1 region support, resource names, existing app-owned resources, subnet delegation and size, Key Vault security, the current password secret, LDAPS certificate trust or LDAP fallback availability, forest identity, and the service-account bind.
+Run validation first. This checks the Azure account and subscription, the CLI version (and the .NET SDK when no prebuilt Function package is present), provider registration, FC1 region support, resource names, existing app-owned resources, subnet delegation and size, Key Vault security, the current password secret, LDAPS certificate trust or LDAP fallback availability, forest identity, and the service-account bind.
 
 ```powershell
 $credential = Get-Credential 'svc-HybridDeviceTagger@contoso.com'
 
-./Deployment/Install-HybridDeviceTagger.ps1 `
+./Install-HybridDeviceTagger.ps1 `
     -ResourceGroupName 'rg-hybrid-device-tagger-prod' `
     -Location 'westeurope' `
     -FunctionAppName 'func-hybrid-device-tagger-prod' `
@@ -187,7 +202,7 @@ The installation provisions `Tagging__RulesJson` as an empty array. Scheduled an
 Import `HybridDeviceTagger.Management` and connect once to reuse the API URI and delegated Azure CLI token throughout the current PowerShell session. Pass only `ApiBaseUri` for another deployment. The module reads the deployment-specific token scope from the public REST endpoint `/authentication`; no client ID is configured in the module.
 
 ```powershell
-Import-Module ./Deployment/HybridDeviceTagger.Management
+Import-Module ./HybridDeviceTagger.Management
 Connect-HybridDeviceTagger
 
 Get-HybridDeviceTaggerRule
@@ -201,15 +216,7 @@ Get-Help Add-HybridDeviceTaggerRule -Full
 Get-Help Get-HybridDeviceTaggerTrace -Examples
 ```
 
-Manage public LDAPS trust anchors without redeploying or restarting the Function App:
-
-```powershell
-Get-HybridDeviceTaggerTrustedCertificate
-Add-HybridDeviceTaggerTrustedCertificate -Path ./contoso-root-ca.cer
-Remove-HybridDeviceTaggerTrustedCertificate -CertificateThumbprint $oldThumbprint -Confirm
-```
-
-Certificates may be DER or PEM encoded. The private `run-traces/active-directory-trust-certificates.json` Blob stores only public DER data. Mutations use ETags, duplicate additions are idempotent, and removal of the final certificate is rejected. The certificate packaged during installation remains the fallback until the first API mutation. Every new LDAP connection uses the current Blob-backed collection.
+The LDAPS trust anchor is immutable package content. It cannot be changed through the API or the Storage account, so a principal with storage or API access cannot substitute a certificate and capture the service-account password during the LDAPS bind. To replace it, rerun the installer with the new `-ActiveDirectoryTrustedCertificatePath`; the installer validates LDAPS against the new certificate and redeploys the package.
 
 Add or replace one named rule by passing the complete rule object. The API validates it and uses the latest ETag to prevent concurrent updates:
 
@@ -260,18 +267,20 @@ $trace = @(Get-HybridDeviceTaggerTrace)
 Run operational actions directly through the module:
 
 ```powershell
-Invoke-HybridDeviceTagging
-Invoke-HybridDeviceTaggerPasswordRotation -Confirm
+Invoke-HybridDeviceTagging -Wait
+Invoke-HybridDeviceTaggerPasswordRotation -Wait -Confirm
 ```
 
-The password-rotation command has high confirmation impact and forces a real service-account password change. It bypasses only the configured age threshold; current credential verification, LDAPS, staging, validation, and secret promotion still apply. Immediate operations return their invocation ID and result synchronously. A second invocation of the same operation receives HTTP `409` while the first is running. The active Entra identity needs the endpoint's application role but does not require Azure Resource Manager access.
+The password-rotation command has high confirmation impact and forces a real service-account password change. It bypasses only the configured age threshold; current credential verification, LDAPS, staging, validation, and secret promotion still apply. Both actions return HTTP `202` immediately with the invocation ID and a `Location` header for the status endpoint. A queue-triggered function executes the run, so long runs are not limited by the HTTP gateway timeout. `-Wait` polls the status until that invocation reaches `Succeeded` or `Failed`. Failed requested runs are not retried automatically. A request receives HTTP `409` while the same operation is running.
+
+Tagging and password rotation are serialized across all instances by renewable Blob leases in `run-traces/locks`. Flex Consumption runs timer, queue, and HTTP functions in separate instance groups, so an in-process lock would not be sufficient. A timer run that cannot acquire the lease is skipped with a warning; a lease held by a crashed instance expires after 60 seconds. `MaximumInstanceCount` defaults to `1` per scale group. The active Entra identity needs the endpoint's application role but does not require Azure Resource Manager access.
 
 For an interactive account bootstrap, either pass the provisioning credential separately or let the installer prompt for it:
 
 ```powershell
 $provisioningCredential = Get-Credential -Message 'AD account with create/reset permission'
 
-./Deployment/Install-HybridDeviceTagger.ps1 `
+./Install-HybridDeviceTagger.ps1 `
     <same parameters as validation> `
     -ActiveDirectoryProvisioningCredential $provisioningCredential `
     -PrepareActiveDirectoryAccountOnly
@@ -292,11 +301,11 @@ For noninteractive Azure DevOps execution, authenticate Azure CLI before invokin
 - Network routing and firewalls must allow LDAPS port 636 and, when fallback is enabled, LDAP port 389 to every affected forest domain.
 - The subnet must be at least `/27`, have no underscore in its name, and be delegated only to `Microsoft.App/environments`.
 - The subnet must not contain service endpoints or private endpoints.
-- The separate private-endpoint subnet must permit private endpoints. The template creates a private endpoint named `pe-<storage-account>-blob` in this subnet.
-- Private DNS must resolve `<storage-account>.blob.core.windows.net` to the Storage private endpoint IP through the `privatelink.blob.core.windows.net` zone before code deployment.
+- The separate private-endpoint subnet must permit private endpoints. The template creates the private endpoints `pe-<storage-account>-blob` and `pe-<storage-account>-queue` in this subnet.
+- Private DNS must resolve `<storage-account>.blob.core.windows.net` and `<storage-account>.queue.core.windows.net` to the matching Storage private endpoint IPs through the `privatelink.blob.core.windows.net` and `privatelink.queue.core.windows.net` zones before code deployment.
 - The Key Vault must use RBAC, soft delete, and purge protection.
 - A network-restricted Key Vault must have an approved private endpoint and DNS/routing reachable from the Function App subnet.
-- The Function App managed identity receives `Storage Blob Data Owner`, `Key Vault Secrets Officer`, and Microsoft Graph `Device.ReadWrite.All`.
+- The Function App managed identity receives `Storage Blob Data Contributor`, `Storage Queue Data Contributor`, `Key Vault Secrets Officer` on the two password secrets, and the Microsoft Graph application roles described above.
 
 The installer is idempotent: Bicep converges existing compatible resources, deterministic role-assignment names prevent duplicates, and the Graph role is checked before creation.
 

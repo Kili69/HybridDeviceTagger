@@ -14,15 +14,23 @@ namespace HybridDeviceTagger;
 /// <summary>Publishes the token scope needed to authenticate management REST API calls.</summary>
 public sealed class ManagementApiAuthenticationFunction
 {
+    /// <summary>The validated management API options containing the published token scope.</summary>
     private readonly ManagementApiOptions _options;
 
     /// <summary>Initializes the authentication metadata endpoint.</summary>
+    /// <param name="options">The management API options.</param>
     public ManagementApiAuthenticationFunction(IOptions<ManagementApiOptions> options)
     {
         _options = options.Value;
     }
 
     /// <summary>Gets the public delegated token scope for this deployment.</summary>
+    /// <remarks>
+    /// The endpoint is anonymous so clients can discover which scope to request before they hold a
+    /// token. It returns only the non-secret scope string.
+    /// </remarks>
+    /// <param name="request">The incoming HTTP request.</param>
+    /// <returns>An HTTP 200 result with a <c>tokenScope</c> property.</returns>
     [Function("GetManagementApiAuthentication")]
     public IActionResult GetAuthentication(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/authentication")]

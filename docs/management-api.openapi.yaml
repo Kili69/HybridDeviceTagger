@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: HybridDeviceTagger Management API
-  version: 0.1.20261005.1
+  version: 1.0.0
   description: REST API for authentication discovery, tagging configuration, operational actions, run status, and trace retrieval.
 servers:
   - url: https://func-hybriddevicetagger.azurewebsites.net/api/management
@@ -167,15 +167,20 @@ paths:
   /actions/device-tagging:
     post:
       operationId: runDeviceTagging
-      summary: Run device tagging immediately
-      description: Requires HybridDeviceTagger.TaggingOperator.
+      summary: Queue an immediate device-tagging run
+      description: Requires HybridDeviceTagger.TaggingOperator. The run executes asynchronously; poll the Location URI until its invocationId reaches Succeeded or Failed.
       responses:
-        '200':
-          description: Completed tagging result and invocation ID
+        '202':
+          description: Run request accepted
+          headers:
+            Location:
+              description: Relative URI of the device-tagging status endpoint.
+              schema:
+                type: string
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DeviceTaggingActionResult'
+                $ref: '#/components/schemas/AcceptedOperation'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -185,15 +190,20 @@ paths:
   /actions/password-rotation:
     post:
       operationId: runPasswordRotation
-      summary: Force an immediate Active Directory service-account password rotation
-      description: Requires HybridDeviceTagger.PasswordRotationAdministrator.
+      summary: Queue a forced Active Directory service-account password rotation
+      description: Requires HybridDeviceTagger.PasswordRotationAdministrator. The rotation executes asynchronously; poll the Location URI until its invocationId reaches Succeeded or Failed.
       responses:
-        '200':
-          description: Completed password-rotation result and invocation ID
+        '202':
+          description: Rotation request accepted
+          headers:
+            Location:
+              description: Relative URI of the password-rotation status endpoint.
+              schema:
+                type: string
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PasswordRotationActionResult'
+                $ref: '#/components/schemas/AcceptedOperation'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -223,89 +233,6 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-  /trusted-certificates:
-    get:
-      operationId: getTrustedCertificates
-      summary: Get Active Directory LDAPS trust certificates
-      description: Requires HybridDeviceTagger.Reader or HybridDeviceTagger.CertificateAdministrator. Returns metadata only.
-      responses:
-        '200':
-          description: Effective trusted-certificate metadata and collection version
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TrustedCertificateCollection'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-    post:
-      operationId: addTrustedCertificate
-      summary: Add an Active Directory LDAPS trust certificate
-      description: Requires HybridDeviceTagger.CertificateAdministrator. Existing certificates are preserved.
-      parameters:
-        - $ref: '#/components/parameters/IfMatch'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - certificate
-              properties:
-                certificate:
-                  type: string
-                  format: byte
-                  description: Base64-encoded DER or PEM public X.509 certificate.
-      responses:
-        '200':
-          description: Updated trusted-certificate collection
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TrustedCertificateCollection'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '413':
-          description: Request body exceeds 65,536 bytes
-  /trusted-certificates/{thumbprint}:
-    parameters:
-      - name: thumbprint
-        in: path
-        required: true
-        schema:
-          type: string
-          pattern: '^[0-9A-Fa-f]{40}$'
-    delete:
-      operationId: removeTrustedCertificate
-      summary: Remove an Active Directory LDAPS trust certificate
-      description: Requires HybridDeviceTagger.CertificateAdministrator. The final certificate cannot be removed.
-      parameters:
-        - $ref: '#/components/parameters/IfMatch'
-      responses:
-        '200':
-          description: Remaining trusted-certificate collection
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TrustedCertificateCollection'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
 components:
   parameters:
     IfMatch:
@@ -398,51 +325,6 @@ components:
           enum:
             - appSetting
             - blob
-    TrustedCertificate:
-      type: object
-      required:
-        - thumbprint
-        - subject
-        - issuer
-        - notBeforeUtc
-        - notAfterUtc
-      properties:
-        thumbprint:
-          type: string
-          pattern: '^[0-9A-F]{40}$'
-        subject:
-          type: string
-        issuer:
-          type: string
-        notBeforeUtc:
-          type: string
-          format: date-time
-        notAfterUtc:
-          type: string
-          format: date-time
-    TrustedCertificateCollection:
-      type: object
-      required:
-        - certificates
-        - source
-      properties:
-        certificates:
-          type: array
-          minItems: 1
-          items:
-            $ref: '#/components/schemas/TrustedCertificate'
-        eTag:
-          type: string
-          nullable: true
-        lastModifiedUtc:
-          type: string
-          format: date-time
-          nullable: true
-        source:
-          type: string
-          enum:
-            - package
-            - blob
     OperationStatus:
       type: object
       required:
@@ -458,6 +340,7 @@ components:
         state:
           type: string
           enum:
+            - Queued
             - Running
             - Succeeded
             - Failed
@@ -482,48 +365,20 @@ components:
         errorMessage:
           type: string
           nullable: true
-    DeviceTaggingActionResult:
+    AcceptedOperation:
       type: object
       required:
         - invocationId
-        - result
+        - state
+        - statusUri
       properties:
         invocationId:
           type: string
           format: uuid
-        result:
-          type: object
-          required:
-            - discovered
-            - updated
-            - unchanged
-            - notFound
-            - notHybridJoined
-            - membershipsAdded
-            - membershipsRemoved
-            - removedFromScope
-          additionalProperties:
-            type: integer
-    PasswordRotationActionResult:
-      type: object
-      required:
-        - invocationId
-        - result
-      properties:
-        invocationId:
+        state:
           type: string
-          format: uuid
-        result:
-          type: object
-          required:
-            - outcome
-          properties:
-            outcome:
-              type: string
-              enum:
-                - Rotated
-                - RecoveredFromNext
-                - DeferredNoSecureConnection
-            currentPasswordAgeDays:
-              type: integer
-              nullable: true
+          enum:
+            - Queued
+        statusUri:
+          type: string
+          example: /api/management/status/device-tagging

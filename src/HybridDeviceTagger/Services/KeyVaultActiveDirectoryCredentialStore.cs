@@ -14,10 +14,19 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Stores active and staged Active Directory passwords as Azure Key Vault secrets.</summary>
 public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCredentialStore
 {
+    /// <summary>The Key Vault client authenticated with the Function App's managed identity.</summary>
     private readonly SecretClient _secretClient;
+
+    /// <summary>Supplies the bind user name combined with each stored password.</summary>
     private readonly ActiveDirectoryOptions _activeDirectoryOptions;
+
+    /// <summary>Supplies the names of the current and next password secrets.</summary>
     private readonly KeyVaultOptions _keyVaultOptions;
+
+    /// <summary>Supplies the expiry assigned to new secret versions.</summary>
     private readonly PasswordRotationOptions _rotationOptions;
+
+    /// <summary>Supplies the UTC time used to compute secret expiry.</summary>
     private readonly TimeProvider _timeProvider;
 
     /// <summary>Initializes a new instance of the <see cref="KeyVaultActiveDirectoryCredentialStore"/> class.</summary>
@@ -83,6 +92,10 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
 
     /// <summary>Loads a required secret and converts its value and metadata to a bind credential.</summary>
     /// <remarks>A missing required secret is allowed to propagate as a Key Vault error.</remarks>
+    /// <param name="secretName">The Key Vault secret name.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The credential built from the latest secret version.</returns>
+    /// <exception cref="RequestFailedException">The secret does not exist or cannot be read.</exception>
     private async Task<StoredDirectoryCredential> GetRequiredSecretAsync(
         string secretName,
         CancellationToken cancellationToken)
@@ -98,6 +111,10 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
     /// The same operation is used to stage <c>next</c> and to promote a validated password to
     /// <c>current</c>. Existing versions remain available according to Key Vault retention policy.
     /// </remarks>
+    /// <param name="secretName">The Key Vault secret name.</param>
+    /// <param name="password">The password stored as the secret value.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The credential built from the new secret version.</returns>
     private async Task<StoredDirectoryCredential> SetSecretAsync(
         string secretName,
         string password,
@@ -111,6 +128,8 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
     }
 
     /// <summary>Combines a secret password and creation timestamp with the configured bind user.</summary>
+    /// <param name="secret">The Key Vault secret.</param>
+    /// <returns>The directory credential.</returns>
     private StoredDirectoryCredential ToCredential(KeyVaultSecret secret) =>
         new(
             _activeDirectoryOptions.BindUsername,

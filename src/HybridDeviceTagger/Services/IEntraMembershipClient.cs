@@ -9,36 +9,60 @@ namespace HybridDeviceTagger.Services;
 public interface IEntraMembershipClient
 {
     /// <summary>Determines whether a device is a direct member of an Entra group.</summary>
+    /// <param name="groupId">The Entra security-group object identifier.</param>
+    /// <param name="entraObjectId">The Entra device object identifier.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns><see langword="true"/> when the device is a direct member.</returns>
     Task<bool> IsGroupMemberAsync(
         Guid groupId,
         string entraObjectId,
         CancellationToken cancellationToken);
 
     /// <summary>Adds a device as a direct member of an Entra group.</summary>
+    /// <param name="groupId">The Entra security-group object identifier.</param>
+    /// <param name="entraObjectId">The Entra device object identifier.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous change.</returns>
     Task AddGroupMemberAsync(
         Guid groupId,
         string entraObjectId,
         CancellationToken cancellationToken);
 
     /// <summary>Removes a device's direct membership from an Entra group.</summary>
+    /// <param name="groupId">The Entra security-group object identifier.</param>
+    /// <param name="entraObjectId">The Entra device object identifier.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous change.</returns>
     Task RemoveGroupMemberAsync(
         Guid groupId,
         string entraObjectId,
         CancellationToken cancellationToken);
 
     /// <summary>Determines whether a device is a direct member of an administrative unit.</summary>
+    /// <param name="administrativeUnitId">The administrative-unit object identifier.</param>
+    /// <param name="entraObjectId">The Entra device object identifier.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns><see langword="true"/> when the device is a direct member.</returns>
     Task<bool> IsAdministrativeUnitMemberAsync(
         Guid administrativeUnitId,
         string entraObjectId,
         CancellationToken cancellationToken);
 
     /// <summary>Adds a device to a normal or restricted administrative unit.</summary>
+    /// <param name="administrativeUnitId">The administrative-unit object identifier.</param>
+    /// <param name="entraObjectId">The Entra device object identifier.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous change.</returns>
     Task AddAdministrativeUnitMemberAsync(
         Guid administrativeUnitId,
         string entraObjectId,
         CancellationToken cancellationToken);
 
     /// <summary>Removes a device from a normal or restricted administrative unit.</summary>
+    /// <param name="administrativeUnitId">The administrative-unit object identifier.</param>
+    /// <param name="entraObjectId">The Entra device object identifier.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous change.</returns>
     Task RemoveAdministrativeUnitMemberAsync(
         Guid administrativeUnitId,
         string entraObjectId,

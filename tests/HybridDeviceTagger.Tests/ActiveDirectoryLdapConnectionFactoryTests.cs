@@ -60,6 +60,41 @@ public sealed class ActiveDirectoryLdapConnectionFactoryTests
         Assert.True(valid);
     }
 
+    [Fact]
+    public void LoadTrustedCertificates_ReturnsEmptyWithoutConfiguredPath()
+    {
+        Assert.Empty(ActiveDirectoryLdapConnectionFactory.LoadTrustedCertificates(null));
+    }
+
+    [Fact]
+    public void LoadTrustedCertificates_LoadsPemAndDerFiles()
+    {
+        using var certificates = CreateCertificateChain("dc01.example.com");
+        var pemPath = Path.GetTempFileName();
+        var derPath = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(
+                pemPath,
+                certificates.Root.ExportCertificatePem() + Environment.NewLine +
+                certificates.Server.ExportCertificatePem());
+            File.WriteAllBytes(derPath, certificates.Root.Export(X509ContentType.Cert));
+
+            var pem = ActiveDirectoryLdapConnectionFactory.LoadTrustedCertificates(pemPath);
+            var der = ActiveDirectoryLdapConnectionFactory.LoadTrustedCertificates(derPath);
+
+            Assert.Equal(
+                [certificates.Root.Thumbprint, certificates.Server.Thumbprint],
+                pem.Select(certificate => certificate.Thumbprint));
+            Assert.Equal(certificates.Root.Thumbprint, Assert.Single(der).Thumbprint);
+        }
+        finally
+        {
+            File.Delete(pemPath);
+            File.Delete(derPath);
+        }
+    }
+
     private static CertificateChain CreateCertificateChain(string dnsName)
     {
         using var rootKey = RSA.Create(2048);

@@ -8,22 +8,33 @@ targetScope = 'resourceGroup'
 @description('Name of the existing Key Vault.')
 param keyVaultName string
 
+@description('Names of the existing secrets to which the role is assigned.')
+param secretNames string[]
+
 @description('Object ID of the Function App managed identity.')
 param principalId string
 
 @description('Fully qualified role definition resource ID.')
 param roleDefinitionId string
 
+@description('Existing Key Vault that contains the password secrets; referenced, never modified.')
 resource keyVault 'Microsoft.KeyVault/vaults@2024-11-01' existing = {
   name: keyVaultName
 }
 
-resource roleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVault.id, principalId, roleDefinitionId)
-  scope: keyVault
+@description('Existing secrets used as the role-assignment scopes. Each secret must exist before deployment.')
+resource secrets 'Microsoft.KeyVault/vaults/secrets@2024-11-01' existing = [for secretName in secretNames: {
+  name: secretName
+  parent: keyVault
+}]
+
+@description('Secret-scoped role assignments for the managed identity, one per secret, with deterministic names for idempotent redeployment.')
+resource roleAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for (secretName, index) in secretNames: {
+  name: guid(secrets[index].id, principalId, roleDefinitionId)
+  scope: secrets[index]
   properties: {
     principalId: principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: roleDefinitionId
   }
-}
+}]

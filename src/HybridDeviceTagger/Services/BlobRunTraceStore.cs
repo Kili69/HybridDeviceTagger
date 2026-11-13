@@ -17,10 +17,15 @@ public sealed class BlobRunTraceStore : IRunTraceStore, IRunTraceReader
     /// <summary>The stable blob path containing only the latest tagging run.</summary>
     public const string BlobName = "device-tagger-last-run.jsonl";
 
+    /// <summary>The append blob that holds the trace of the latest run.</summary>
     private readonly AppendBlobClient _blobClient;
+
+    /// <summary>Logs trace-storage failures, which never fail the tagging run.</summary>
     private readonly ILogger<BlobRunTraceStore> _logger;
 
     /// <summary>Initializes a new Blob-backed run trace store.</summary>
+    /// <param name="blobClient">The append blob at <see cref="BlobName"/>.</param>
+    /// <param name="logger">The structured logger.</param>
     public BlobRunTraceStore(
         AppendBlobClient blobClient,
         ILogger<BlobRunTraceStore> logger)
@@ -30,6 +35,10 @@ public sealed class BlobRunTraceStore : IRunTraceStore, IRunTraceReader
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// The previous trace is deleted so the blob only ever contains one run. Storage failures are
+    /// logged and yield <see cref="RunTrace.None"/> because diagnostics must not block tagging.
+    /// </remarks>
     public async Task<IRunTraceSession> StartAsync(
         string invocationId,
         bool isPastDue,
@@ -92,25 +101,48 @@ public sealed class BlobRunTraceStore : IRunTraceStore, IRunTraceReader
         }
     }
 
+    /// <summary>Reads the informational product version recorded in the trace header.</summary>
+    /// <returns>The assembly informational version, or <c>unknown</c>.</returns>
     private static string GetProductVersion() =>
         Assembly.GetExecutingAssembly()
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
             .InformationalVersion ?? "unknown";
 
+    /// <summary>Appends one JSON line per trace event to the latest-run append blob.</summary>
+    /// <remarks>
+    /// Each event is appended immediately so the trace survives a crashed or timed-out invocation.
+    /// After the first failed append, tracing is disabled for the session to avoid repeated failures.
+    /// </remarks>
     private sealed class BlobRunTraceSession : IRunTraceSession
     {
+        /// <summary>Compact web-default (camelCase) JSON options producing one line per event.</summary>
         private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
         {
             WriteIndented = false
         };
 
+        /// <summary>The append blob created for this run.</summary>
         private readonly AppendBlobClient _blobClient;
+
+        /// <summary>The invocation identifier written into every event.</summary>
         private readonly string _invocationId;
+
+        /// <summary>Logs append failures.</summary>
         private readonly ILogger _logger;
+
+        /// <summary>Serializes appends so sequence numbers match the order of lines in the blob.</summary>
         private readonly SemaphoreSlim _writeLock = new(1, 1);
+
+        /// <summary>The monotonically increasing sequence number of the last written event.</summary>
         private long _sequence;
+
+        /// <summary>Set after an append failure; later writes are ignored.</summary>
         private bool _disabled;
 
+        /// <summary>Initializes a trace session for one invocation.</summary>
+        /// <param name="blobClient">The append blob created for this run.</param>
+        /// <param name="invocationId">The invocation identifier written into every event.</param>
+        /// <param name="logger">The structured logger.</param>
         public BlobRunTraceSession(
             AppendBlobClient blobClient,
             string invocationId,
@@ -121,6 +153,7 @@ public sealed class BlobRunTraceStore : IRunTraceStore, IRunTraceReader
             _logger = logger;
         }
 
+        /// <inheritdoc />
         public async Task WriteAsync(
             string level,
             string phase,

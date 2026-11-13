@@ -11,6 +11,8 @@ namespace HybridDeviceTagger.Models;
 [JsonConverter(typeof(JsonStringEnumConverter<OperationRunState>))]
 public enum OperationRunState
 {
+    /// <summary>The operation was requested and waits for a worker.</summary>
+    Queued,
     /// <summary>The operation is currently running.</summary>
     Running,
     /// <summary>The operation completed successfully.</summary>
@@ -20,6 +22,17 @@ public enum OperationRunState
 }
 
 /// <summary>Describes the latest persisted execution of one scheduled operation.</summary>
+/// <param name="Operation">The operation name, for example <c>device-tagging</c>.</param>
+/// <param name="InvocationId">The invocation identifier that correlates status, logs, and traces.</param>
+/// <param name="State">The lifecycle state of the run.</param>
+/// <param name="StartedAtUtc">The UTC time at which the run was queued or started.</param>
+/// <param name="CompletedAtUtc">The UTC time at which the run finished, if it has finished.</param>
+/// <param name="LastPasswordChangeAtUtc">
+/// The UTC time of the last actual Active Directory password change; only set for password rotation.
+/// </param>
+/// <param name="Result">Aggregate, non-sensitive result values of a successful run.</param>
+/// <param name="ErrorType">The exception type name of a failed run.</param>
+/// <param name="ErrorMessage">The exception message of a failed run.</param>
 public sealed record OperationRunStatus(
     string Operation,
     string InvocationId,

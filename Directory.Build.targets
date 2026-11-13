@@ -1,0 +1,47 @@
+<Project>
+  <!-- Calculates the product version from Git unless the caller supplied ProductVersion. -->
+  <Target Name="ResolveProductVersion" Condition="'$(ProductVersion)' == ''">
+    <Exec
+      Command="pwsh -NoProfile -NonInteractive -File &quot;$(MSBuildThisFileDirectory)scripts/Get-ProductVersion.ps1&quot;"
+      ConsoleToMSBuild="true"
+      EchoOff="true"
+      IgnoreExitCode="true"
+      IgnoreStandardErrorWarningFormat="true"
+      StandardOutputImportance="low"
+      StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="_ResolvedProductVersion" />
+      <Output TaskParameter="ExitCode" PropertyName="_ProductVersionExitCode" />
+    </Exec>
+
+    <PropertyGroup>
+      <ProductVersion Condition="'$(_ProductVersionExitCode)' == '0'">$(_ResolvedProductVersion.Trim())</ProductVersion>
+      <!-- Builds without pwsh or Git history still succeed with a clearly local version. -->
+      <ProductVersion Condition="'$(_ProductVersionExitCode)' != '0'">$([System.DateTime]::UtcNow.ToString(yyyyMM)).0-local</ProductVersion>
+    </PropertyGroup>
+  </Target>
+
+  <!--
+    Maps <YYYY><MM>.<counter>[-<suffix>] to .NET version properties. Assembly version parts are
+    limited to 65535, so the assembly and file versions use <YYYY>.<M>.<counter>.0.
+  -->
+  <Target
+    Name="ApplyProductVersion"
+    DependsOnTargets="ResolveProductVersion"
+    BeforeTargets="GetAssemblyVersion;GenerateAssemblyInfo;GenerateNuspec">
+    <PropertyGroup>
+      <_ProductVersionDash>$(ProductVersion.IndexOf('-'))</_ProductVersionDash>
+      <_ProductCoreVersion Condition="'$(_ProductVersionDash)' == '-1'">$(ProductVersion)</_ProductCoreVersion>
+      <_ProductCoreVersion Condition="'$(_ProductVersionDash)' != '-1'">$(ProductVersion.Substring(0, $(_ProductVersionDash)))</_ProductCoreVersion>
+      <_ProductYear>$(_ProductCoreVersion.Substring(0, 4))</_ProductYear>
+      <_ProductMonth>$([System.Int32]::Parse($(_ProductCoreVersion.Substring(4, 2))))</_ProductMonth>
+      <_ProductCounter>$(_ProductCoreVersion.Substring(7))</_ProductCounter>
+      <Version>$(ProductVersion)</Version>
+      <InformationalVersion>$(ProductVersion)</InformationalVersion>
+      <AssemblyVersion>$(_ProductYear).$(_ProductMonth).$(_ProductCounter).0</AssemblyVersion>
+      <FileVersion>$(AssemblyVersion)</FileVersion>
+    </PropertyGroup>
+    <Error
+      Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch('$(ProductVersion)', '^\d{6}\.\d+(-[0-9A-Za-z-]+)?$'))"
+      Text="ProductVersion '$(ProductVersion)' must use the format &lt;YYYY&gt;&lt;MM&gt;.&lt;counter&gt;[-&lt;branch&gt;]." />
+  </Target>
+</Project>

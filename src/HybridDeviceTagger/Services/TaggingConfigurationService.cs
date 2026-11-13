@@ -12,22 +12,36 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Applies validated atomic tagging-rule mutations.</summary>
 public sealed class TaggingConfigurationService
 {
+    /// <summary>Web-default JSON options used to measure the serialized configuration size.</summary>
     private static readonly JsonSerializerOptions SerializerOptions =
         new(JsonSerializerDefaults.Web);
 
+    /// <summary>The versioned rule store.</summary>
     private readonly ITaggingConfigurationStore _store;
 
     /// <summary>Initializes the configuration service.</summary>
+    /// <param name="store">The versioned rule store.</param>
     public TaggingConfigurationService(ITaggingConfigurationStore store)
     {
         _store = store;
     }
 
     /// <summary>Gets the current configuration.</summary>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The current snapshot.</returns>
     public Task<TaggingConfigurationSnapshot> GetAsync(CancellationToken cancellationToken) =>
         _store.GetSnapshotAsync(cancellationToken);
 
     /// <summary>Replaces the complete configuration.</summary>
+    /// <param name="rules">The complete new rule set.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <param name="expectedETag">
+    /// The ETag supplied by the caller; when omitted, the ETag of the snapshot read by this method is
+    /// used, so concurrent changes between the read and the write are still detected.
+    /// </param>
+    /// <returns>The stored snapshot.</returns>
+    /// <exception cref="TaggingConfigurationValidationException">The resulting rules are invalid.</exception>
+    /// <exception cref="TaggingConfigurationConflictException">The configuration changed concurrently.</exception>
     public async Task<TaggingConfigurationSnapshot> ReplaceAsync(
         IReadOnlyList<TaggingRuleOptions> rules,
         CancellationToken cancellationToken,
@@ -42,6 +56,15 @@ public sealed class TaggingConfigurationService
     }
 
     /// <summary>Adds a rule or replaces the rule with the same case-insensitive name.</summary>
+    /// <param name="rule">The complete rule; a replaced rule moves to the end of the ordered list.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <param name="expectedETag">
+    /// The ETag supplied by the caller; when omitted, the ETag of the snapshot read by this method is
+    /// used, so concurrent changes between the read and the write are still detected.
+    /// </param>
+    /// <returns>The stored snapshot.</returns>
+    /// <exception cref="TaggingConfigurationValidationException">The resulting rules are invalid.</exception>
+    /// <exception cref="TaggingConfigurationConflictException">The configuration changed concurrently.</exception>
     public async Task<TaggingConfigurationSnapshot> UpsertAsync(
         TaggingRuleOptions rule,
         CancellationToken cancellationToken,
@@ -59,6 +82,16 @@ public sealed class TaggingConfigurationService
     }
 
     /// <summary>Removes one rule by its case-insensitive name.</summary>
+    /// <param name="ruleName">The name of the rule to remove.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <param name="expectedETag">
+    /// The ETag supplied by the caller; when omitted, the ETag of the snapshot read by this method is
+    /// used, so concurrent changes between the read and the write are still detected.
+    /// </param>
+    /// <returns>The stored snapshot.</returns>
+    /// <exception cref="KeyNotFoundException">No rule has the specified name.</exception>
+    /// <exception cref="TaggingConfigurationValidationException">The resulting rules are invalid.</exception>
+    /// <exception cref="TaggingConfigurationConflictException">The configuration changed concurrently.</exception>
     public async Task<TaggingConfigurationSnapshot> RemoveAsync(
         string ruleName,
         CancellationToken cancellationToken,
@@ -80,6 +113,14 @@ public sealed class TaggingConfigurationService
     }
 
     /// <summary>Normalizes and validates a complete tagging-rule collection.</summary>
+    /// <remarks>
+    /// Names, descriptions, and base DNs are trimmed, trailing commas are removed from base DNs, and
+    /// collections are copied so callers cannot mutate the stored rules. All errors are collected
+    /// before throwing so callers can fix every problem at once. At least one rule is required.
+    /// </remarks>
+    /// <param name="rules">The rules to normalize.</param>
+    /// <returns>The normalized copy of the rules.</returns>
+    /// <exception cref="TaggingConfigurationValidationException">One or more rules are invalid.</exception>
     public static IReadOnlyList<TaggingRuleOptions> NormalizeAndValidate(
         IReadOnlyList<TaggingRuleOptions> rules)
     {
