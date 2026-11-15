@@ -67,14 +67,37 @@ Die Entra-Identität benötigt je nach Operation eine der folgenden Anwendungsro
 | `HybridDeviceTagger.PasswordRotationAdministrator` | Initiales AD-Kennwort setzen und Rotation starten |
 
 Wirksame Azure-RBAC-Zuweisungen als **Owner** oder **Contributor** an der Function App gewähren
-zusätzlich Regel- und Kennwortverwaltung. Sie gewähren nicht automatisch TaggingOperator oder
-allgemeinen Lesezugriff.
+zusätzlich Regel- und Kennwortverwaltung sowie das Starten von Tagging-Läufen. Sie gewähren nicht
+automatisch allgemeinen Lesezugriff. Die Forest-Domäne können ausschließlich Owner und Contributor ändern, weil
+sie bestimmt, welche Server beim Bind das Kennwort des Dienstkontos erhalten.
 
 Die frühere Rolle `HybridDeviceTagger.CertificateAdministrator` und die Befehle
-`Get-`, `Add-` und `Remove-HybridDeviceTaggerTrustedCertificate` wurden entfernt. Der LDAPS-Vertrauensanker
-ist ausschließlich das bei der Installation paketierte, unveränderliche Zertifikat und kann über die
-API nicht mehr geändert werden. Ein Wechsel erfolgt durch erneutes Ausführen der Installation mit dem
-neuen Zertifikat.
+`Get-`, `Add-` und `Remove-HybridDeviceTaggerTrustedCertificate` wurden entfernt. LDAPS-Vertrauensanker,
+LDAP-Benutzer und Aktivitätsprotokoll verwalten Owner und Contributor der Function App im
+Konfigurationsportal unter `https://<function-app>.azurewebsites.net/api/portal`.
+
+## Forest-Domäne korrigieren
+
+Die Forest-Domäne kann auch ohne funktionierende AD-Verbindung und vor der initialen
+Kennwortspeicherung korrigiert werden. Der Client muss nur die Function App erreichen.
+`-SkipValidation` überspringt die Verbindungsprüfung, die die Tagging-Regeln liest und dafür
+die AD-Verbindung benötigen kann.
+
+```powershell
+Connect-HybridDeviceTagger -ApiBaseUri 'https://<function-app>.azurewebsites.net/api/management' `
+    -ClientId '<management-api-client-id>' -SkipValidation
+Get-HybridDeviceTaggerActiveDirectoryConfiguration
+Set-HybridDeviceTaggerActiveDirectoryConfiguration -Domain 'contoso.com' -Confirm
+```
+
+Die Änderung benötigt wirksame Owner- oder Contributor-Rechte an der Function App;
+Anwendungsrollen der Management API genügen nicht. Alternativ steht sie im Konfigurationsportal zur Verfügung.
+Geprüft wird die Syntax des Forest-DNS-Namens, nicht dessen Erreichbarkeit. Die private
+Blob-Konfiguration hat Vorrang vor der ursprünglichen App-Einstellung und bleibt bei einer
+erneuten Installation erhalten. Neue Forest-Verbindungen lesen sie ohne Function-Neustart;
+bereits laufende Vorgänge können noch die alte Domäne verwenden. Regeln, Dienstkonto-UPN,
+ein expliziter Dienstkonto-DN und ein manuell konfigurierter Server-Override bleiben unverändert.
+Das Kommando verwendet den zuletzt gelesenen ETag für den Schreibzugriff.
 
 ## Sicherheits- und Nebenläufigkeitsmodell
 

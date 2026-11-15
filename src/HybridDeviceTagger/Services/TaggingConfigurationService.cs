@@ -62,16 +62,21 @@ public sealed class TaggingConfigurationService
     /// <param name="rules">The complete new rule set.</param>
     /// <param name="cancellationToken">Cancels validation and storage.</param>
     /// <param name="expectedETag">The ETag the stored configuration must have; the current ETag is used when omitted.</param>
+    /// <param name="allowNewMembershipTargets">
+    /// <see langword="false"/> rejects group or administrative-unit IDs that no stored rule uses yet.
+    /// </param>
     /// <returns>The stored configuration snapshot.</returns>
     /// <exception cref="TaggingConfigurationValidationException">The rules are invalid.</exception>
     /// <exception cref="TaggingConfigurationConflictException">The stored configuration changed concurrently.</exception>
     public async Task<TaggingConfigurationSnapshot> ReplaceAsync(
         IReadOnlyList<TaggingRuleOptions> rules,
         CancellationToken cancellationToken,
-        string? expectedETag = null)
+        string? expectedETag = null,
+        bool allowNewMembershipTargets = true)
     {
         var current = await _store.GetSnapshotAsync(cancellationToken);
         var normalizedRules = NormalizeAndValidate(rules);
+        EnsureNoNewMembershipTargets(current.Rules, normalizedRules, allowNewMembershipTargets);
         await _activeDirectoryRuleValidator.ValidateRulesAsync(
             normalizedRules,
             cancellationToken);
@@ -85,13 +90,17 @@ public sealed class TaggingConfigurationService
     /// <param name="rule">The rule to add or replace.</param>
     /// <param name="cancellationToken">Cancels validation and storage.</param>
     /// <param name="expectedETag">The ETag the stored configuration must have; the current ETag is used when omitted.</param>
+    /// <param name="allowNewMembershipTargets">
+    /// <see langword="false"/> rejects group or administrative-unit IDs that no stored rule uses yet.
+    /// </param>
     /// <returns>The stored configuration snapshot.</returns>
     /// <exception cref="TaggingConfigurationValidationException">The resulting rule set is invalid.</exception>
     /// <exception cref="TaggingConfigurationConflictException">The stored configuration changed concurrently.</exception>
     public async Task<TaggingConfigurationSnapshot> UpsertAsync(
         TaggingRuleOptions rule,
         CancellationToken cancellationToken,
-        string? expectedETag = null)
+        string? expectedETag = null,
+        bool allowNewMembershipTargets = true)
     {
         var current = await _store.GetSnapshotAsync(cancellationToken);
         var rules = current.Rules
@@ -99,6 +108,7 @@ public sealed class TaggingConfigurationService
             .Append(rule)
             .ToArray();
         var normalizedRules = NormalizeAndValidate(rules);
+        EnsureNoNewMembershipTargets(current.Rules, normalizedRules, allowNewMembershipTargets);
         await _activeDirectoryRuleValidator.ValidateRulesAsync(
             normalizedRules,
             cancellationToken);
@@ -138,6 +148,41 @@ public sealed class TaggingConfigurationService
             normalizedRules,
             expectedETag ?? current.ETag,
             cancellationToken);
+    }
+
+    /// <summary>Rejects group or administrative-unit targets that no stored rule uses yet.</summary>
+    /// <remarks>
+    /// The Function identity can change memberships of every group and administrative unit in the
+    /// tenant. Principals without Function App Owner/Contributor access may therefore only reuse
+    /// targets that such an administrator has already approved in a rule.
+    /// </remarks>
+    /// <param name="currentRules">The stored rules.</param>
+    /// <param name="newRules">The normalized new rules.</param>
+    /// <param name="allowNewMembershipTargets">Whether new targets are allowed.</param>
+    /// <exception cref="TaggingConfigurationValidationException">A new target was added without permission.</exception>
+    internal static void EnsureNoNewMembershipTargets(
+        IReadOnlyList<TaggingRuleOptions> currentRules,
+        IReadOnlyList<TaggingRuleOptions> newRules,
+        bool allowNewMembershipTargets)
+    {
+        if (allowNewMembershipTargets)
+        {
+            return;
+        }
+
+        var approved = currentRules.SelectMany(rule => rule.EntraGroupIds.Concat(rule.AdministrativeUnitIds)).ToHashSet();
+        var added = newRules.SelectMany(rule => rule.EntraGroupIds.Concat(rule.AdministrativeUnitIds))
+            .Where(id => !approved.Contains(id))
+            .Distinct()
+            .ToArray();
+        if (added.Length > 0)
+        {
+            throw new TaggingConfigurationValidationException(
+            [
+                "Only Function App Owners or Contributors can add new Entra group or administrative-unit targets: " +
+                string.Join(", ", added)
+            ]);
+        }
     }
 
     /// <summary>Normalizes and validates a complete tagging-rule collection.</summary>

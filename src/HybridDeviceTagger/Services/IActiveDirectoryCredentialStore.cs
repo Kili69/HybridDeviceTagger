@@ -55,6 +55,18 @@ public interface IActiveDirectoryCredentialStore
     /// <param name="cancellationToken">Cancels the operation.</param>
     /// <returns>A task representing the asynchronous promotion.</returns>
     Task PromoteAsync(string password, CancellationToken cancellationToken);
+
+    /// <summary>Replaces the active credential, even when a real password is already stored.</summary>
+    /// <remarks>Used only after the new password has been validated against Active Directory.</remarks>
+    /// <param name="password">The validated password.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The stored active credential.</returns>
+    Task<StoredDirectoryCredential> ReplaceCurrentAsync(string password, CancellationToken cancellationToken);
+
+    /// <summary>Invalidates the staged credential so it cannot be used for recovery.</summary>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    Task ClearNextAsync(CancellationToken cancellationToken);
 }
 
 /// <summary>Indicates that the active credential has already been initialized.</summary>

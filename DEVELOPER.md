@@ -49,6 +49,13 @@ The application separates trigger, management API, orchestration, directory, Gra
 
 Installation assets live only in `installationspackage`. `Install.ps1` collects all parameters interactively and drives `Install-HybridDeviceTagger.ps1`, which validates prerequisites, deploys `main.bicep`, and publishes the prebuilt `function/HybridDeviceTagger.zip`. The engine no longer builds the Function from source; `scripts/Build-InstallationPackage.ps1` creates that package. `installationspackage/function`, `installationspackage/version.json`, and `installationspackage/installation-settings.json` are local or build output and are not tracked.
 
+Before code upload, custom VNet DNS servers must resolve the deployed private endpoints.
+Failed checks report observed answers or query errors and print the concrete private-zone
+A records for Blob, Queue, and a newly created Key Vault. Interactive installation pauses
+for user confirmation after checking each endpoint/server once. Enter resumes without
+rechecking and explicitly warns that DNS remains independently unverified; unattended failures
+remain terminating errors. No DNS records are edited automatically.
+
 ### Versioning and Release Build
 
 The product version has the format `<YYYY><MM>.<counter>` and is never stored in a file. `scripts/Get-ProductVersion.ps1` derives it from Git: a release tag `v<YYYY><MM>.<counter>` on `HEAD` defines the version and never receives a suffix; otherwise the counter is the highest release counter of the current month plus one. Outside `main`, the sanitized branch name is appended (`202611.1-dev`).
@@ -112,7 +119,7 @@ The Azure clients, LDAP adapters, credential store, dynamic rule provider, opera
 
 `ManagementApiFunction` exposes ten protected HTTP operations for rule management, both latest-run statuses, streamed latest-trace download, queued immediate tagging, queued forced password rotation, and initial AD-credential initialization. `ManagementApiAuthenticationFunction` exposes the non-secret delegated token scope at `GET /api/management/authentication`, the only path excluded from Easy Auth. The HTTP triggers are anonymous at the Functions host layer because App Service Easy Auth authenticates and validates the Entra token first. `ManagementApiAuthorizer` requires one valid AAD `X-MS-CLIENT-PRINCIPAL` header and first evaluates its `roles` claims. For rule and password administration it additionally queries effective Azure RBAC assignments at the Function App scope. Missing authentication returns HTTP `401`; an authenticated principal without an accepted application role or RBAC assignment receives HTTP `403`.
 
-The API app registration defines `HybridDeviceTagger.Reader`, `HybridDeviceTagger.RuleAdministrator`, `HybridDeviceTagger.TaggingOperator`, and `HybridDeviceTagger.PasswordRotationAdministrator`. The retired `HybridDeviceTagger.CertificateAdministrator` role is unassigned, disabled, and deleted by the installer. For a new Function App, the installer creates the single-tenant registration, identifier URI, service principal, and roles automatically after approval; updates reuse an explicitly supplied existing client ID. The installer assigns approved users, groups, or service principals. `appRoleAssignmentRequired` remains disabled so Function App Owners and Contributors can obtain an API token. Effective direct, transitive-group, or inherited `Owner` and `Contributor` assignments grant rule and password administration only. The Function managed identity receives `Reader` on its own Function App to perform this runtime ARM lookup.
+The API app registration defines `HybridDeviceTagger.Reader`, `HybridDeviceTagger.RuleAdministrator`, `HybridDeviceTagger.TaggingOperator`, and `HybridDeviceTagger.PasswordRotationAdministrator`. The retired `HybridDeviceTagger.CertificateAdministrator` role is unassigned, disabled, and deleted by the installer. For a new Function App, the installer creates the single-tenant registration, identifier URI, service principal, and roles automatically after approval; updates reuse an explicitly supplied existing client ID. The installer assigns approved users, groups, or service principals. `appRoleAssignmentRequired` remains disabled so Function App Owners and Contributors can obtain an API token. Effective direct, transitive-group, or inherited `Owner` and `Contributor` assignments grant rule administration, tagging operation, and password administration, but not the Reader role. Only assignments whose scope is the Function App, one of its parents, or a management group count; child-resource scopes are ignored. Rule mutations by callers without Owner/Contributor access may not introduce Entra group or administrative-unit IDs that no stored rule uses yet (`allowNewMembershipTargets`), because the managed identity can manage every group membership in the tenant. The Function managed identity receives `Reader` on its own Function App to perform this runtime ARM lookup.
 
 The two action endpoints do not execute the workflow inside the HTTP request. They return HTTP `409` when `IOperationLock` reports an active run; otherwise they record a `Queued` status, enqueue an `OperationRequest` through `IOperationRequestQueue` into the private Storage queue `device-tagging-requests` or `password-rotation-requests`, and return HTTP `202` with `{ invocationId, state, statusUri }` and the status URI in the `Location` header. `DeviceTaggingRequestFunction` and `PasswordRotationRequestFunction` are queue triggers in the same classes as the timers, so timer and requested runs share orchestration, status persistence, and trace behavior. `host.json` sets `maxDequeueCount` to `1`, so a failed requested run is moved to the poison queue instead of being retried. Forced rotation bypasses only the password-age gate. Credential verification, secure LDAP, next-secret staging, changed-credential validation, and promotion remain mandatory.
 
@@ -120,7 +127,17 @@ The two action endpoints do not execute the workflow inside the HTTP request. Th
 
 `BlobTaggingConfigurationStore` stores `tagging-configuration.json` in the private `run-traces` container. Before its first API mutation, `OptionsTaggingRuleProvider` supplies the validated `Tagging__RulesJson` startup fallback. Mutations normalize and validate the complete result and use Blob ETags. API clients can send the ETag returned by `GET` in `If-Match`; a stale write returns HTTP `409`.
 
-The LDAPS trust anchor is immutable package content. `ActiveDirectoryLdapConnectionFactory` loads the optional DER or PEM file from `ActiveDirectory__TrustedCertificatePath` once at construction; the installer writes it into the Function package from `-ActiveDirectoryTrustedCertificatePath`. Without a configured file, the operating system trust store applies, which supports public CAs. No runtime path can change trust, because a substituted trust anchor would let a principal with Storage or API access impersonate a domain controller and capture the service-account password during the bind. The former Blob-backed trust store and its `trusted-certificates` endpoints were removed; changing the trust anchor requires rerunning the installation. Windows validates through `System.DirectoryServices.Protocols`. Linux LDAPS and StartTLS use `Novell.Directory.Ldap.NETStandard`, whose certificate callback validates the packaged trust anchor or OS trust, DNS name, server-authentication EKU, and online revocation on the same TLS session that carries the bind.
+`BlobTrustedCertificateStore` provides the LDAP trust anchors for every new connection. Until the first management change, it returns the DER or PEM file packaged by the installer from `-ActiveDirectoryTrustedCertificatePath` (`ActiveDirectory__TrustedCertificatePath`); without a packaged file, the operating system trust store applies. The configuration portal adds, replaces, or removes anchors in `run-traces/active-directory-trust-anchors.json` with Blob ETags; the first change copies the packaged certificate. Only public, unexpired, non-duplicate certificates are accepted, at most 20, and the last anchor cannot be removed. Because a substituted anchor would let its author impersonate a domain controller and capture the service-account password, only Function App Owners and Contributors may manage anchors; those principals already control the Function code and settings, and the Storage account is private. `ActiveDirectoryLdapConnectionFactory` validates the DNS name against every subject alternative DNS name, the chain, the server-authentication EKU, and online revocation. A rejected certificate becomes an `ActiveDirectoryLdapException` with result code `-2` and a concrete reason (name mismatch, chain status, revocation failure), and the factory then tries the next domain controller instead of surfacing a raw `AuthenticationException`. Windows validates through `System.DirectoryServices.Protocols`. Linux LDAPS and StartTLS use `Novell.Directory.Ldap.NETStandard`, whose certificate callback runs on the same TLS session that carries the bind.
+
+### Configuration portal and activity log
+
+`PortalFunction` serves the embedded `Portal/index.html`, `app.js`, and `app.css` and the public sign-in settings `config.json` at `/api/portal`. These six static paths are excluded from Easy Auth and carry a strict Content Security Policy (`script-src 'self'`, `connect-src 'self'` plus the Entra sign-in host, `frame-ancestors 'none'`). The page signs in with the authorization code flow and PKCE against the management API app registration (SPA redirect URI `/api/portal`, scope `access_as_user`) and sends the access token to the management API. All server data is rendered through `textContent`.
+
+`PortalApiFunction` exposes `/api/management/portal/*` for the session check, activity query, effective AD configuration, LDAP validation, service-account change, trust-anchor management, and the rule editor's Entra search (`directory/groups`, `directory/administrative-units`, `directory/resolve`). `GraphEntraDirectorySearch` uses the existing `GroupMember.ReadWrite.All` and `AdministrativeUnit.ReadWrite.All` permissions, searches by display-name prefix, and marks dynamic, mail-enabled, or on-premises synchronized groups and dynamic administrative units as not assignable. Every endpoint calls `IManagementApiAuthorizer.AuthorizeFunctionAppAdministratorAsync`, which accepts only effective Owner or Contributor assignments on the Function App and ignores application roles. Lookup results are cached per principal for 60 seconds; the authorizer is therefore a singleton. The portal reuses the existing rule, forest-domain, credential-initialization, rotation, and status endpoints, whose RBAC substitution already admits Owners and Contributors.
+
+`ActiveDirectoryAccountService` changes the service account only after `IActiveDirectoryPasswordClient.ValidateAccessAsync` binds successfully with the new UPN and password. It holds the password-rotation lock, stores the new password as `current`, writes the UPN and optional DN override to `run-traces/active-directory-configuration.json` (preserving the forest domain), restores the previous password if that write fails, and replaces `next` with a placeholder. The configuration blob is read in both its legacy string form and the current object form; `ActiveDirectoryConfigurationSnapshot.GetServiceAccount` falls back to `ActiveDirectory__BindUsername` and `ActiveDirectory__BindUserDistinguishedName` when no override exists. The credential store, initializer, and password client use this effective account.
+
+`LoggerActivityLog` writes activities through the logger category `HybridDeviceTagger.Activity` with the properties `ActivityCategory`, `ActivityAction`, `ActivityOutcome`, `ActivityActor`, `ActivityTarget`, and `ActivityDetails`; OpenTelemetry exports them to `AppTraces` in the Application Insights workspace with Entra authentication (`APPLICATIONINSIGHTS_AUTHENTICATION_STRING=Authorization=AAD`, `Monitoring Metrics Publisher`); local authentication is disabled so the connection string alone cannot forge activity entries. Configuration mutations, queued runs, credential operations, LDAP validation, portal sign-ins, denied requests, completed tagging runs, every changed device (attribute names and membership counts only), and non-trivial rotation outcomes are recorded. Passwords and attribute values are never recorded. `LogAnalyticsActivityLogReader` runs a resource-centric query against `Monitoring__ApplicationInsightsResourceId` with the managed identity, which receives `Monitoring Reader` on the Application Insights component. Filters are allow-listed values only, so user input never reaches the KQL text.
 
 `KeyVaultActiveDirectoryCredentialStore` treats secrets with content type `application/vnd.hybriddevicetagger.placeholder` as absent. The deployment creates such placeholders for missing password secrets in an existing Key Vault so the managed identity can receive `Key Vault Secrets Officer` on those two secrets only. `ActiveDirectoryCredentialInitializer` replaces only a missing secret or a placeholder and rejects initialization when a real password exists.
 
@@ -206,11 +223,11 @@ The new password is stored as the `next` secret before Active Directory is chang
 
 #### `DeviceTaggerFunction`
 
-The timer-trigger entry point for device tagging. Its schedule comes from `%TaggingSchedule%`. It replaces the latest-run trace, delegates all work to `DeviceTaggingService`, records success or structured exception details, and logs the aggregate `TaggingResult`. The class is intentionally thin so scheduling remains independent from business logic. The same class contains `DeviceTaggingRequestFunction`, the queue trigger for `device-tagging-requests`. Both entry points acquire the device-tagging Blob lease before running; a timer run without the lease is skipped with a warning.
+The timer-trigger entry point for device tagging. The timer ticks every five minutes (`0 */5 * * * *`) and runs only when `IOperationScheduleStore` reports that the tagging interval has elapsed since the last recorded start (one minute tolerance for timer jitter). The interval is stored in `run-traces/operation-schedule.json`, edited in the configuration portal, and defaults to `Tagging__IntervalMinutes`. Requested runs bypass the interval. It replaces the latest-run trace, delegates all work to `DeviceTaggingService`, records success or structured exception details, and logs the aggregate `TaggingResult`. The class is intentionally thin so scheduling remains independent from business logic. The same class contains `DeviceTaggingRequestFunction`, the queue trigger for `device-tagging-requests`. Both entry points acquire the device-tagging Blob lease before running; a timer run without the lease is skipped with a warning.
 
 #### `PasswordRotationFunction`
 
-The timer-trigger entry point for password maintenance. Its schedule comes from `%PasswordRotationSchedule%`. It calls `PasswordRotationService` and logs only the outcome and known password age. The same class contains `PasswordRotationRequestFunction`, the queue trigger for `password-rotation-requests` that runs a forced rotation under the password-rotation Blob lease.
+The timer-trigger entry point for password maintenance. It ticks hourly (`0 0 * * * *`); `PasswordRotationService` rotates once the password age reaches the runtime rotation interval from `IOperationScheduleStore` (default `PasswordRotation__RotateAfterDays`, at most 29 days and below `SecretExpiryDays`). It calls `PasswordRotationService` and logs only the outcome and known password age. The same class contains `PasswordRotationRequestFunction`, the queue trigger for `password-rotation-requests` that runs a forced rotation under the password-rotation Blob lease.
 
 ### Orchestration Services
 
@@ -316,6 +333,14 @@ All option classes are bound and validated during host startup. Invalid configur
 
 Holds the primary server, LDAPS port, fallback policy and port, bind username, service-account DN, and LDAP page size. `UseSsl` must remain enabled because credential and password operations require a secure primary channel. When fallback is enabled, its port must differ from the LDAPS port.
 
+The service-account DN is optional when installing without internal AD DNS. Before rotation,
+`LdapActiveDirectoryDeviceSource` resolves it from the UPN across the forest's advertised domains;
+zero or multiple matches fail explicitly. `BlobActiveDirectoryConfigurationStore` stores an
+ETag-protected forest DNS override in `run-traces/active-directory-configuration.json`, using the
+application setting only until the first management write. Forest connections read it on demand,
+without process-local caching. Configuration reads and writes never require LDAP or a credential,
+so administrators can repair the domain before credential initialization.
+
 #### `TaggingOptions`
 
 Holds tagging rules either as a normal configuration collection or as `RulesJson`, which supports deployment systems that cannot represent arrays conveniently. Validation requires at least one rule, a unique non-empty rule name, a description, valid full-DN or OU-only paths, at least one attribute per rule, names from `extensionAttribute1` through `extensionAttribute15`, and non-empty values.
@@ -386,11 +411,13 @@ These tests focus on orchestration and parsing behavior. Live LDAP, Key Vault, G
 
 ## Management REST API
 
-Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unter `/api/management` bereit. App Service Easy Auth lehnt nicht authentifizierte Aufrufe mit HTTP `401` ab. Die Function validiert zusätzlich den Principal Header und antwortet mit HTTP `403`, wenn weder eine für den Endpunkt zugelassene Entra-Anwendungsrolle noch eine zulässige Azure-RBAC-Zuweisung vorhanden ist. **Assignment required** bleibt auf der Enterprise Application deaktiviert, damit Function-App-Owner und -Contributors ein API-Token erhalten können. Direkte, über Sicherheitsgruppen wirksame oder von übergeordneten Scopes geerbte Owner-/Contributor-Zuweisungen gewähren Regel- und Kennwortadministration, jedoch keine Leser- oder Tagging-Operator-Rechte. Es werden keine Function Keys oder Client Secrets benötigt. Nur `GET /api/management/authentication` ist von Easy Auth ausgenommen und liefert den nicht geheimen Token-Scope der Installation.
+Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unter `/api/management` bereit. App Service Easy Auth lehnt nicht authentifizierte Aufrufe mit HTTP `401` ab. Die Function validiert zusätzlich den Principal Header und antwortet mit HTTP `403`, wenn weder eine für den Endpunkt zugelassene Entra-Anwendungsrolle noch eine zulässige Azure-RBAC-Zuweisung vorhanden ist. **Assignment required** bleibt auf der Enterprise Application deaktiviert, damit Function-App-Owner und -Contributors ein API-Token erhalten können. Direkte, über Sicherheitsgruppen wirksame oder von übergeordneten Scopes geerbte Owner-/Contributor-Zuweisungen gewähren Regel- und Kennwortadministration sowie das Starten von Tagging-Läufen, jedoch keine Leserrolle. Es werden keine Function Keys oder Client Secrets benötigt. Nur `GET /api/management/authentication` ist von Easy Auth ausgenommen und liefert den nicht geheimen Token-Scope der Installation.
 
 | Methode und Pfad | Funktion | Erforderliche Rolle |
 | --- | --- | --- |
 | `GET /api/management/authentication` | Deployment-spezifischen Entra-Token-Scope lesen | keine |
+| `GET /api/management/active-directory` | Wirksame Forest-Domäne und Version ohne AD-Verbindung lesen | `Reader`, `RuleAdministrator` oder `PasswordRotationAdministrator` |
+| `PUT /api/management/active-directory` | Forest-Domäne syntaktisch validieren und versioniert speichern | nur wirksame Owner/Contributor der Function App |
 | `GET /api/management/tagging-rules` | Aktuelle Regeln, ETag, Änderungszeit und Quelle lesen | `Reader` oder `RuleAdministrator` |
 | `PUT /api/management/tagging-rules` | Den vollständigen validierten Regelsatz ersetzen | `RuleAdministrator` |
 | `PUT /api/management/tagging-rules/{ruleName}` | Eine vollständige Regel hinzufügen oder case-insensitiv ersetzen | `RuleAdministrator` |
@@ -402,7 +429,7 @@ Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unt
 | `POST /api/management/actions/password-rotation` | Eine sichere, altersunabhängige Rotation des AD-Servicekonto-Kennworts einreihen (HTTP `202`) | `PasswordRotationAdministrator` |
 | `POST /api/management/actions/initialize-ad-credential` | Initiales AD-Servicekonto-Kennwort validieren und über die Managed Identity im Key Vault speichern; ersetzt nur ein fehlendes Secret oder einen Platzhalter | `PasswordRotationAdministrator` |
 
-Die vollständigen Rollenwerte beginnen jeweils mit `HybridDeviceTagger.`, beispielsweise `HybridDeviceTagger.Reader`. Der Installer weist die bisherige Bootstrap-Liste standardmäßig allen vier Rollen zu; für Least Privilege stehen vier rollenbezogene Principal-Parameter zur Verfügung. Sicherheitsgruppen sind für die laufende Administration vorzuziehen. Die frühere Rolle `HybridDeviceTagger.CertificateAdministrator` und die Endpunkte zur Laufzeitverwaltung von LDAPS-Vertrauenszertifikaten wurden entfernt.
+Die vollständigen Rollenwerte beginnen jeweils mit `HybridDeviceTagger.`, beispielsweise `HybridDeviceTagger.Reader`. Ohne explizite Engine-Parameter vergibt der Installer keine Bootstrap-Rollen; Owner-/Contributor-Zuweisungen berechtigen zur Administration. Eine explizite Bootstrap-Liste wird allen vier Rollen zugewiesen; für Least Privilege stehen vier rollenbezogene Principal-Parameter zur Verfügung. Sicherheitsgruppen sind für die laufende Administration vorzuziehen. Die frühere Rolle `HybridDeviceTagger.CertificateAdministrator` und die Endpunkte zur Laufzeitverwaltung von LDAPS-Vertrauenszertifikaten wurden entfernt.
 
 ### API-Rollen nach der Installation verwalten
 
@@ -504,7 +531,7 @@ Get-HybridDeviceTaggerTrace
 
 `Get-HybridDeviceTaggerTrace` zeigt jedes Trace-Ereignis als eine logische Zeile im Format `<Zeit>,<Severity>,<Phase>,<Status>,<Action>,<Details>` an, liefert in der Pipeline aber vollständige `HybridDeviceTagger.TraceEvent`-Objekte. Dadurch funktionieren beispielsweise Zuweisung, `Where-Object`, `Select-Object`, `ConvertTo-Json` und `Export-Csv` ohne Informationsverlust.
 
-Der LDAPS-Vertrauensanker ist ausschließlich das bei der Installation mit `-ActiveDirectoryTrustedCertificatePath` paketierte, unveränderliche Zertifikat; ohne Zertifikat gilt der Zertifikatsspeicher des Betriebssystems. Ein Wechsel erfolgt durch erneutes Ausführen der Installation mit dem neuen Zertifikat.
+Der erste LDAPS-Vertrauensanker ist das bei der Installation mit `-ActiveDirectoryTrustedCertificatePath` paketierte Zertifikat. Owner und Contributor der Function App verwalten weitere Vertrauensanker im Konfigurationsportal unter `/api/portal`; ohne paketiertes oder verwaltetes Zertifikat gilt der Zertifikatsspeicher des Betriebssystems.
 
 Ein Bearer-Token muss als Audience die konfigurierte API-App-ID oder `api://<client-id>` besitzen:
 
@@ -539,24 +566,26 @@ Kennwortänderungen über `unicodePwd` und die anschließende Validierung bleibe
 
 | App Setting | Beschreibung | Vorgabe |
 | --- | --- | --- |
-| `TaggingSchedule` | NCRONTAB-Ausdruck mit Sekundenfeld | `0 */15 * * * *` |
-| `PasswordRotationSchedule` | Tägliche Rotationsprüfung, standardmäßig 02:30 UTC | `0 30 2 * * *` |
+| `Tagging__IntervalMinutes` | Startwert des Tagging-Intervalls in Minuten (5–1440); das Portal kann ihn zur Laufzeit überschreiben | `15` |
 | `ActiveDirectory__Domain` | AD-DNS-Domäne für die SRV-basierte Domain-Controller-Ermittlung | muss angepasst werden |
 | `ActiveDirectory__Port` | LDAP-Port | `636` |
 | `ActiveDirectory__UseSsl` | LDAPS aktivieren | `true` |
 | `ActiveDirectory__AllowLdapFallback` | Bei nicht verfügbarem LDAPS LDAP mit StartTLS erlauben | `true` |
 | `ActiveDirectory__LdapFallbackPort` | Port für LDAP mit StartTLS | `389` |
-| `ActiveDirectory__TrustedCertificatePath` | Optionaler Pfad zu einem privaten Root-CA- oder selbstsignierten Lab-Zertifikat für LDAPS; einziger, unveränderlicher Vertrauensanker | leer (Zertifikatsspeicher des Betriebssystems); Installer paketiert das Zertifikat als PEM |
+| `ActiveDirectory__TrustedCertificatePath` | Pfad zum paketierten Root-CA- oder selbstsignierten Lab-Zertifikat; Startwert der im Portal verwalteten Vertrauensanker | Installer paketiert das Zertifikat als PEM; leer verwendet den Zertifikatsspeicher des Betriebssystems |
 | `ActiveDirectory__BindUsername` | UPN des Servicekontos | `svc-HybridDeviceTagger@bloedgelaber.de` |
-| `ActiveDirectory__BindUserDistinguishedName` | DN des Servicekontos für `unicodePwd` | muss angepasst werden |
+| `ActiveDirectory__BindUserDistinguishedName` | Optionaler DN des Servicekontos für `unicodePwd`; leer ermittelt die Function ihn aus der UPN im Forest | optional |
 | `ActiveDirectory__PageSize` | LDAP-Seitengröße | `500` |
 | `KeyVault__VaultUri` | URI des Key Vaults | muss angepasst werden |
 | `KeyVault__CurrentPasswordSecretName` | Aktuell verwendetes Kennwort | `hybrid-device-tagger-ad-password-current` |
 | `KeyVault__NextPasswordSecretName` | Staging- und Recovery-Kennwort | `hybrid-device-tagger-ad-password-next` |
-| `PasswordRotation__RotateAfterDays` | Alter bei regulärer Rotation | `25` |
+| `PasswordRotation__RotateAfterDays` | Startwert des Kennwortwechsel-Intervalls in Tagen (1–29); das Portal kann ihn zur Laufzeit überschreiben | `25` |
 | `PasswordRotation__PasswordLength` | Länge des generierten Kennworts | `40` |
 | `PasswordRotation__SecretExpiryDays` | Ablauf einer Secret-Version | `35` |
 | `ManagementAuthorization__FunctionAppResourceId` | Azure-Ressourcen-ID der Function App für die Laufzeitprüfung effektiver Owner-/Contributor-Zuweisungen | wird vom Bicep-Deployment gesetzt |
+| `ManagementApi__TenantId` | Entra-Mandant für die Anmeldung am Konfigurationsportal | wird vom Bicep-Deployment gesetzt |
+| `ManagementApi__AuthorityHost` | Entra-Anmeldehost der Cloud-Umgebung | `https://login.microsoftonline.com` |
+| `Monitoring__ApplicationInsightsResourceId` | Application-Insights-Ressource, aus der das Portal das Aktivitätsprotokoll liest; leer deaktiviert die Abfrage | wird vom Bicep-Deployment gesetzt |
 | `Tagging__Rules__<n>__Name` | Eindeutiger, case-insensitiver Regelname für Verwaltung und Logs | erforderlich |
 | `Tagging__Rules__<n>__Description` | Lesbare Beschreibung des Zwecks | erforderlich |
 | `Tagging__Rules__<n>__BaseDn` | OU-only-Pfad für alle Forest-Domains oder vollständiger domainspezifischer DN | erforderlich |

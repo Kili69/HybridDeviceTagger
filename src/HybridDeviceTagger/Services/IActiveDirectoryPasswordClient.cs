@@ -49,4 +49,42 @@ public interface IActiveDirectoryPasswordClient
         StoredDirectoryCredential currentCredential,
         string newPassword,
         CancellationToken cancellationToken);
+
+    /// <summary>Tests a credential and reports every connection attempt with its failure reason.</summary>
+    /// <param name="credential">The credential to test.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The validation result; failures are reported rather than thrown.</returns>
+    Task<ActiveDirectoryAccessValidationResult> ValidateAccessAsync(
+        StoredDirectoryCredential credential,
+        CancellationToken cancellationToken);
+
+    /// <summary>Reads when Active Directory allows the account to change its own password again.</summary>
+    /// <param name="credential">The current credential, used to read the account and its policy.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The change window, or null when it cannot be determined.</returns>
+    Task<PasswordChangeWindow?> GetPasswordChangeWindowAsync(
+        StoredDirectoryCredential credential,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<PasswordChangeWindow?>(null);
 }
+
+/// <summary>Describes when the service account may change its own password.</summary>
+/// <param name="LastSetUtc">When the password was last set.</param>
+/// <param name="MinimumAge">The effective minimum password age.</param>
+/// <param name="PolicySource"><c>fineGrainedPolicy</c> or <c>domain</c>.</param>
+public sealed record PasswordChangeWindow(DateTimeOffset LastSetUtc, TimeSpan MinimumAge, string PolicySource)
+{
+    /// <summary>Gets the earliest time Active Directory accepts a self-service change.</summary>
+    public DateTimeOffset EarliestChangeUtc => LastSetUtc + MinimumAge;
+}
+
+/// <summary>Describes the result of an LDAP access validation without credentials.</summary>
+/// <param name="Succeeded">Whether a TLS-protected bind succeeded.</param>
+/// <param name="InvalidCredentials">Whether Active Directory rejected the user name or password.</param>
+/// <param name="Error">The final failure reason, or null after success.</param>
+/// <param name="Attempts">Every connection attempt in order.</param>
+public sealed record ActiveDirectoryAccessValidationResult(
+    bool Succeeded,
+    bool InvalidCredentials,
+    string? Error,
+    IReadOnlyList<ActiveDirectoryLdapConnectionAttempt> Attempts);

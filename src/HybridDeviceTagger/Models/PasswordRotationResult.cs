@@ -29,12 +29,16 @@ public enum PasswordRotationOutcome
     /// <summary>The staged password worked and was promoted after the active credential failed.</summary>
     RecoveredFromNext,
     /// <summary>Rotation was due but deferred because no secure LDAP channel was available.</summary>
-    DeferredNoSecureConnection
+    DeferredNoSecureConnection,
+    /// <summary>Rotation was requested or due but the domain's minimum password age has not elapsed yet.</summary>
+    DeferredMinimumPasswordAge
 }
 
 /// <summary>Describes the outcome of a password rotation check.</summary>
 /// <param name="Outcome">The action performed.</param>
 /// <param name="CurrentPasswordAgeDays">The known age of the active password, if available.</param>
+/// <param name="EarliestChangeUtc">When Active Directory allows the next change, for a minimum-age deferral.</param>
 public sealed record PasswordRotationResult(
     PasswordRotationOutcome Outcome,
-    int? CurrentPasswordAgeDays);
+    int? CurrentPasswordAgeDays,
+    DateTimeOffset? EarliestChangeUtc = null);

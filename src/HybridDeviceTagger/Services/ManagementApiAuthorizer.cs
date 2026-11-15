@@ -38,12 +38,21 @@ public interface IManagementApiAuthorizer
         HttpRequest request,
         IReadOnlyCollection<string> requiredRoles,
         CancellationToken cancellationToken);
+
+    /// <summary>Determines whether the request principal holds Owner or Contributor on the Function App.</summary>
+    /// <remarks>Application roles are deliberately not accepted; this protects the configuration portal.</remarks>
+    /// <param name="request">The HTTP request carrying the App Service Easy Auth principal header.</param>
+    /// <param name="cancellationToken">Cancels the Azure RBAC lookup.</param>
+    /// <returns>The authorization outcome for the request principal.</returns>
+    Task<EasyAuthAuthorizationResult> AuthorizeFunctionAppAdministratorAsync(
+        HttpRequest request,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>Combines management API application roles with Function App Owner and Contributor RBAC.</summary>
 /// <remarks>
 /// Application roles are evaluated first. Only when an authenticated principal lacks them and the
-/// endpoint requires an administrative role (rule or password-rotation administration) does the
+/// endpoint requires an administrative role (rule administration, tagging operation, or password-rotation administration) does the
 /// authorizer query Azure RBAC with the Function App managed identity. Owner or Contributor
 /// assignments that apply to the Function App, including inherited ones, then grant access.
 /// </remarks>
@@ -62,6 +71,7 @@ public sealed class ManagementApiAuthorizer : IManagementApiAuthorizer
     private static readonly HashSet<string> RbacAdministrativeRoles =
     [
         ManagementApiRoles.RuleAdministrator,
+        ManagementApiRoles.TaggingOperator,
         ManagementApiRoles.PasswordRotationAdministrator
     ];
 
@@ -76,6 +86,12 @@ public sealed class ManagementApiAuthorizer : IManagementApiAuthorizer
     /// <summary>Web JSON defaults used to read Azure Resource Manager responses.</summary>
     private static readonly JsonSerializerOptions SerializerOptions =
         new(JsonSerializerDefaults.Web);
+
+    /// <summary>How long an Owner/Contributor lookup result is reused.</summary>
+    private static readonly TimeSpan RbacCacheDuration = TimeSpan.FromSeconds(60);
+
+    /// <summary>Recent Owner/Contributor lookup results per principal object ID.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, (bool Allowed, DateTimeOffset ExpiresUtc)> _rbacCache = new();
 
     /// <summary>Sends Azure Resource Manager role-assignment requests.</summary>
     private readonly HttpClient _httpClient;
@@ -125,6 +141,49 @@ public sealed class ManagementApiAuthorizer : IManagementApiAuthorizer
             : EasyAuthAuthorizationResult.Forbidden;
     }
 
+    /// <inheritdoc />
+    public async Task<EasyAuthAuthorizationResult> AuthorizeFunctionAppAdministratorAsync(
+        HttpRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!EasyAuthPrincipalValidator.IsAuthenticated(request))
+        {
+            return EasyAuthAuthorizationResult.Unauthenticated;
+        }
+        if (!EasyAuthPrincipalValidator.TryGetObjectId(request, out var objectId))
+        {
+            return EasyAuthAuthorizationResult.Forbidden;
+        }
+
+        return await HasFunctionAppOwnerOrContributorRoleAsync(objectId, cancellationToken)
+            ? EasyAuthAuthorizationResult.Authorized
+            : EasyAuthAuthorizationResult.Forbidden;
+    }
+
+    /// <summary>Checks Owner or Contributor on the Function App, caching results briefly.</summary>
+    /// <remarks>
+    /// The configuration portal issues several requests per view. Caching each principal's result
+    /// for <see cref="RbacCacheDuration"/> avoids repeated Azure Resource Manager lookups while
+    /// still applying granted or revoked role assignments shortly afterwards.
+    /// </remarks>
+    /// <param name="objectId">The Microsoft Entra object ID of the principal.</param>
+    /// <param name="cancellationToken">Cancels the lookup.</param>
+    /// <returns><see langword="true"/> when an accepted role assignment exists.</returns>
+    private async Task<bool> HasFunctionAppOwnerOrContributorRoleAsync(
+        Guid objectId,
+        CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_rbacCache.TryGetValue(objectId, out var cached) && cached.ExpiresUtc > now)
+        {
+            return cached.Allowed;
+        }
+
+        var allowed = await QueryFunctionAppOwnerOrContributorRoleAsync(objectId, cancellationToken);
+        _rbacCache[objectId] = (allowed, now.Add(RbacCacheDuration));
+        return allowed;
+    }
+
     /// <summary>Checks whether a principal holds Owner or Contributor on the Function App.</summary>
     /// <remarks>
     /// Uses the <c>assignedTo</c> filter, which includes group-based and inherited assignments,
@@ -135,7 +194,7 @@ public sealed class ManagementApiAuthorizer : IManagementApiAuthorizer
     /// <returns><see langword="true"/> when an accepted role assignment exists.</returns>
     /// <exception cref="HttpRequestException">Azure Resource Manager returned an unsuccessful status code.</exception>
     /// <exception cref="JsonException">Azure Resource Manager returned an empty or invalid response.</exception>
-    private async Task<bool> HasFunctionAppOwnerOrContributorRoleAsync(
+    private async Task<bool> QueryFunctionAppOwnerOrContributorRoleAsync(
         Guid objectId,
         CancellationToken cancellationToken)
     {
@@ -167,7 +226,8 @@ public sealed class ManagementApiAuthorizer : IManagementApiAuthorizer
 
             if (page.Value.Any(assignment =>
                     TryGetRoleDefinitionId(assignment.Properties.RoleDefinitionId, out var roleId) &&
-                    AcceptedRoleDefinitionIds.Contains(roleId)))
+                    AcceptedRoleDefinitionIds.Contains(roleId) &&
+                    AppliesToFunctionApp(assignment.Properties.Scope)))
             {
                 return true;
             }
@@ -176,6 +236,27 @@ public sealed class ManagementApiAuthorizer : IManagementApiAuthorizer
         }
 
         return false;
+    }
+
+    /// <summary>Returns whether an assignment scope is the Function App or one of its parents.</summary>
+    /// <remarks>
+    /// Assignments on child resources of the Function App must not grant access to the app itself.
+    /// Management-group scopes are parents of every subscription and are accepted.
+    /// </remarks>
+    /// <param name="scope">The assignment scope.</param>
+    /// <returns><see langword="true"/> when the assignment covers the Function App.</returns>
+    internal bool AppliesToFunctionApp(string? scope)
+    {
+        if (string.IsNullOrWhiteSpace(scope))
+        {
+            return false;
+        }
+
+        var normalized = scope.TrimEnd('/');
+        return normalized.Length == 0 ||
+            string.Equals(normalized, _functionAppResourceId, StringComparison.OrdinalIgnoreCase) ||
+            _functionAppResourceId.StartsWith(normalized + "/", StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith("/providers/Microsoft.Management/managementGroups/", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Extracts the GUID from a fully qualified role definition resource ID.</summary>
@@ -204,5 +285,6 @@ public sealed class ManagementApiAuthorizer : IManagementApiAuthorizer
 
     /// <summary>Represents the role assignment properties used for authorization.</summary>
     /// <param name="RoleDefinitionId">The fully qualified role definition resource ID.</param>
-    private sealed record RoleAssignmentProperties(string RoleDefinitionId);
+    /// <param name="Scope">The scope at which the role is assigned.</param>
+    private sealed record RoleAssignmentProperties(string RoleDefinitionId, string? Scope);
 }

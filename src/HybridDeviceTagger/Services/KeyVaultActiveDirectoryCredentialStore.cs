@@ -37,8 +37,11 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
     /// <summary>The Key Vault client authenticated with the Function App's managed identity.</summary>
     private readonly SecretClient _secretClient;
 
-    /// <summary>Supplies the bind user name combined with each stored password.</summary>
+    /// <summary>Supplies the initial bind user name when no override is stored.</summary>
     private readonly ActiveDirectoryOptions _activeDirectoryOptions;
+
+    /// <summary>Supplies the current service-account override combined with each stored password.</summary>
+    private readonly IActiveDirectoryConfigurationStore _configurationStore;
 
     /// <summary>Supplies the names of the current and next password secrets.</summary>
     private readonly KeyVaultOptions _keyVaultOptions;
@@ -55,15 +58,18 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
     /// <param name="keyVaultOptions">The secret-name settings.</param>
     /// <param name="rotationOptions">The staged-secret lifetime settings.</param>
     /// <param name="timeProvider">The UTC time source.</param>
+    /// <param name="configurationStore">The service-account override store.</param>
     public KeyVaultActiveDirectoryCredentialStore(
         SecretClient secretClient,
         IOptions<ActiveDirectoryOptions> activeDirectoryOptions,
         IOptions<KeyVaultOptions> keyVaultOptions,
         IOptions<PasswordRotationOptions> rotationOptions,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        IActiveDirectoryConfigurationStore configurationStore)
     {
         _secretClient = secretClient;
         _activeDirectoryOptions = activeDirectoryOptions.Value;
+        _configurationStore = configurationStore;
         _keyVaultOptions = keyVaultOptions.Value;
         _rotationOptions = rotationOptions.Value;
         _timeProvider = timeProvider;
@@ -112,7 +118,7 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
                 "The Active Directory credential has not been initialized. Initialize it through the management API.");
         }
 
-        return ToCredential(response.Value);
+        return await ToCredentialAsync(response.Value, cancellationToken);
     }
 
     /// <inheritdoc />
@@ -124,7 +130,7 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
             var response = await _secretClient.GetSecretAsync(
                 _keyVaultOptions.NextPasswordSecretName,
                 cancellationToken: cancellationToken);
-            return IsPlaceholder(response.Value) ? null : ToCredential(response.Value);
+            return IsPlaceholder(response.Value) ? null : await ToCredentialAsync(response.Value, cancellationToken);
         }
         catch (RequestFailedException exception) when (exception.Status == 404)
         {
@@ -150,6 +156,26 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
             cancellationToken);
     }
 
+    /// <inheritdoc />
+    public Task<StoredDirectoryCredential> ReplaceCurrentAsync(
+        string password,
+        CancellationToken cancellationToken) =>
+        SetSecretAsync(_keyVaultOptions.CurrentPasswordSecretName, password, cancellationToken);
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Writes a new placeholder version so recovery cannot promote a password that belonged to a
+    /// previous service account.
+    /// </remarks>
+    public async Task ClearNextAsync(CancellationToken cancellationToken)
+    {
+        var placeholder = new KeyVaultSecret(
+            _keyVaultOptions.NextPasswordSecretName,
+            Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)));
+        placeholder.Properties.ContentType = PlaceholderContentType;
+        await _secretClient.SetSecretAsync(placeholder, cancellationToken);
+    }
+
     /// <summary>Creates a new secret version with the configured recovery lifetime.</summary>
     /// <remarks>
     /// The same operation is used to stage <c>next</c> and to promote a validated password to
@@ -168,7 +194,7 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
         secret.Properties.ExpiresOn = _timeProvider.GetUtcNow()
             .AddDays(_rotationOptions.SecretExpiryDays);
         var response = await _secretClient.SetSecretAsync(secret, cancellationToken);
-        return ToCredential(response.Value);
+        return await ToCredentialAsync(response.Value, cancellationToken);
     }
 
     /// <summary>Returns whether a secret is an unusable deployment placeholder.</summary>
@@ -177,12 +203,18 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
     internal static bool IsPlaceholder(KeyVaultSecret secret) =>
         string.Equals(secret.Properties.ContentType, PlaceholderContentType, StringComparison.Ordinal);
 
-    /// <summary>Combines a secret password and creation timestamp with the configured bind user.</summary>
+    /// <summary>Combines a secret password and creation timestamp with the effective bind user.</summary>
     /// <param name="secret">The Key Vault secret.</param>
+    /// <param name="cancellationToken">Cancels reading the service-account override.</param>
     /// <returns>The directory credential.</returns>
-    private StoredDirectoryCredential ToCredential(KeyVaultSecret secret) =>
-        new(
-            _activeDirectoryOptions.BindUsername,
+    private async Task<StoredDirectoryCredential> ToCredentialAsync(
+        KeyVaultSecret secret,
+        CancellationToken cancellationToken)
+    {
+        var configuration = await _configurationStore.GetAsync(cancellationToken);
+        return new(
+            configuration.GetServiceAccount(_activeDirectoryOptions).Username,
             secret.Value,
             secret.Properties.CreatedOn);
+    }
 }

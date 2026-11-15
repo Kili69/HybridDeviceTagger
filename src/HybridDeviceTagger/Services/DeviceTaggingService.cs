@@ -46,6 +46,9 @@ public sealed class DeviceTaggingService
     /// <summary>The structured logger; attribute values are never logged.</summary>
     private readonly ILogger<DeviceTaggingService> _logger;
 
+    /// <summary>Records changed devices in the activity log without attribute values.</summary>
+    private readonly IActivityLog _activityLog;
+
     /// <summary>Initializes a new instance of the <see cref="DeviceTaggingService"/> class.</summary>
     /// <param name="directoryDeviceSource">The Active Directory device source.</param>
     /// <param name="entraDeviceClient">The Microsoft Entra device client.</param>
@@ -53,14 +56,17 @@ public sealed class DeviceTaggingService
     /// <param name="ledger">The managed Entra state ledger.</param>
     /// <param name="ruleProvider">The current OU tagging-rule provider.</param>
     /// <param name="logger">The structured logger.</param>
+    /// <param name="activityLog">The optional activity log; changes are not audited when omitted.</param>
     public DeviceTaggingService(
         IActiveDirectoryDeviceSource directoryDeviceSource,
         IEntraDeviceClient entraDeviceClient,
         DeviceMembershipReconciliationService membershipService,
         IDeviceMembershipLedger ledger,
         ITaggingRuleProvider ruleProvider,
-        ILogger<DeviceTaggingService> logger)
+        ILogger<DeviceTaggingService> logger,
+        IActivityLog? activityLog = null)
     {
+        _activityLog = activityLog ?? NullActivityLog.Instance;
         _directoryDeviceSource = directoryDeviceSource;
         _entraDeviceClient = entraDeviceClient;
         _membershipService = membershipService;
@@ -123,6 +129,7 @@ public sealed class DeviceTaggingService
         var membershipsAdded = 0;
         var membershipsRemoved = 0;
         var removedFromScope = 0;
+        var changedDeviceNames = new List<string>();
         var managedDevices = new Dictionary<Guid, ManagedDeviceMemberships>(
             await _ledger.GetAllAsync(cancellationToken));
         await trace.WriteAsync(
@@ -323,6 +330,17 @@ public sealed class DeviceTaggingService
             if (changedAttributes.Count > 0 || membershipResult.Changed)
             {
                 updated++;
+                var entraName = entraDevice.DisplayName ?? directoryDevice.Name;
+                changedDeviceNames.Add(entraName);
+                _activityLog.Record(new ActivityEntry(
+                    ActivityCategories.Tagging,
+                    "DeviceUpdated",
+                    ActivityOutcomes.Succeeded,
+                    "System",
+                    $"{entraName} (Entra object {entraDevice.Id}, device ID {directoryDevice.DeviceId})",
+                    $"Set: {JoinNames(changedAttributes.Where(attribute => attribute.Value is not null).Select(attribute => attribute.Key))}; " +
+                    $"cleared: {JoinNames(changedAttributes.Where(attribute => attribute.Value is null).Select(attribute => attribute.Key))}; " +
+                    $"memberships added: {membershipResult.Added}, removed: {membershipResult.Removed}"));
             }
             else
             {
@@ -410,6 +428,15 @@ public sealed class DeviceTaggingService
             if (attributesToClear.Count > 0 || membershipResult.Changed)
             {
                 updated++;
+                var entraName = entraDevice.DisplayName ?? deviceId.ToString();
+                changedDeviceNames.Add(entraName);
+                _activityLog.Record(new ActivityEntry(
+                    ActivityCategories.Tagging,
+                    "DeviceRemovedFromScope",
+                    ActivityOutcomes.Succeeded,
+                    "System",
+                    $"{entraName} (Entra object {entraDevice.Id}, device ID {deviceId})",
+                    $"Cleared: {JoinNames(attributesToClear.Keys)}; memberships removed: {membershipResult.Removed}"));
             }
 
             _logger.LogInformation(
@@ -425,7 +452,8 @@ public sealed class DeviceTaggingService
             notHybridJoined,
             membershipsAdded,
             membershipsRemoved,
-            removedFromScope);
+            removedFromScope,
+            changedDeviceNames);
     }
 
     /// <summary>Builds one deduplicated, conflict-free attribute assignment per device.</summary>
@@ -523,6 +551,15 @@ public sealed class DeviceTaggingService
         }
 
         return assignments;
+    }
+
+    /// <summary>Joins attribute names for the activity log, or returns <c>none</c>.</summary>
+    /// <param name="names">The attribute names.</param>
+    /// <returns>The sorted, comma-separated names.</returns>
+    private static string JoinNames(IEnumerable<string> names)
+    {
+        var sorted = names.Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        return sorted.Length == 0 ? "none" : string.Join(", ", sorted);
     }
 
     /// <summary>Builds the common structured trace details for one device.</summary>

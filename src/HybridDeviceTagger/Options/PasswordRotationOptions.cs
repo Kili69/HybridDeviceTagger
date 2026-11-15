@@ -27,8 +27,12 @@ public sealed class PasswordRotationOptions : IValidatableObject
     /// <summary>Gets the configuration section name.</summary>
     public const string SectionName = "PasswordRotation";
 
-    /// <summary>Gets the password age in days at which rotation is due.</summary>
-    [Range(1, 29)]
+    /// <summary>The longest supported rotation interval in days.</summary>
+    public const int MaximumRotateAfterDays = 29;
+
+    /// <summary>Gets the initial password age in days at which rotation is due.</summary>
+    /// <remarks>The configuration portal can override this value at runtime.</remarks>
+    [Range(1, MaximumRotateAfterDays)]
     public int RotateAfterDays { get; init; } = 25;
 
     /// <summary>Gets the generated password length.</summary>

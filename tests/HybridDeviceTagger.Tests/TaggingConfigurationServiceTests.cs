@@ -118,11 +118,55 @@ public sealed class TaggingConfigurationServiceTests
         IActiveDirectoryRuleValidator? validator = null) =>
         new(store, validator ?? new RecordingRuleValidator());
 
-    private static TaggingRuleOptions CreateRule(string name, string value) => new()
+    [Fact]
+    public async Task UpsertAsync_RejectsNewMembershipTargetsWithoutPermission()
+    {
+        var approvedGroup = Guid.NewGuid();
+        var store = new InMemoryTaggingConfigurationStore(
+            [CreateRule("Servers", "Old", groupIds: [approvedGroup])]);
+        var service = CreateService(store);
+        var newGroup = Guid.NewGuid();
+
+        var exception = await Assert.ThrowsAsync<TaggingConfigurationValidationException>(() =>
+            service.UpsertAsync(
+                CreateRule("Clients", "New", groupIds: [approvedGroup, newGroup]),
+                CancellationToken.None,
+                allowNewMembershipTargets: false));
+
+        Assert.Contains(exception.Errors, error => error.Contains(newGroup.ToString(), StringComparison.Ordinal));
+        Assert.Equal(0, store.WriteCount);
+    }
+
+    [Fact]
+    public async Task UpsertAsync_AllowsApprovedTargetsWithoutPermissionAndNewTargetsWithPermission()
+    {
+        var approvedGroup = Guid.NewGuid();
+        var store = new InMemoryTaggingConfigurationStore(
+            [CreateRule("Servers", "Old", groupIds: [approvedGroup])]);
+        var service = CreateService(store);
+
+        await service.UpsertAsync(
+            CreateRule("Servers", "New", groupIds: [approvedGroup]),
+            CancellationToken.None,
+            allowNewMembershipTargets: false);
+        var result = await service.UpsertAsync(
+            CreateRule("Clients", "New", administrativeUnitIds: [Guid.NewGuid()]),
+            CancellationToken.None);
+
+        Assert.Equal(2, result.Rules.Count);
+    }
+
+    private static TaggingRuleOptions CreateRule(
+        string name,
+        string value,
+        List<Guid>? groupIds = null,
+        List<Guid>? administrativeUnitIds = null) => new()
     {
         Name = name,
         Description = "Test rule",
         BaseDn = "OU=Servers,DC=example,DC=com",
+        EntraGroupIds = groupIds ?? [],
+        AdministrativeUnitIds = administrativeUnitIds ?? [],
         ExtensionAttributes = new Dictionary<string, string>
         {
             ["extensionAttribute1"] = value

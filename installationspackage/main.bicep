@@ -86,8 +86,8 @@ param activeDirectoryTrustedCertificatePath string = ''
 @description('UPN or DOMAIN\\user name used to bind to Active Directory.')
 param activeDirectoryBindUsername string
 
-@description('Distinguished name of the Active Directory service account whose password is rotated.')
-param activeDirectoryBindUserDistinguishedName string
+@description('Optional service-account distinguished name. When empty, the Function resolves it from the configured UPN in the forest.')
+param activeDirectoryBindUserDistinguishedName string = ''
 
 @description('Application (client) ID of the single-tenant Entra app registration protecting the management API.')
 @minLength(36)
@@ -100,11 +100,15 @@ param currentPasswordSecretName string = 'hybrid-device-tagger-ad-password-curre
 @description('Staged Active Directory password secret name.')
 param nextPasswordSecretName string = 'hybrid-device-tagger-ad-password-next'
 
-@description('Timer schedule for device tagging.')
-param taggingSchedule string = '0 */15 * * * *'
+@description('Initial minutes between scheduled tagging runs; the configuration portal can change it at runtime.')
+@minValue(5)
+@maxValue(1440)
+param taggingIntervalMinutes int = 15
 
-@description('Timer schedule for password rotation checks.')
-param rotationSchedule string = '0 30 2 * * *'
+@description('Initial password age in days at which the service-account password is changed; the configuration portal can change it at runtime.')
+@minValue(1)
+@maxValue(29)
+param passwordRotationDays int = 25
 
 @description('Maximum FC1 instance count per function scale group. Runs are additionally serialized by Blob leases.')
 @minValue(1)
@@ -175,6 +179,19 @@ var storageBlobDataContributorRoleDefinitionId = subscriptionResourceId('Microso
 var storageQueueDataContributorRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
 @description('Reader role definition.')
 var readerRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')
+@description('Monitoring Metrics Publisher role definition ID used for Entra-authenticated telemetry ingestion.')
+var monitoringMetricsPublisherRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4e42-8a64-420c390055eb')
+@description('Monitoring Reader role definition ID used to query the activity log.')
+var monitoringReaderRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '43d0d8ad-25c7-4714-9337-8ba259a9fe05')
+@description('Static configuration-portal paths that load before sign-in; they contain no data.')
+var portalAnonymousPaths = [
+  '/api/portal'
+  '/api/portal/'
+  '/api/portal/index.html'
+  '/api/portal/app.js'
+  '/api/portal/app.css'
+  '/api/portal/config.json'
+]
 
 @description('Existing virtual network, which is referenced but not modified.')
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' existing = {
@@ -489,7 +506,7 @@ resource servicePlan 'Microsoft.Web/serverfarms@2024-04-01' = {
   }
 }
 
-@description('Log Analytics workspace with 30-day retention for Application Insights data.')
+@description('Log Analytics workspace with 30-day retention for Application Insights telemetry and the HybridDeviceTagger activity log.')
 resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: logAnalyticsWorkspaceName
   location: location
@@ -516,6 +533,7 @@ resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
   properties: {
     Application_Type: 'web'
     DisableIpMasking: false
+    DisableLocalAuth: true
     IngestionMode: 'LogAnalytics'
     Request_Source: 'rest'
     RetentionInDays: 30
@@ -563,6 +581,10 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           value: applicationInsights.properties.ConnectionString
         }
         {
+          name: 'APPLICATIONINSIGHTS_AUTHENTICATION_STRING'
+          value: 'Authorization=AAD'
+        }
+        {
           name: 'AzureWebJobsStorage__accountName'
           value: storageAccount.name
         }
@@ -571,12 +593,8 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           value: '~4'
         }
         {
-          name: 'TaggingSchedule'
-          value: taggingSchedule
-        }
-        {
-          name: 'PasswordRotationSchedule'
-          value: rotationSchedule
+          name: 'Tagging__IntervalMinutes'
+          value: string(taggingIntervalMinutes)
         }
         {
           name: 'ActiveDirectory__Domain'
@@ -638,7 +656,7 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         }
         {
           name: 'PasswordRotation__RotateAfterDays'
-          value: '25'
+          value: string(passwordRotationDays)
         }
         {
           name: 'PasswordRotation__PasswordLength'
@@ -657,6 +675,18 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           value: resourceId('Microsoft.Web/sites', functionAppName)
         }
         {
+          name: 'ManagementApi__TenantId'
+          value: tenant().tenantId
+        }
+        {
+          name: 'ManagementApi__AuthorityHost'
+          value: environment().authentication.loginEndpoint
+        }
+        {
+          name: 'Monitoring__ApplicationInsightsResourceId'
+          value: applicationInsights.id
+        }
+        {
           name: 'Tagging__RulesJson'
           value: '[]'
         }
@@ -673,15 +703,15 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
   }
 }
 
-@description('App Service Authentication that requires Entra tokens for the management API audience on all paths except /api/management/authentication and returns HTTP 401 for unauthenticated requests.')
+@description('App Service Authentication that requires Entra tokens for the management API audience on all paths except /api/management/authentication and the static configuration-portal files, and returns HTTP 401 for unauthenticated requests.')
 resource functionAppAuthentication 'Microsoft.Web/sites/config@2022-09-01' = {
   name: 'authsettingsV2'
   parent: functionApp
   properties: {
     globalValidation: {
-      excludedPaths: [
+      excludedPaths: concat([
         '/api/management/authentication'
-      ]
+      ], portalAnonymousPaths)
       requireAuthentication: true
       unauthenticatedClientAction: 'Return401'
     }
@@ -737,6 +767,28 @@ resource storageQueueRoleAssignment 'Microsoft.Authorization/roleAssignments@202
   }
 }
 
+@description('Monitoring Metrics Publisher role of the Function identity on Application Insights; local authentication is disabled, so only Entra-authenticated telemetry, including the activity log, is accepted.')
+resource applicationInsightsMetricsPublisherRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(applicationInsights.id, functionApp.id, monitoringMetricsPublisherRoleDefinitionId)
+  scope: applicationInsights
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: monitoringMetricsPublisherRoleDefinitionId
+  }
+}
+
+@description('Monitoring Reader role of the Function identity on Application Insights, used by the configuration portal to query the activity log.')
+resource applicationInsightsMonitoringReaderRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(applicationInsights.id, functionApp.id, monitoringReaderRoleDefinitionId)
+  scope: applicationInsights
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: monitoringReaderRoleDefinitionId
+  }
+}
+
 @description('Reader role of the Function identity on its own Function App, used to evaluate management API authorization against Function App role assignments.')
 resource functionAppReaderRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(functionApp.id, readerRoleDefinitionId)
@@ -782,6 +834,9 @@ module newKeyVaultRoleAssignment 'key-vault-role-assignment.bicep' = if (createK
 
 @description('Name of the deployed Function App.')
 output functionAppName string = functionApp.name
+
+@description('URL of the configuration portal for Function App Owners and Contributors.')
+output configurationPortalUrl string = 'https://${functionApp.properties.defaultHostName}/api/portal'
 @description('Object ID of the Function App system-assigned managed identity.')
 output functionAppPrincipalId string = functionApp.identity.principalId
 @description('Resource ID of the deployed Function App.')

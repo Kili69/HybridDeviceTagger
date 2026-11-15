@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<!--
+  Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
+  Copyright 2026 Andreas Lucas
+  Licensed under the Apache License, Version 2.0. SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>HybridDeviceTagger</title>
+  <link rel="stylesheet" href="/api/portal/app.css">
+  <script src="/api/portal/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1 data-i18n="title">HybridDeviceTagger</h1>
+    <div class="topbar-actions">
+      <span id="user" class="user"></span>
+      <label class="lang">
+        <span data-i18n="language">Sprache</span>
+        <select id="language">
+          <option value="de">Deutsch</option>
+          <option value="en">English</option>
+        </select>
+      </label>
+      <button id="signOut" type="button" class="secondary" data-i18n="signOut" hidden>Abmelden</button>
+    </div>
+  </header>
+
+  <div id="status" class="banner" role="status" hidden></div>
+
+  <main id="app" hidden>
+    <nav class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="activity" data-i18n="tabActivity" class="active">Aktivitäten</button>
+      <button type="button" role="tab" data-tab="rules" data-i18n="tabRules">Regeln</button>
+      <button type="button" role="tab" data-tab="ldap" data-i18n="tabLdap">LDAP</button>
+      <button type="button" role="tab" data-tab="certificates" data-i18n="tabCertificates">Zertifikate</button>
+      <button type="button" role="tab" data-tab="schedule" data-i18n="tabSchedule">Zeitpläne</button>
+    </nav>
+
+    <section id="tab-activity" class="tab">
+      <div class="toolbar">
+        <label><span data-i18n="timeRange">Zeitraum</span>
+          <select id="activityHours">
+            <option value="1" data-i18n="hour1">1 Stunde</option>
+            <option value="24" selected data-i18n="hours24">24 Stunden</option>
+            <option value="168" data-i18n="days7">7 Tage</option>
+            <option value="720" data-i18n="days30">30 Tage</option>
+          </select>
+        </label>
+        <label><span data-i18n="category">Kategorie</span>
+          <select id="activityCategory">
+            <option value="" data-i18n="all">Alle</option>
+            <option value="Configuration" data-i18n="catConfiguration">Konfiguration</option>
+            <option value="Tagging" data-i18n="catTagging">Tagging</option>
+            <option value="Password" data-i18n="catPassword">Kennwort/LDAP</option>
+            <option value="Access" data-i18n="catAccess">Zugriff</option>
+          </select>
+        </label>
+        <label><span data-i18n="outcome">Ergebnis</span>
+          <select id="activityOutcome">
+            <option value="" data-i18n="all">Alle</option>
+            <option value="Succeeded" data-i18n="outSucceeded">Erfolgreich</option>
+            <option value="Failed" data-i18n="outFailed">Fehlgeschlagen</option>
+            <option value="Denied" data-i18n="outDenied">Verweigert</option>
+          </select>
+        </label>
+        <label><span data-i18n="filter">Filter</span>
+          <input id="activityFilter" type="search" autocomplete="off">
+        </label>
+        <button id="activityRefresh" type="button" data-i18n="refresh">Aktualisieren</button>
+      </div>
+      <p class="hint"><span data-i18n="activityDelay">Neue Einträge erscheinen nach wenigen Minuten (Log-Analytics-Verzögerung).</span> <span id="activityUpdated"></span></p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th data-i18n="colTime">Zeit</th><th data-i18n="category">Kategorie</th><th data-i18n="colAction">Aktion</th>
+            <th data-i18n="outcome">Ergebnis</th><th data-i18n="colActor">Ausgeführt von</th><th data-i18n="colTarget">Ziel</th>
+            <th data-i18n="colDetails">Details</th>
+          </tr></thead>
+          <tbody id="activityRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-rules" class="tab" hidden>
+      <div class="toolbar">
+        <button id="ruleAdd" type="button" data-i18n="ruleAdd">Regel hinzufügen</button>
+        <button id="rulesRefresh" type="button" class="secondary" data-i18n="refresh">Aktualisieren</button>
+        <button id="runTagging" type="button" class="secondary" data-i18n="runTagging">Tagging jetzt ausführen</button>
+        <span id="taggingStatus" class="hint"></span>
+      </div>
+      <p id="rulesSource" class="hint"></p>
+      <div class="rules-layout">
+        <div class="table-wrap">
+          <table class="selectable">
+            <thead><tr>
+              <th data-i18n="colName">Name</th><th data-i18n="colBaseDn">Base DN</th><th data-i18n="colAttributes">Attribute</th>
+            </tr></thead>
+            <tbody id="ruleRows"></tbody>
+          </table>
+        </div>
+        <div id="ruleDetail" class="card" hidden>
+          <h2 id="ruleDetailName"></h2>
+          <dl class="details">
+            <dt data-i18n="colDescription">Beschreibung</dt><dd id="ruleDetailDescription" class="multiline"></dd>
+            <dt data-i18n="colBaseDn">Base DN</dt><dd id="ruleDetailBaseDn" class="mono"></dd>
+            <dt data-i18n="colAttributes">Attribute</dt><dd><ul id="ruleDetailAttributes" class="plain"></ul></dd>
+            <dt data-i18n="colGroups">Gruppen</dt><dd><ul id="ruleDetailGroups" class="plain"></ul></dd>
+            <dt data-i18n="colAdminUnits">Verwaltungseinheiten</dt><dd><ul id="ruleDetailUnits" class="plain"></ul></dd>
+          </dl>
+          <div class="actions">
+            <button id="ruleEdit" type="button" data-i18n="edit">Bearbeiten</button>
+            <button id="ruleDelete" type="button" class="danger" data-i18n="remove">Löschen</button>
+          </div>
+        </div>
+      </div>
+
+      <form id="ruleForm" class="card" hidden>
+        <h2 id="ruleFormTitle" data-i18n="ruleAdd">Regel hinzufügen</h2>
+        <label><span data-i18n="colName">Name</span><input id="ruleName" required maxlength="128" autocomplete="off"></label>
+        <label><span data-i18n="colDescription">Beschreibung</span><textarea id="ruleDescription" required maxlength="1024" rows="4"></textarea></label>
+        <label><span data-i18n="colBaseDn">Base DN</span><input id="ruleBaseDn" required maxlength="1024" autocomplete="off" placeholder="OU=Servers,DC=contoso,DC=com"></label>
+        <fieldset>
+          <legend data-i18n="colAttributes">Attribute</legend>
+          <div id="ruleAttributes"></div>
+          <button id="ruleAttributeAdd" type="button" class="secondary" data-i18n="attributeAdd">ExtensionAttribute hinzufügen</button>
+        </fieldset>
+        <fieldset>
+          <legend data-i18n="colGroups">Gruppen</legend>
+          <ul id="ruleGroupsSelected" class="chips"></ul>
+          <input id="ruleGroupsSearch" type="search" autocomplete="off" data-i18n-placeholder="searchGroups">
+          <ul id="ruleGroupsResults" class="results"></ul>
+        </fieldset>
+        <fieldset>
+          <legend data-i18n="colAdminUnits">Verwaltungseinheiten</legend>
+          <ul id="ruleUnitsSelected" class="chips"></ul>
+          <input id="ruleUnitsSearch" type="search" autocomplete="off" data-i18n-placeholder="searchUnits">
+          <ul id="ruleUnitsResults" class="results"></ul>
+        </fieldset>
+        <div class="actions">
+          <button type="submit" data-i18n="save">Speichern</button>
+          <button id="ruleCancel" type="button" class="secondary" data-i18n="cancel">Abbrechen</button>
+        </div>
+      </form>
+    </section>
+    <section id="tab-ldap" class="tab" hidden>
+      <div class="toolbar">
+        <button id="validate" type="button" data-i18n="validateTitle">LDAP-Zugriff prüfen</button>
+        <button id="rotate" type="button" class="secondary" data-i18n="rotate">Kennwortwechsel auslösen</button>
+        <span id="rotationStatus" class="hint"></span>
+      </div>
+      <div id="validateResult" class="result"></div>
+      <div class="grid">
+        <form id="domainForm" class="card">
+          <h2 data-i18n="forest">Gesamtstruktur</h2>
+          <label><span data-i18n="domain">Forest-DNS-Name</span><input id="domain" required autocomplete="off"></label>
+          <p class="hint" id="accountInfo"></p>
+          <div class="actions"><button type="submit" data-i18n="save">Speichern</button></div>
+        </form>
+
+        <form id="initForm" class="card" autocomplete="off">
+          <h2 data-i18n="initTitle">Initiales Kennwort setzen</h2>
+          <p class="hint" data-i18n="initHint">Nur möglich, solange noch kein Kennwort gespeichert ist.</p>
+          <label><span data-i18n="password">Kennwort</span><input id="initPassword" type="password" required maxlength="256" autocomplete="new-password"></label>
+          <div class="actions"><button type="submit" data-i18n="save">Speichern</button></div>
+        </form>
+
+        <form id="accountForm" class="card" autocomplete="off">
+          <h2 data-i18n="accountTitle">LDAP-Benutzer ändern</h2>
+          <p class="hint" data-i18n="accountHint">Das Kennwort des Kontos wird vor dem Speichern per LDAP geprüft. Mit demselben Namen wird nur das Kennwort ersetzt.</p>
+          <label><span data-i18n="username">Benutzer (UPN)</span><input id="accountUsername" required maxlength="256" autocomplete="off"></label>
+          <label><span data-i18n="password">Kennwort</span><input id="accountPassword" type="password" required maxlength="256" autocomplete="new-password"></label>
+          <label><span data-i18n="distinguishedName">Distinguished Name (optional)</span><input id="accountDn" maxlength="1024" autocomplete="off"></label>
+          <div class="actions"><button type="submit" data-i18n="save">Speichern</button></div>
+        </form>
+      </div>
+    </section>
+
+    <section id="tab-certificates" class="tab" hidden>
+      <p class="hint" data-i18n="certHint">Vertrauensanker für LDAPS/StartTLS. Nur öffentliche Zertifikate (.cer/.pem) hochladen; private Schlüssel werden abgelehnt. Das letzte Zertifikat kann nicht gelöscht werden.</p>
+      <div class="toolbar">
+        <label class="file"><span data-i18n="certAdd">Zertifikat hinzufügen</span><input id="certAdd" type="file" accept=".cer,.crt,.pem,.der"></label>
+        <button id="certRefresh" type="button" class="secondary" data-i18n="refresh">Aktualisieren</button>
+        <span id="certSource" class="hint"></span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th data-i18n="colSubject">Antragsteller</th><th data-i18n="colIssuer">Aussteller</th><th data-i18n="colThumbprint">Fingerabdruck</th>
+            <th data-i18n="colValidTo">Gültig bis</th><th data-i18n="colCa">CA</th><th data-i18n="colAddedBy">Hinzugefügt von</th><th></th>
+          </tr></thead>
+          <tbody id="certRows"></tbody>
+        </table>
+      </div>
+    </section>
+    <section id="tab-schedule" class="tab" hidden>
+      <form id="scheduleForm" class="card schedule">
+        <h2 data-i18n="tabSchedule">Zeitpläne</h2>
+        <label><span data-i18n="taggingInterval">Tagging (LDAP-Abfrage) alle … Minuten</span>
+          <input id="taggingInterval" type="number" required min="5" max="1440" step="1"></label>
+        <p class="hint" data-i18n="taggingIntervalHint">5 bis 1440 Minuten. Der Zeitgeber prüft alle 5 Minuten, ob das Intervall abgelaufen ist.</p>
+        <label><span data-i18n="rotationInterval">Kennwortwechsel alle … Tage</span>
+          <input id="rotationInterval" type="number" required min="1" step="1"></label>
+        <p class="hint" id="rotationIntervalHint"></p>
+        <p class="hint" id="scheduleSource"></p>
+        <div class="actions"><button type="submit" data-i18n="save">Speichern</button></div>
+      </form>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>HybridDeviceTagger</span> · <span data-i18n="protectedBy">Geschützt durch Microsoft Entra ID</span> ·
+    <a href="https://github.com/Kili69" target="_blank" rel="noopener noreferrer" data-i18n="author">Autor: Andreas Lucas (Kili)</a> ·
+    <a href="https://github.com/Kili69/HybridDeviceTagger/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Apache License 2.0</a>
+    <span id="version"></span>
+  </footer>
+</body>
+</html>

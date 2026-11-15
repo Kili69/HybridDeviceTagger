@@ -31,4 +31,10 @@
     <Compile Remove="tests\**\*.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="Portal\index.html" LogicalName="HybridDeviceTagger.Portal.index.html" />
+    <EmbeddedResource Include="Portal\app.js" LogicalName="HybridDeviceTagger.Portal.app.js" />
+    <EmbeddedResource Include="Portal\app.css" LogicalName="HybridDeviceTagger.Portal.app.css" />
+  </ItemGroup>
+
 </Project>

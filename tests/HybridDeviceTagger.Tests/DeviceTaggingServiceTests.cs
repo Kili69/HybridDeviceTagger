@@ -76,7 +76,8 @@ public sealed class DeviceTaggingServiceTests
 
         var result = await service.TagDevicesAsync(CancellationToken.None, trace);
 
-        Assert.Equal(new TaggingResult(4, 1, 1, 1, 1), result);
+        Assert.Equal(new TaggingResult(4, 1, 1, 1, 1), result with { ChangedDeviceNames = null });
+        Assert.Single(result.ChangedDeviceNames!);
         var update = Assert.Single(entraClient.Updates);
         Assert.Equal(updateDeviceId.ToString("D"), update.ObjectId);
         Assert.Equal("Tier 0", update.Attributes["extensionAttribute1"]);
@@ -148,7 +149,8 @@ public sealed class DeviceTaggingServiceTests
 
         var result = await service.TagDevicesAsync(CancellationToken.None);
 
-        Assert.Equal(new TaggingResult(3, 3, 0, 0, 0), result);
+        Assert.Equal(new TaggingResult(3, 3, 0, 0, 0), result with { ChangedDeviceNames = null });
+        Assert.Equal(3, result.ChangedDeviceNames!.Count);
         Assert.Equal([tier0Ou, serverOu], directorySource.RequestedBaseDns);
         Assert.Equal(3, entraClient.Updates.Count);
         Assert.Equal("PAW", entraClient.Updates.Single(update =>

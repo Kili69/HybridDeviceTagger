@@ -11,7 +11,7 @@ The script:
 
 1. calculates the product version with Get-ProductVersion.ps1 (<YYYY><MM>.<counter>, plus the
    branch name outside main);
-2. runs the unit tests unless SkipTests is specified;
+2. runs the PowerShell regression tests and .NET unit tests unless SkipTests is specified;
 3. publishes the Function in Release configuration with that version and stores it as
    installationspackage/function/HybridDeviceTagger.zip, so the installer no longer needs the
    .NET SDK;
@@ -28,7 +28,7 @@ Directory that receives the staged package folder and the release archive. Defau
 artifacts in the repository root.
 
 .PARAMETER SkipTests
-Skips dotnet test.
+Skips PowerShell regression tests and dotnet test.
 
 .PARAMETER Release
 Builds an official release from main and tags HEAD with the release version.
@@ -168,6 +168,10 @@ try {
 
     if (-not $SkipTests) {
         Write-Step 'Running unit tests'
+        foreach ($testScript in 'InstallerAuthorization.Tests.ps1', 'InstallerDirectory.Tests.ps1', 'ManagementModule.Tests.ps1') {
+            Invoke-Checked -FilePath 'pwsh' -Arguments @(
+                '-NoProfile', '-File', (Join-Path $repositoryRoot "tests\$testScript"))
+        }
         Invoke-Checked -FilePath 'dotnet' -Arguments @('test', $solutionPath, '--configuration', 'Release', '--nologo', $versionProperty)
     }
 

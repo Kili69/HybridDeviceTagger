@@ -5,6 +5,7 @@ using HybridDeviceTagger.Options;
 using HybridDeviceTagger.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Moq;
 
 namespace HybridDeviceTagger.Tests;
 
@@ -96,6 +97,34 @@ public sealed class ManagementApiFunctionTests
         var badRequest = Assert.IsType<BadRequestObjectResult>(result);
         Assert.Contains("invalid", badRequest.Value?.ToString(), StringComparison.OrdinalIgnoreCase);
         Assert.Null(configurationStore.LastExpectedETag);
+    }
+
+    [Fact]
+    public async Task ConfigurationChangesAndDeniedRequests_AreRecordedInActivityLog()
+    {
+        var activity = new List<ActivityEntry>();
+        var activityLog = new Moq.Mock<IActivityLog>();
+        activityLog.Setup(value => value.Record(It.IsAny<ActivityEntry>())).Callback<ActivityEntry>(activity.Add);
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(), new FakeStatusStore(), new FakeTraceReader(),
+            activityLog: activityLog.Object);
+        var request = AuthenticatedRequest(ManagementApiRoles.RuleAdministrator);
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes(
+            """{"name":"Servers","description":"Test","baseDn":"OU=Servers,DC=example,DC=com","extensionAttributes":{"extensionAttribute1":"Managed"},"entraGroupIds":[],"administrativeUnitIds":[]}"""));
+
+        Assert.IsType<OkObjectResult>(await function.UpsertTaggingRuleAsync(request, "Servers", CancellationToken.None));
+        Assert.IsType<ObjectResult>(await function.RunPasswordRotationAsync(
+            AuthenticatedRequest(ManagementApiRoles.Reader), CancellationToken.None));
+
+        Assert.Collection(
+            activity,
+            entry => Assert.Equal(
+                (ActivityCategories.Configuration, "RuleUpserted", ActivityOutcomes.Succeeded, "Servers"),
+                (entry.Category, entry.Action, entry.Outcome, entry.Target)),
+            entry => Assert.Equal(
+                (ActivityCategories.Access, ActivityOutcomes.Denied),
+                (entry.Category, entry.Outcome)));
+        Assert.All(activity, entry => Assert.Equal("oid test", entry.Actor));
     }
 
     [Fact]
@@ -278,6 +307,82 @@ public sealed class ManagementApiFunctionTests
         Assert.Empty(queue.Requests);
     }
 
+    [Fact]
+    public async Task SetActiveDirectoryConfigurationAsync_RepairsDomainWithoutDirectoryAccess()
+    {
+        var store = new Moq.Mock<IActiveDirectoryConfigurationStore>();
+        store.Setup(value => value.GetAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ActiveDirectoryConfigurationSnapshot("wrong.example", "\"old\"", null, "blob"));
+        store.Setup(value => value.ReplaceAsync("contoso.com", "\"old\"", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ActiveDirectoryConfigurationSnapshot("contoso.com", "\"new\"", null, "blob"));
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(), new FakeStatusStore(), new FakeTraceReader(),
+            directoryConfigurationStore: store.Object,
+            ruleValidator: new RejectingActiveDirectoryRuleValidator());
+        var request = AuthenticatedRequest(FunctionAppAdministrator);
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes("""{"domain":"contoso.com"}"""));
+
+        var result = await function.SetActiveDirectoryConfigurationAsync(request, CancellationToken.None);
+
+        var snapshot = Assert.IsType<ActiveDirectoryConfigurationSnapshot>(Assert.IsType<OkObjectResult>(result).Value);
+        Assert.Equal("contoso.com", snapshot.Domain);
+        Assert.Equal("\"new\"", request.HttpContext.Response.Headers.ETag);
+        store.Verify(value => value.ReplaceAsync("contoso.com", "\"old\"", It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Theory]
+    [InlineData(ManagementApiRoles.Reader)]
+    [InlineData(ManagementApiRoles.RuleAdministrator)]
+    [InlineData(ManagementApiRoles.TaggingOperator)]
+    [InlineData(ManagementApiRoles.PasswordRotationAdministrator)]
+    public async Task SetActiveDirectoryConfigurationAsync_RequiresFunctionAppOwnerOrContributor(string role)
+    {
+        var store = new Moq.Mock<IActiveDirectoryConfigurationStore>();
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(), new FakeStatusStore(), new FakeTraceReader(),
+            directoryConfigurationStore: store.Object);
+
+        var result = await function.SetActiveDirectoryConfigurationAsync(
+            AuthenticatedRequest(role), CancellationToken.None);
+
+        Assert.Equal(403, Assert.IsType<ObjectResult>(result).StatusCode);
+        store.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task SetActiveDirectoryConfigurationAsync_RejectsStaleETag()
+    {
+        var store = new Moq.Mock<IActiveDirectoryConfigurationStore>();
+        store.Setup(value => value.GetAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ActiveDirectoryConfigurationSnapshot("contoso.com", "\"new\"", null, "blob"));
+        store.Setup(value => value.ReplaceAsync("example.com", "\"stale\"", It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new Azure.RequestFailedException(412, "Precondition failed"));
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(), new FakeStatusStore(), new FakeTraceReader(),
+            directoryConfigurationStore: store.Object);
+        var request = AuthenticatedRequest(FunctionAppAdministrator);
+        request.Headers.IfMatch = "\"stale\"";
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes("""{"domain":"example.com"}"""));
+
+        var result = await function.SetActiveDirectoryConfigurationAsync(request, CancellationToken.None);
+
+        Assert.IsType<ConflictObjectResult>(result);
+    }
+
+    [Theory]
+    [InlineData("null")]
+    [InlineData("{bad")]
+    public async Task SetActiveDirectoryConfigurationAsync_RejectsMalformedJson(string body)
+    {
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(), new FakeStatusStore(), new FakeTraceReader());
+        var request = AuthenticatedRequest(FunctionAppAdministrator);
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes(body));
+
+        Assert.IsType<BadRequestObjectResult>(
+            await function.SetActiveDirectoryConfigurationAsync(request, CancellationToken.None));
+    }
+
     private static ManagementApiFunction CreateFunction(
         ITaggingConfigurationStore configurationStore,
         IOperationStatusStore statusStore,
@@ -286,7 +391,9 @@ public sealed class ManagementApiFunctionTests
         IOperationRequestQueue? requestQueue = null,
         IActiveDirectoryCredentialInitializer? credentialInitializer = null,
         IManagementApiAuthorizer? authorizer = null,
-        IActiveDirectoryRuleValidator? ruleValidator = null) =>
+        IActiveDirectoryRuleValidator? ruleValidator = null,
+        IActiveDirectoryConfigurationStore? directoryConfigurationStore = null,
+        IActivityLog? activityLog = null) =>
         new(
             new TaggingConfigurationService(
                 configurationStore,
@@ -297,7 +404,9 @@ public sealed class ManagementApiFunctionTests
             requestQueue ?? new FakeRequestQueue(),
             TimeProvider.System,
             credentialInitializer ?? new FakeCredentialInitializer(),
-            authorizer ?? new ApplicationRoleAuthorizer());
+            authorizer ?? new ApplicationRoleAuthorizer(),
+            directoryConfigurationStore ?? new Moq.Mock<IActiveDirectoryConfigurationStore>().Object,
+            activityLog);
 
     private sealed class AllowAllActiveDirectoryRuleValidator : IActiveDirectoryRuleValidator
     {
@@ -315,6 +424,9 @@ public sealed class ManagementApiFunctionTests
             throw new TaggingConfigurationValidationException(
                 ["The rule targets a domain outside the configured forest."]);
     }
+
+    /// <summary>Marks a test principal as an effective Function App Owner or Contributor.</summary>
+    private const string FunctionAppAdministrator = "Test.FunctionAppOwnerOrContributor";
 
     private static HttpRequest AuthenticatedRequest(params string[] roles)
     {
@@ -335,6 +447,11 @@ public sealed class ManagementApiFunctionTests
             Task.FromResult(EasyAuthPrincipalValidator.Authorize(
                 request,
                 [.. requiredRoles]));
+
+        public Task<EasyAuthAuthorizationResult> AuthorizeFunctionAppAdministratorAsync(
+            HttpRequest request,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(EasyAuthPrincipalValidator.Authorize(request, FunctionAppAdministrator));
     }
 
     private sealed class FakeTaggingConfigurationStore : ITaggingConfigurationStore

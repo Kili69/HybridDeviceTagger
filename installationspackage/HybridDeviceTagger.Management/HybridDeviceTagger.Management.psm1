@@ -684,6 +684,64 @@ function Invoke-HybridDeviceTagging {
 
 <#
 .SYNOPSIS
+Gets the effective Active Directory forest-domain configuration.
+
+.DESCRIPTION
+Reads the stored forest domain or its initial application setting without contacting Active
+Directory. Requires Reader, RuleAdministrator, PasswordRotationAdministrator, or effective
+Function App Owner/Contributor access.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject containing domain, eTag, lastModifiedUtc, and source.
+
+.EXAMPLE
+Get-HybridDeviceTaggerActiveDirectoryConfiguration
+#>
+function Get-HybridDeviceTaggerActiveDirectoryConfiguration {
+    [CmdletBinding()]
+    param()
+
+    Invoke-HybridDeviceTaggerRequest -Method Get -Path 'active-directory'
+}
+
+<#
+.SYNOPSIS
+Changes the Active Directory forest DNS domain used by the Function.
+
+.DESCRIPTION
+Validates the DNS-name syntax and persists the domain without requiring working AD DNS, LDAP,
+or an initialized credential. New forest connections read the change without restarting the
+Function. Existing runs can finish using their previous domain. Requires effective Function App
+Owner/Contributor access, because the domain selects the servers that receive the service-account
+password; management API application roles are not sufficient.
+
+.PARAMETER Domain
+The forest DNS name, not a domain-controller name or the _ldap SRV record name.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject containing the stored configuration and ETag.
+
+.EXAMPLE
+Set-HybridDeviceTaggerActiveDirectoryConfiguration -Domain 'contoso.com' -Confirm
+#>
+function Set-HybridDeviceTaggerActiveDirectoryConfiguration {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Domain
+    )
+
+    Assert-HybridDeviceTaggerConnection
+    if ($PSCmdlet.ShouldProcess($script:Connection.ApiBaseUri, "Set Active Directory forest domain to '$Domain'")) {
+        $snapshot = Invoke-HybridDeviceTaggerRequest -Method Get -Path 'active-directory' -IncludeResponseHeaders
+        Invoke-HybridDeviceTaggerRequest -Method Put -Path 'active-directory' `
+            -Body @{ domain = $Domain } -ETag $snapshot.ETag
+    }
+}
+
+<#
+.SYNOPSIS
 Initializes the Active Directory service-account credential through the Function App.
 
 .DESCRIPTION
@@ -796,6 +854,8 @@ Export-ModuleMember -Function @(
     'Get-HybridDeviceTaggerTrace',
     'Add-HybridDeviceTaggerRule',
     'Remove-HybridDeviceTaggerRule',
+    'Get-HybridDeviceTaggerActiveDirectoryConfiguration',
+    'Set-HybridDeviceTaggerActiveDirectoryConfiguration',
     'Initialize-HybridDeviceTaggerActiveDirectoryCredential',
     'Invoke-HybridDeviceTagging',
     'Invoke-HybridDeviceTaggerPasswordRotation'

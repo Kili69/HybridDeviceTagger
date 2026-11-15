@@ -23,7 +23,13 @@ Run `Install.ps1` from the extracted package after `az login`:
 ./Install.ps1 -Mode Install -UseSavedSettings
 ```
 
-`Install.ps1` first checks Azure CLI, the ActiveDirectory module, the prebuilt Function package, and the Azure CLI sign-in, offering `az login` when required. It then asks for every parameter with defaults and format validation: the Azure target, the existing network, a new or existing Key Vault, the Active Directory forest, an optional domain controller used only for installer validation, the service-account UPN, an optional distinguished name, an optional LDAPS root CA certificate path, an optional management API client ID (empty creates the registration or reuses the one of an existing installation), the principal object ID that receives all management API roles, both schedules, and provider registration. Enter `-` to clear an optional saved value.
+`Install.ps1` first checks Azure CLI, the ActiveDirectory module, the prebuilt Function package, and the Azure CLI sign-in, offering `az login` when required. It then asks for the installation settings with defaults and format validation: the Azure target, the existing network, a new or existing Key Vault, the Active Directory forest, an optional domain controller used only for installer validation, the service-account UPN, an optional distinguished name, the required LDAPS root CA certificate path, an optional management API client ID (empty creates the registration or reuses the one of an existing installation), both schedules, and provider registration. Enter `-` to clear an optional saved value.
+
+**The public root CA certificate (.cer/.pem) is mandatory for installation, validation, and updates, including when local AD DNS is unavailable.** The installer imports it into the Azure Function package for both LDAPS and StartTLS. Importing it only into the installation PC's certificate store is not sufficient. Do not supply a private key. A missing or empty certificate path in saved settings is requested again; direct engine calls must supply `-ActiveDirectoryTrustedCertificatePath` and fail before Azure access when it is omitted.
+
+At the guided certificate prompt, paths containing spaces can be entered with or without matching single or double quotes, for example `"C:\Certificates\Contoso Root CA.cer"`. Surrounding quotes are removed from new and saved answers before resolving the file.
+
+The guided installer does not ask for a management principal object ID or assign bootstrap application roles. Function App Owners and Contributors can administer rules and password rotation by default. A `ManagementApiAllowedPrincipalObjectId` saved by an earlier guided installer is ignored and omitted when settings are saved again; existing application-role assignments are retained. Additional users and groups can be assigned roles after deployment as described below, with the required Entra permissions.
 
 The answers are stored without secrets in `installation-settings.json` next to the script and offered as defaults on the next run; `-UseSavedSettings` accepts them without asking. The package build never includes this file. `-Mode Install|Validate|WhatIf` selects the action without asking. The script asks once for the service-account password through `Get-Credential` and passes it in memory as `ADServiceAccountCredential`. `Install` runs the read-only validation, optionally shows Azure What-If, asks `Start the installation now?`, and then runs the engine, which displays its summary and requests the final confirmation.
 
@@ -43,9 +49,11 @@ Installation uses separate Azure, Entra, Active Directory, and runtime identitie
 
 The management REST API uses a single-tenant Entra app registration whose Application ID URI is `api://<client-id>`. During a new installation, omit `ManagementApiClientId`; after installation approval the installer creates the app registration, its Enterprise Application, the identifier URI, a delegated `access_as_user` scope, and four application roles automatically. Microsoft Azure CLI is preauthorized only for this delegated scope so the installer can obtain the signed-in user's token without a separate consent login. API operations still require an assigned application role or accepted Function App RBAC role. `-ValidateOnly` and `-WhatIf` remain read-only and only report the planned registration. When resuming or updating an existing Function App, the installer reuses `ManagementApi__ClientId` from its application settings. Supply `ManagementApiClientId` explicitly only when that setting is unavailable or when a new deployment must reuse a centrally managed registration.
 
-The installer assigns approved users, security groups, or service principals to the application roles. **Assignment required** remains disabled so Function App Owners and Contributors can obtain a token without a separate API role. Easy Auth validates issuer, audience, and authentication; the Function returns HTTP `403` unless the principal has an accepted application role or an accepted Function App RBAC assignment.
+The installer assigns users, security groups, or service principals to application roles only when explicitly supplied through the engine parameters. It does not automatically assign roles to the signed-in user. **Assignment required** remains disabled so Function App Owners and Contributors can obtain a token without a separate API role. Easy Auth validates issuer, audience, and authentication; the Function returns HTTP `403` unless the principal has an accepted application role or an accepted Function App RBAC assignment.
 
-`ManagementApiAllowedPrincipalObjectId` is the migration/bootstrap input. Its principals receive all four roles unless a role-specific list is supplied through `ManagementApiReaderPrincipalObjectId`, `ManagementApiRuleAdministratorPrincipalObjectId`, `ManagementApiTaggingOperatorPrincipalObjectId`, or `ManagementApiPasswordRotationAdministratorPrincipalObjectId`. Prefer security-group assignments for ongoing administration.
+New app registrations start with empty delegated scopes and Azure CLI preauthorizations. The installer creates the required missing entries and application roles while preserving unrelated entries; reruns leave matching settings unchanged. A missing required application, enterprise application, or Graph permission is reported explicitly.
+
+`ManagementApiAllowedPrincipalObjectId` is an optional migration/bootstrap input for direct engine calls. Its principals receive all four roles unless a role-specific list is supplied through `ManagementApiReaderPrincipalObjectId`, `ManagementApiRuleAdministratorPrincipalObjectId`, `ManagementApiTaggingOperatorPrincipalObjectId`, or `ManagementApiPasswordRotationAdministratorPrincipalObjectId`. Omit these parameters to rely on Function App Owner/Contributor administration without additional application-role assignments. Prefer security-group assignments for ongoing administration.
 
 The former `HybridDeviceTagger.CertificateAdministrator` role and the `ManagementApiCertificateAdministratorPrincipalObjectId` parameter have been removed together with the runtime trusted-certificate store. During an update, the installer removes all assignments of that role, disables it, and deletes it from the app registration.
 
@@ -54,13 +62,15 @@ The Function also queries Azure Resource Manager at runtime. A principal with th
 | Application role | Permitted operations |
 | --- | --- |
 | `HybridDeviceTagger.Reader` | Read rules, both statuses, and the latest tagging trace |
-| `HybridDeviceTagger.RuleAdministrator` | Read and change tagging rules |
+| `HybridDeviceTagger.RuleAdministrator` | Read and change tagging rules; only Function App Owners/Contributors may add new Entra group or administrative-unit targets |
 | `HybridDeviceTagger.TaggingOperator` | Read tagging status/trace and start immediate tagging |
 | `HybridDeviceTagger.PasswordRotationAdministrator` | Initialize the AD credential, read rotation status, and force password rotation |
 
 ### Managing API role assignments after deployment
 
 For users and security groups, open **Microsoft Entra admin center** > **Enterprise applications** > the HybridDeviceTagger management API > **Users and groups** > **Add user/group**. Select the principal and one role, then repeat for each additional role. Use security groups for ongoing administration where practical.
+
+Function App Owner/Contributor access alone does not grant permission to manage Entra application-role assignments. These administrators need the Entra privileges described below to add API users or groups.
 
 Microsoft Graph PowerShell supports users, security groups, and service principals. The signed-in Entra administrator needs sufficient directory privileges, such as `Privileged Role Administrator`, and consent for the requested Graph scopes:
 
@@ -158,7 +168,6 @@ $credential = Get-Credential 'svc-HybridDeviceTagger@contoso.com'
     -ActiveDirectoryTrustedCertificatePath 'C:\Certificates\Contoso-Root-CA.cer' `
     -LdapFallbackPort 389 `
     -ADServiceAccountCredential $credential `
-    -ManagementApiAllowedPrincipalObjectId '22222222-2222-2222-2222-222222222222' `
     -ValidateOnly
 ```
 
@@ -183,7 +192,27 @@ For an omitted Active Directory forest DNS name, the installer proposes the fore
 
 When `ActiveDirectoryServer` is omitted, the installer resolves `_ldap._tcp.dc._msdcs.<ActiveDirectoryForestDomain>` and validates a discovered domain controller. Supply `ActiveDirectoryServer` only as an installer-validation override. The deployed Function receives the domain, not that override, and performs DNS SRV discovery for every new connection.
 
-`ADServiceAccountCredential` contains the existing AD service-account UPN and password used for LDAP bind validation. `ADServiceAccount` and `ADServiceAccountCredential` are mutually exclusive and must never be supplied together. With `ADServiceAccountCredential`, the installer derives the UPN from its `UserName`. With `ADServiceAccount`, an interactive run requests the matching password separately. If neither value is provided interactively, the account prompt proposes `HybridDeviceTagger@<ActiveDirectoryForestDomain>` before the protected credential prompt. Immediately after network validation and before any Key Vault selection, the installer queries Active Directory, resolves the account's distinguished name, and stops if the account is absent, ambiguous, or unreadable. `ActiveDirectoryBindUserDistinguishedName` remains available as an explicit consistency check; when supplied, it must match the resolved account.
+If that initial lookup fails or returns no SRV targets on the installation computer, the installer issues a warning instead of stopping. This is expected on a public-network computer without access to internal AD DNS; it can also indicate a misspelled forest name. Local forest, account-DN, and LDAP/TLS preflight checks are deferred, not reported as successful. The Function must still resolve and reach AD from its VNet, validate TLS, and bind with the supplied credential before storing it in Key Vault. Public Azure DNS is not a replacement for internal AD DNS.
+
+An omitted service-account DN is resolved from its UPN across the forest by the Function before password rotation. An explicitly supplied DN remains in use. Azure deployment errors, invalid certificate files, and failed runtime credential initialization are still terminating errors. A failed initialization can leave the deployed management API available: correct the domain as shown below, fix VNet DNS/routing if necessary, then initialize the credential again. Custom private-endpoint DNS checks also need connectivity from the installation computer to the configured VNet DNS servers; a public-network computer is not guaranteed to complete every deployment check.
+
+`ADServiceAccountCredential` contains the existing AD service-account UPN and password used for LDAP bind validation. `ADServiceAccount` and `ADServiceAccountCredential` are mutually exclusive and must never be supplied together. With `ADServiceAccountCredential`, the installer derives the UPN from its `UserName`. With `ADServiceAccount`, an interactive run requests the matching password separately. If neither value is provided interactively, the account prompt proposes `HybridDeviceTagger@<ActiveDirectoryForestDomain>` before the protected credential prompt. When local AD DNS discovery succeeds, the installer queries Active Directory, resolves the account's distinguished name, and stops if the account is absent, ambiguous, or unreadable. `ActiveDirectoryBindUserDistinguishedName` remains available as an explicit consistency check; when supplied, it must match the locally resolved account.
+
+### Correcting the forest domain after deployment
+
+```powershell
+Import-Module ./HybridDeviceTagger.Management
+Connect-HybridDeviceTagger -ApiBaseUri 'https://<function-app>.azurewebsites.net/api/management' `
+    -ClientId '<management-api-client-id>' -SkipValidation
+Get-HybridDeviceTaggerActiveDirectoryConfiguration
+Set-HybridDeviceTaggerActiveDirectoryConfiguration -Domain 'contoso.com' -Confirm
+
+# Only if the initial credential has not yet been initialized:
+$password = Read-Host 'AD service-account password' -AsSecureString
+Initialize-HybridDeviceTaggerActiveDirectoryCredential -Password $password -Confirm
+```
+
+`GET` and `PUT /api/management/active-directory` expose the same configuration. A PUT body is `{ "domain": "contoso.com" }`; `If-Match` protects against concurrent changes. Changes require effective Function App Owner/Contributor access; management API application roles, including `PasswordRotationAdministrator`, are not sufficient because the domain selects the servers that receive the service-account password during binds. The configuration portal offers the same correction. Only DNS syntax is checked during a configuration change, so failed AD connectivity cannot prevent a repair. Subsequent forest connections on every instance read the private Blob override without a restart; already-running operations may still use the previous domain. The override survives installer reruns and takes precedence over `ActiveDirectory__Domain`. Update it through the management command rather than changing only the app setting. Existing rules, credential username, explicit account DN, and any manually configured `ActiveDirectory__Server` override are not changed automatically.
 
 Network input is collected and validated incrementally. During interactive collection, the installer first proposes the target subscription as the virtual-network subscription; press Enter to use it or enter another subscription ID. A VNet in another subscription is supported when it belongs to the same Entra tenant and the deployment identity has the required read and subnet-join permissions there. The installer then asks for and validates the virtual-network resource group, VNet, FC1 integration subnet, and private-endpoint subnet in that order before validating the existing Active Directory service account and collecting Key Vault values. A missing interactively entered resource group, VNet, or subnet is reported and requested again. An interactively selected integration subnet that fails the FC1 requirements is also reported and requested again. A missing or unsuitable network resource supplied through `VirtualNetworkResourceGroupName`, `VirtualNetworkName`, `SubnetName`, or `PrivateEndpointSubnetName` terminates the run. The VNet and Function App must use the same Azure region; a mismatch terminates with a concise message identifying both regions and the available corrections. The integration subnet must use IPv4, meet the FC1 prefix requirements, be delegated exclusively to `Microsoft.App/environments`, contain no service endpoints or private endpoints, and differ from the private-endpoint subnet. The private-endpoint subnet must use IPv4 and must not be delegated.
 
@@ -211,7 +240,7 @@ The management API reads all domain cross-references from the forest configurati
 
 Rules that target restricted management administrative units require the Function managed identity to receive the documented scoped custom role before tagging can modify those devices.
 
-`-ActiveDirectoryTrustedCertificatePath` optionally accepts a DER or PEM public certificate. Supply the issuing root CA certificate in production, or the directly self-signed DC certificate for a lab. The installer uses it for its LDAPS preflight and writes the validated public certificate into the Function package as PEM without a private key. This packaged, immutable certificate is the only LDAPS trust anchor; without it, the operating system trust store applies, which suits public CAs. The trust anchor cannot be changed at runtime through the management API or the Storage account, because anyone able to inject a CA could impersonate a domain controller and capture the service-account password during the bind. To change it, rerun the installation with the new certificate. Runtime validation still requires Server Authentication EKU, a valid chain to that exact trust anchor, and a DNS name matching the LDAP endpoint. On Linux, `Novell.Directory.Ldap.NETStandard` performs custom trust and online revocation validation on the same TLS session used for bind, search, and password modification; Windows continues to validate the actual LDAP TLS session through `System.DirectoryServices.Protocols`.
+`-ActiveDirectoryTrustedCertificatePath` is required and accepts a DER or PEM public certificate. Supply the issuing root CA certificate in production, or the directly self-signed DC certificate for a lab. The installer uses it for its LDAPS preflight and writes the validated public certificate into the Function package as PEM without a private key. This packaged certificate is the initial LDAPS trust anchor. Function App Owners and Contributors can add, replace, or remove trust anchors at runtime in the configuration portal (`https://<function-app>.azurewebsites.net/api/portal`); the first change copies the packaged certificate into the private Blob `run-traces/active-directory-trust-anchors.json`, which then takes precedence. Private keys, expired certificates, and duplicates are rejected, and the last trust anchor cannot be removed. Management is restricted to Owners and Contributors because anyone able to inject a CA could impersonate a domain controller and capture the service-account password during the bind; those principals already control the Function code. Older or manually deployed Functions without a packaged certificate retain the operating system trust store fallback, but the installer no longer permits omitting the certificate. Runtime validation still requires Server Authentication EKU, a valid chain to that exact trust anchor, and a DNS name matching the LDAP endpoint. On Linux, `Novell.Directory.Ldap.NETStandard` performs custom trust and online revocation validation on the same TLS session used for bind, search, and password modification; Windows continues to validate the actual LDAP TLS session through `System.DirectoryServices.Protocols`.
 
 For an update to an existing Function App, `-SkipActiveDirectoryDirectoryChecks` may be used when no matching AD credential is available interactively. This still requires `-ActiveDirectoryTrustedCertificatePath` and performs strict LDAPS endpoint validation, but skips the repeated forest and account queries. It is rejected for first-time installations.
 
@@ -219,7 +248,15 @@ The installer and Linux Flex Consumption Function prefer LDAPS on port 636 and s
 
 `-AllowLdapFallback` remains accepted for command-line compatibility but is no longer required: fallback is StartTLS-protected and automatic. Invalid credentials never trigger transport fallback, and the Function never uses an unprotected Basic LDAP bind.
 
+## Configuration portal and activity log
+
+The installer registers `https://<function-app>.azurewebsites.net/api/portal` as a single-page-application redirect URI of the management API app registration and grants tenant-wide consent for its own `access_as_user` scope. When the signed-in installer lacks permission for that grant, it only warns; an administrator must then grant consent in the Microsoft Entra admin center unless users may consent themselves. The portal is available only to effective Function App Owners and Contributors; management API application roles do not grant portal access. It shows the activity log, manages tagging rules and LDAP trust anchors, validates LDAP access with per-domain-controller TLS diagnostics, sets the initial password, changes the service account after a validated bind, and triggers a password change. German and English are selectable.
+
+Activities are written to the existing Log Analytics workspace `<function-app>-law` (30-day retention, `AppTraces`, logger category `HybridDeviceTagger.Activity`). Application Insights local authentication is disabled; the managed identity receives `Monitoring Metrics Publisher` to ingest telemetry with Entra authentication and `Monitoring Reader` to query the activity log. Passwords and attribute values are never logged.
+
 ## What-if and installation
+
+Deployment monitoring retries timed-out Azure CLI status queries with an explicit warning, without resubmitting the deployment. Each query is limited to 60 seconds or the remaining monitoring time, whichever is shorter; the overall monitoring limit is 30 minutes. Failed or canceled deployments and other query errors still terminate immediately. If monitoring expires without confirming a terminal state, check the deployment in Azure before rerunning: the infrastructure may already have completed, but Function code upload and credential initialization have not yet been reached.
 
 Replace `-ValidateOnly` with `-WhatIf` to show the ARM changes without applying them. Remove both switches to install. Before the first Azure, Entra, Active Directory, Key Vault, or code change, the installer displays a summary of the selected mode, deployment target, resources, permissions, shared-resource references, and optional actions. It then uses standard PowerShell `ShouldProcess` confirmation for the complete plan. Use `-Confirm` to force the prompt. Use `-Force` for a fully noninteractive installation: it skips the central approval and disables every installer prompt, so all required values must be supplied. Missing information terminates the run instead of prompting. Validation and What-if display the same summary but do not request approval because they do not apply changes.
 
@@ -333,8 +370,27 @@ For noninteractive Azure DevOps execution, build the package with `scripts/Build
 - The subnet must not contain service endpoints or private endpoints.
 - The separate private-endpoint subnet must permit private endpoints. The template creates the private endpoints `pe-<storage-account>-blob` and `pe-<storage-account>-queue` in this subnet.
 - The installer reuses existing `privatelink.blob.core.windows.net` and `privatelink.queue.core.windows.net` zones linked to the selected VNet, or creates and links each missing zone in the Function App resource group. The Storage private endpoint zone groups create the A records before code deployment.
-- When the VNet uses custom DNS servers, configure conditional forwarders for `privatelink.blob.core.windows.net` and `privatelink.queue.core.windows.net` to Azure DNS `168.63.129.16`. The installer verifies that every configured custom DNS server resolves the Storage Blob and Queue hostnames to their private-endpoint addresses before uploading code.
+- When the VNet uses custom DNS servers, configure conditional forwarders for `privatelink.blob.core.windows.net` and `privatelink.queue.core.windows.net` to Azure DNS `168.63.129.16` from an Azure-hosted DNS server, or to a reachable Azure DNS Private Resolver inbound endpoint. The installer checks each Storage Blob and Queue hostname once per custom DNS server before uploading code; interactive failures require explicit user confirmation to continue without rechecking.
 - A private Key Vault additionally requires a conditional forwarder for `privatelink.vaultcore.azure.net` to `168.63.129.16`. New-vault installations validate both private endpoints before code deployment.
+
+### Repairing private-endpoint DNS during installation
+
+If a custom VNet DNS server returns a public address, no A records, or a DNS query error, the installer reports that server and the observed result. It then prints the required fully qualified A records for **all** deployed Blob, Queue, and new Key Vault private endpoints, using their actual NIC addresses from Azure. Each record is grouped by its private zone, for example:
+
+```dns
+; Zone: privatelink.blob.core.windows.net
+<storage-account>.privatelink.blob.core.windows.net. 300 IN A <blob-private-ip>
+; Zone: privatelink.queue.core.windows.net
+<storage-account>.privatelink.queue.core.windows.net. 300 IN A <queue-private-ip>
+; Zone: privatelink.vaultcore.azure.net
+<key-vault>.privatelink.vaultcore.azure.net. 300 IN A <vault-private-ip>
+```
+
+Use the concrete values printed by the installer, not these placeholders. Maintain the records on the DNS servers used by the Function VNet, reload the zone files, and clear stale caches as appropriate. Keep the public service CNAME chain pointing into those private zones; do not replace the whole public `blob.core.windows.net`, `queue.core.windows.net`, or `vault.azure.net` namespace. Conditional forwarding is an alternative to maintaining local A records and avoids stale addresses when private endpoints change.
+
+Each endpoint name is queried once per configured DNS server. After configuring DNS, press **Enter** at the installer prompt to confirm that the required records or forwarding have been configured. The same installation then continues with role assignments and code deployment **without another DNS check**, even if the installation PC cannot reach the internal DNS servers. A warning explicitly states that the configuration is user-confirmed, not independently verified. Verify it from the Function VNet when local verification is impossible. Later deployment or runtime errors remain errors. Enter **A** to abort instead. Already deployed Azure resources remain in place.
+
+Unattended runs (`-Force`, `CI`, or `TF_BUILD`) print the same guidance and terminate with an error without prompting; there is no implicit confirmation. Changing only the installation PC's hosts file cannot configure Function VNet DNS.
 - The Key Vault must use RBAC, soft delete, and purge protection.
 - A network-restricted Key Vault must have an approved private endpoint and DNS/routing reachable from the Function App subnet.
 - The Function App managed identity receives `Storage Blob Data Contributor`, `Storage Queue Data Contributor`, `Key Vault Secrets Officer` on the two password secrets (or on a dedicated vault created with `-CreateKeyVault`), `Reader` on the Function App, and Microsoft Graph `Device.ReadWrite.All`, `GroupMember.ReadWrite.All`, and `AdministrativeUnit.ReadWrite.All`.

@@ -55,9 +55,8 @@ public sealed class ActiveDirectoryOptions : IValidatableObject
     [StringLength(256, MinimumLength = 1)]
     public string BindUsername { get; init; } = string.Empty;
 
-    /// <summary>Gets the distinguished name of the account whose password is rotated.</summary>
-    [Required]
-    [StringLength(2048, MinimumLength = 1)]
+    /// <summary>Gets the optional service-account DN; when absent, the Function resolves it from the UPN.</summary>
+    [StringLength(2048)]
     public string BindUserDistinguishedName { get; init; } = string.Empty;
 
     /// <summary>Gets the LDAP server-side page size.</summary>

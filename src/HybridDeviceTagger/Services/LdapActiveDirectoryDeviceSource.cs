@@ -179,6 +179,39 @@ public sealed class LdapActiveDirectoryDeviceSource :
             .ToArray();
     }
 
+    /// <summary>Resolves a service-account UPN across the advertised forest domains.</summary>
+    /// <param name="username">The service-account user principal name.</param>
+    /// <param name="cancellationToken">Cancels forest discovery, binds, and searches.</param>
+    /// <returns>The unique service-account distinguished name.</returns>
+    /// <exception cref="InvalidOperationException">The UPN does not identify exactly one forest account.</exception>
+    internal async Task<string> ResolveServiceAccountDistinguishedNameAsync(
+        string username,
+        CancellationToken cancellationToken)
+    {
+        var domains = await GetForestDomainsAsync(cancellationToken);
+        var escapedUpn = string.Concat(System.Text.Encoding.UTF8.GetBytes(username)
+            .Select(value => $"\\{value:x2}"));
+        var matches = new List<string>();
+        foreach (var domain in domains)
+        {
+            using var connection = await CreateConnectionAsync(domain.DnsRoot, cancellationToken);
+            var entries = await connection.SearchAsync(
+                domain.NamingContext,
+                $"(&(objectCategory=person)(objectClass=user)(userPrincipalName={escapedUpn}))",
+                ActiveDirectoryLdapSearchScope.Subtree,
+                ["distinguishedName"],
+                _options.PageSize,
+                cancellationToken);
+            matches.AddRange(entries.Select(entry => entry.DistinguishedName));
+        }
+        if (matches.Count != 1)
+        {
+            throw new InvalidOperationException(
+                "The configured service-account UPN must resolve to exactly one account in the forest.");
+        }
+        return matches[0];
+    }
+
     /// <summary>Reads every domain advertised by the configured forest.</summary>
     /// <remarks>
     /// Discovery always starts through the configured server, never through a server name derived
@@ -190,7 +223,7 @@ public sealed class LdapActiveDirectoryDeviceSource :
     private async Task<IReadOnlyList<ForestDomain>> GetForestDomainsAsync(
         CancellationToken cancellationToken)
     {
-        using var connection = await CreateConnectionAsync(_options.Domain, cancellationToken);
+        using var connection = await CreateConnectionAsync(server: null, cancellationToken);
         var rootResponse = await connection.SearchAsync(
             string.Empty,
             "(objectClass=*)",
@@ -292,12 +325,12 @@ public sealed class LdapActiveDirectoryDeviceSource :
     /// The active credential is tried first. If its bind fails during an interrupted rotation,
     /// the staged <c>next</c> credential is loaded and tried against the same server.
     /// </remarks>
-    /// <param name="server">The AD DNS domain whose domain controllers are contacted.</param>
+    /// <param name="server">The AD DNS domain, or null to read the current forest-domain configuration.</param>
     /// <param name="cancellationToken">Cancels credential loading and the bind.</param>
     /// <returns>A bound connection that must be disposed by the caller.</returns>
     /// <exception cref="ActiveDirectoryLdapException">Neither the active nor a staged credential could bind.</exception>
     private async Task<IActiveDirectoryLdapConnection> CreateConnectionAsync(
-        string server,
+        string? server,
         CancellationToken cancellationToken)
     {
         var current = await _credentialStore.GetCurrentAsync(cancellationToken);

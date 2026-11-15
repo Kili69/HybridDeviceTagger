@@ -56,6 +56,29 @@ public sealed class KeyVaultActiveDirectoryCredentialStoreTests
         Assert.Null(await store.GetNextAsync(CancellationToken.None));
     }
 
+    [Fact]
+    public async Task ClearNextAsync_WritesPlaceholderAndCurrentUsesRenamedAccount()
+    {
+        var client = CreateClient(CurrentName, new KeyVaultSecret(CurrentName, "existing"));
+        client
+            .Setup(value => value.SetSecretAsync(It.IsAny<KeyVaultSecret>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((KeyVaultSecret secret, CancellationToken _) =>
+                Response.FromValue(secret, Mock.Of<Response>()));
+        var store = CreateStore(client, "renamed@example.com");
+
+        await store.ClearNextAsync(CancellationToken.None);
+        var current = await store.GetCurrentAsync(CancellationToken.None);
+
+        client.Verify(
+            value => value.SetSecretAsync(
+                It.Is<KeyVaultSecret>(secret =>
+                    secret.Name == NextName &&
+                    secret.Properties.ContentType == KeyVaultActiveDirectoryCredentialStore.PlaceholderContentType),
+                It.IsAny<CancellationToken>()),
+            Times.Once);
+        Assert.Equal("renamed@example.com", current.Username);
+    }
+
     private static KeyVaultSecret Placeholder(string name)
     {
         var secret = new KeyVaultSecret(name, Guid.NewGuid().ToString());
@@ -72,8 +95,15 @@ public sealed class KeyVaultActiveDirectoryCredentialStoreTests
         return client;
     }
 
-    private static KeyVaultActiveDirectoryCredentialStore CreateStore(Mock<SecretClient> client) =>
-        new(
+    private static KeyVaultActiveDirectoryCredentialStore CreateStore(
+        Mock<SecretClient> client,
+        string? renamedAccount = null)
+    {
+        var configurationStore = new Mock<IActiveDirectoryConfigurationStore>();
+        configurationStore.Setup(value => value.GetAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ActiveDirectoryConfigurationSnapshot(
+                "example.com", null, null, renamedAccount is null ? "appSetting" : "blob", renamedAccount));
+        return new(
             client.Object,
             Microsoft.Extensions.Options.Options.Create(new ActiveDirectoryOptions
             {
@@ -87,5 +117,7 @@ public sealed class KeyVaultActiveDirectoryCredentialStoreTests
                 NextPasswordSecretName = NextName
             }),
             Microsoft.Extensions.Options.Options.Create(new PasswordRotationOptions()),
-            TimeProvider.System);
+            TimeProvider.System,
+            configurationStore.Object);
+    }
 }

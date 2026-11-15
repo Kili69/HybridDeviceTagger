@@ -28,6 +28,7 @@ namespace HybridDeviceTagger.Models;
 /// <param name="MembershipsAdded">Number of Entra memberships added.</param>
 /// <param name="MembershipsRemoved">Number of owned Entra memberships removed.</param>
 /// <param name="RemovedFromScope">Number of managed devices no longer found in any configured OU.</param>
+/// <param name="ChangedDeviceNames">Entra display names of the changed devices, for the activity log.</param>
 public sealed record TaggingResult(
     int Discovered,
     int Updated,
@@ -36,4 +37,5 @@ public sealed record TaggingResult(
     int NotHybridJoined,
     int MembershipsAdded = 0,
     int MembershipsRemoved = 0,
-    int RemovedFromScope = 0);
+    int RemovedFromScope = 0,
+    IReadOnlyList<string>? ChangedDeviceNames = null);

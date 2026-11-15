@@ -18,11 +18,14 @@
  */
 
 using System.Text.Json;
+using System.ComponentModel.DataAnnotations;
+using Azure;
 using HybridDeviceTagger.Models;
 using HybridDeviceTagger.Options;
 using HybridDeviceTagger.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Infrastructure;
 using Microsoft.Azure.Functions.Worker;
 
 namespace HybridDeviceTagger;
@@ -33,10 +36,10 @@ namespace HybridDeviceTagger;
 /// authenticates the caller in front of the worker; each endpoint then authorizes the
 /// Easy Auth principal against its required application roles or Azure RBAC assignments.
 /// </remarks>
-public sealed class ManagementApiFunction
+public sealed partial class ManagementApiFunction
 {
     /// <summary>The maximum accepted request body size in bytes.</summary>
-    private const int MaximumRequestBytes = 65536;
+    internal const int MaximumRequestBytes = 65536;
 
     /// <summary>Web JSON defaults with case-insensitive property matching for request bodies.</summary>
     private static readonly JsonSerializerOptions SerializerOptions =
@@ -66,6 +69,12 @@ public sealed class ManagementApiFunction
     /// <summary>Authorizes the Easy Auth principal of each request.</summary>
     private readonly IManagementApiAuthorizer _authorizer;
 
+    /// <summary>Reads and updates the shared forest-domain configuration.</summary>
+    private readonly IActiveDirectoryConfigurationStore _directoryConfigurationStore;
+
+    /// <summary>Records configuration changes, requested runs, and denied requests.</summary>
+    private readonly IActivityLog _activityLog;
+
     /// <summary>Initializes the management API.</summary>
     /// <param name="configurationService">Validates and persists tagging-rule mutations.</param>
     /// <param name="statusStore">Reads and records operation run statuses.</param>
@@ -75,6 +84,8 @@ public sealed class ManagementApiFunction
     /// <param name="timeProvider">Supplies the request timestamp of queued operations.</param>
     /// <param name="credentialInitializer">Validates and stores the initial Active Directory credential.</param>
     /// <param name="authorizer">Authorizes the Easy Auth principal of each request.</param>
+    /// <param name="directoryConfigurationStore">Reads and updates the forest-domain configuration.</param>
+    /// <param name="activityLog">The optional activity log.</param>
     public ManagementApiFunction(
         TaggingConfigurationService configurationService,
         IOperationStatusStore statusStore,
@@ -83,8 +94,11 @@ public sealed class ManagementApiFunction
         IOperationRequestQueue requestQueue,
         TimeProvider timeProvider,
         IActiveDirectoryCredentialInitializer credentialInitializer,
-        IManagementApiAuthorizer authorizer)
+        IManagementApiAuthorizer authorizer,
+        IActiveDirectoryConfigurationStore directoryConfigurationStore,
+        IActivityLog? activityLog = null)
     {
+        _activityLog = activityLog ?? NullActivityLog.Instance;
         _configurationService = configurationService;
         _statusStore = statusStore;
         _traceReader = traceReader;
@@ -93,6 +107,7 @@ public sealed class ManagementApiFunction
         _timeProvider = timeProvider;
         _credentialInitializer = credentialInitializer;
         _authorizer = authorizer;
+        _directoryConfigurationStore = directoryConfigurationStore;
     }
 
     /// <summary>Gets the effective tagging-rule configuration.</summary>
@@ -142,12 +157,19 @@ public sealed class ManagementApiFunction
             return authorizationFailure;
         }
 
-        return await ExecuteConfigurationMutationAsync(
+        return RecordActivity(
             request,
-            async () => await _configurationService.ReplaceAsync(
-                await ReadJsonAsync<List<TaggingRuleOptions>>(request, cancellationToken),
-                cancellationToken,
-                GetExpectedETag(request)));
+            ActivityCategories.Configuration,
+            "RulesReplaced",
+            "all tagging rules",
+            await ExecuteConfigurationMutationAsync(
+                request,
+                async () => await _configurationService.ReplaceAsync(
+                    await ReadJsonAsync<List<TaggingRuleOptions>>(request, cancellationToken),
+                    cancellationToken,
+                    GetExpectedETag(request),
+                    await IsFunctionAppAdministratorAsync(request, cancellationToken)),
+                ConfigurationResult));
     }
 
     /// <summary>Adds or completely replaces one named tagging rule.</summary>
@@ -171,7 +193,8 @@ public sealed class ManagementApiFunction
             return authorizationFailure;
         }
 
-        return await ExecuteConfigurationMutationAsync(request, async () =>
+        return RecordActivity(request, ActivityCategories.Configuration, "RuleUpserted", ruleName,
+            await ExecuteConfigurationMutationAsync(request, async () =>
         {
             var rule = await ReadJsonAsync<TaggingRuleOptions>(request, cancellationToken);
             if (!string.Equals(ruleName, rule.Name, StringComparison.OrdinalIgnoreCase))
@@ -183,8 +206,9 @@ public sealed class ManagementApiFunction
             return await _configurationService.UpsertAsync(
                 rule,
                 cancellationToken,
-                GetExpectedETag(request));
-        });
+                GetExpectedETag(request),
+                await IsFunctionAppAdministratorAsync(request, cancellationToken));
+        }, ConfigurationResult));
     }
 
     /// <summary>Removes one named tagging rule.</summary>
@@ -208,12 +232,18 @@ public sealed class ManagementApiFunction
             return authorizationFailure;
         }
 
-        return await ExecuteConfigurationMutationAsync(
+        return RecordActivity(
             request,
-            () => _configurationService.RemoveAsync(
-                ruleName,
-                cancellationToken,
-                GetExpectedETag(request)));
+            ActivityCategories.Configuration,
+            "RuleRemoved",
+            ruleName,
+            await ExecuteConfigurationMutationAsync(
+                request,
+                () => _configurationService.RemoveAsync(
+                    ruleName,
+                    cancellationToken,
+                    GetExpectedETag(request)),
+                ConfigurationResult));
     }
 
     /// <summary>Gets the status of the latest device-tagging run.</summary>
@@ -269,7 +299,12 @@ public sealed class ManagementApiFunction
             return authorizationFailure;
         }
 
-        return await QueueOperationAsync(OperationNames.DeviceTagging, cancellationToken);
+        return RecordActivity(
+            request,
+            ActivityCategories.Tagging,
+            "TaggingRunRequested",
+            null,
+            await QueueOperationAsync(OperationNames.DeviceTagging, cancellationToken));
     }
 
     /// <summary>Queues an immediate Active Directory service-account password rotation.</summary>
@@ -291,7 +326,12 @@ public sealed class ManagementApiFunction
             return authorizationFailure;
         }
 
-        return await QueueOperationAsync(OperationNames.PasswordRotation, cancellationToken);
+        return RecordActivity(
+            request,
+            ActivityCategories.Password,
+            "PasswordRotationRequested",
+            null,
+            await QueueOperationAsync(OperationNames.PasswordRotation, cancellationToken));
     }
 
     /// <summary>Validates and stores the initial Active Directory service-account password.</summary>
@@ -317,6 +357,22 @@ public sealed class ManagementApiFunction
             return authorizationFailure;
         }
 
+        return RecordActivity(
+            request,
+            ActivityCategories.Password,
+            "CredentialInitialized",
+            null,
+            await InitializeActiveDirectoryCredentialCoreAsync(request, cancellationToken));
+    }
+
+    /// <summary>Validates and stores the initial password and maps expected failures to HTTP results.</summary>
+    /// <param name="request">The HTTP request whose JSON body contains the password.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>HTTP 200, 400, 409, or 413.</returns>
+    private async Task<IActionResult> InitializeActiveDirectoryCredentialCoreAsync(
+        HttpRequest request,
+        CancellationToken cancellationToken)
+    {
         try
         {
             var input = await ReadJsonAsync<InitializeCredentialRequest>(request, cancellationToken);
@@ -330,7 +386,11 @@ public sealed class ManagementApiFunction
         }
         catch (ActiveDirectoryCredentialValidationException exception)
         {
-            return new BadRequestObjectResult(new { error = exception.Message });
+            return new BadRequestObjectResult(new
+            {
+                error = exception.Message,
+                attempts = exception.Validation.Attempts
+            });
         }
         catch (ActiveDirectoryCredentialAlreadyInitializedException exception)
         {
@@ -455,17 +515,20 @@ public sealed class ManagementApiFunction
     /// <summary>Runs a configuration mutation and maps its expected failures to HTTP results.</summary>
     /// <param name="request">The HTTP request whose response receives the new ETag.</param>
     /// <param name="mutation">The mutation that reads the body and persists the configuration.</param>
+    /// <param name="createResult">Creates the resource response including its ETag.</param>
+    /// <typeparam name="T">The configuration snapshot type.</typeparam>
     /// <returns>
     /// HTTP 200 with the stored configuration; 400 for validation or JSON errors; 413 for an oversized
     /// body; 409 for an ETag conflict; or 404 for an unknown rule.
     /// </returns>
-    private async Task<IActionResult> ExecuteConfigurationMutationAsync(
+    private async Task<IActionResult> ExecuteConfigurationMutationAsync<T>(
         HttpRequest request,
-        Func<Task<TaggingConfigurationSnapshot>> mutation)
+        Func<Task<T>> mutation,
+        Func<HttpRequest, T, IActionResult> createResult)
     {
         try
         {
-            return ConfigurationResult(request, await mutation());
+            return createResult(request, await mutation());
         }
         catch (TaggingConfigurationValidationException exception)
         {
@@ -482,6 +545,14 @@ public sealed class ManagementApiFunction
                 error = "The request body is not valid JSON.",
                 detail = exception.Message
             });
+        }
+        catch (ValidationException exception)
+        {
+            return new BadRequestObjectResult(new { error = exception.Message });
+        }
+        catch (RequestFailedException exception) when (exception.Status is 409 or 412)
+        {
+            return new ConflictObjectResult(new { error = "The configuration changed concurrently. Read it again before retrying." });
         }
         catch (RequestBodyTooLargeException)
         {
@@ -534,7 +605,7 @@ public sealed class ManagementApiFunction
     /// <returns>The deserialized request body.</returns>
     /// <exception cref="RequestBodyTooLargeException">The body exceeds <see cref="MaximumRequestBytes"/>.</exception>
     /// <exception cref="JsonException">The body is not valid JSON, is empty, or is the JSON literal null.</exception>
-    private static async Task<T> ReadJsonAsync<T>(
+    internal static async Task<T> ReadJsonAsync<T>(
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -588,19 +659,121 @@ public sealed class ManagementApiFunction
     private async Task<IActionResult?> AuthorizeAsync(
         HttpRequest request,
         CancellationToken cancellationToken,
-        params string[] requiredRoles) =>
-        (await _authorizer.AuthorizeAsync(request, requiredRoles, cancellationToken)) switch
+        params string[] requiredRoles)
+    {
+        var result = await _authorizer.AuthorizeAsync(request, requiredRoles, cancellationToken);
+        if (result == EasyAuthAuthorizationResult.Authorized)
         {
-            EasyAuthAuthorizationResult.Authorized => null,
-            EasyAuthAuthorizationResult.Forbidden => Forbidden(),
-            _ => Unauthorized()
+            return null;
+        }
+
+        _activityLog.Record(new ActivityEntry(
+            ActivityCategories.Access,
+            "RequestDenied",
+            ActivityOutcomes.Denied,
+            EasyAuthPrincipalValidator.GetActor(request),
+            $"{request.Method} {request.Path}",
+            $"Required one of: {string.Join(", ", requiredRoles)}"));
+        return result == EasyAuthAuthorizationResult.Forbidden ? Forbidden() : Unauthorized();
+    }
+
+    /// <summary>Returns whether the caller is an effective Function App Owner or Contributor.</summary>
+    /// <param name="request">The HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="cancellationToken">Cancels the Azure RBAC lookup.</param>
+    /// <returns><see langword="true"/> for Owners and Contributors.</returns>
+    private async Task<bool> IsFunctionAppAdministratorAsync(HttpRequest request, CancellationToken cancellationToken) =>
+        await _authorizer.AuthorizeFunctionAppAdministratorAsync(request, cancellationToken) ==
+        EasyAuthAuthorizationResult.Authorized;
+
+    /// <summary>Authorizes only effective Function App Owners and Contributors and records denials.</summary>
+    /// <param name="request">The HTTP request carrying the Easy Auth principal.</param>
+    /// <param name="cancellationToken">Cancels the Azure RBAC lookup.</param>
+    /// <returns><see langword="null"/> when authorized; otherwise the HTTP 401 or 403 result to return.</returns>
+    private async Task<IActionResult?> AuthorizeFunctionAppAdministratorAsync(
+        HttpRequest request,
+        CancellationToken cancellationToken)
+    {
+        var result = await _authorizer.AuthorizeFunctionAppAdministratorAsync(request, cancellationToken);
+        if (result == EasyAuthAuthorizationResult.Authorized)
+        {
+            return null;
+        }
+
+        _activityLog.Record(new ActivityEntry(
+            ActivityCategories.Access,
+            "RequestDenied",
+            ActivityOutcomes.Denied,
+            EasyAuthPrincipalValidator.GetActor(request),
+            $"{request.Method} {request.Path}",
+            "Requires Owner or Contributor on the Function App."));
+        return result == EasyAuthAuthorizationResult.Forbidden
+            ? new ObjectResult(new { error = "This operation requires the Owner or Contributor role on the Function App." })
+            {
+                StatusCode = StatusCodes.Status403Forbidden
+            }
+            : Unauthorized();
+    }
+
+    /// <summary>Records the outcome of a management change and returns its result unchanged.</summary>
+    /// <param name="request">The request identifying the actor.</param>
+    /// <param name="category">The activity category.</param>
+    /// <param name="action">The action name.</param>
+    /// <param name="target">The affected object.</param>
+    /// <param name="result">The HTTP result of the change.</param>
+    /// <returns><paramref name="result"/>.</returns>
+    private IActionResult RecordActivity(
+        HttpRequest request,
+        string category,
+        string action,
+        string? target,
+        IActionResult result)
+    {
+        var statusCode = result switch
+        {
+            IStatusCodeActionResult { StatusCode: { } code } => code,
+            _ => StatusCodes.Status200OK
         };
+        _activityLog.Record(new ActivityEntry(
+            category,
+            action,
+            statusCode < 400 ? ActivityOutcomes.Succeeded : ActivityOutcomes.Failed,
+            EasyAuthPrincipalValidator.GetActor(request),
+            target,
+            statusCode < 400 ? null : $"HTTP {statusCode}: {GetError(result)}"));
+        return result;
+    }
+
+    /// <summary>Extracts the error message of an error result body.</summary>
+    /// <param name="result">The HTTP result.</param>
+    /// <returns>The error text, or an empty string.</returns>
+    private static string GetError(IActionResult result)
+    {
+        if (result is not ObjectResult { Value: { } value })
+        {
+            return string.Empty;
+        }
+
+        using var document = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(value, value.GetType(), SerializerOptions));
+        var parts = new List<string>();
+        if (document.RootElement.ValueKind == JsonValueKind.Object)
+        {
+            if (document.RootElement.TryGetProperty("error", out var error))
+            {
+                parts.Add(error.ToString());
+            }
+            if (document.RootElement.TryGetProperty("errors", out var errors))
+            {
+                parts.Add(errors.ToString());
+            }
+        }
+        return string.Join(" ", parts);
+    }
 
     /// <summary>Reads the optional optimistic-concurrency ETag from the <c>If-Match</c> header.</summary>
     /// <param name="request">The HTTP request whose headers are read.</param>
     /// <returns>The single <c>If-Match</c> value, or <see langword="null"/> when the header is absent.</returns>
     /// <exception cref="TaggingConfigurationValidationException">The header has several or an empty value.</exception>
-    private static string? GetExpectedETag(HttpRequest request)
+    internal static string? GetExpectedETag(HttpRequest request)
     {
         var values = request.Headers.IfMatch;
         if (values.Count > 1 || values.Count == 1 && string.IsNullOrWhiteSpace(values[0]))
@@ -613,7 +786,7 @@ public sealed class ManagementApiFunction
     }
 
     /// <summary>Signals that a request body exceeds <see cref="MaximumRequestBytes"/>.</summary>
-    private sealed class RequestBodyTooLargeException : Exception;
+    internal sealed class RequestBodyTooLargeException : Exception;
 
     /// <summary>Represents the body of the credential-initialization request.</summary>
     /// <param name="Password">The initial Active Directory service-account password.</param>

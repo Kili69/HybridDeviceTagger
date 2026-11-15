@@ -86,7 +86,6 @@ $ErrorActionPreference = 'Stop'
 $enginePath = Join-Path $PSScriptRoot 'Install-HybridDeviceTagger.ps1'
 $guidPattern = '^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
 $dnsNamePattern = '^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$'
-$ncrontabPattern = '^\S+(\s+\S+){5}$'
 
 <#
 .SYNOPSIS
@@ -306,18 +305,6 @@ function Assert-Prerequisite {
 
 <#
 .SYNOPSIS
-Returns the object ID of the signed-in Entra user, or an empty string.
-#>
-function Get-SignedInUserObjectId {
-    $id = & az ad signed-in-user show --query id --output tsv --only-show-errors 2>$null
-    if ($LASTEXITCODE -eq 0 -and [string]$id -match $guidPattern) {
-        return [string]$id
-    }
-    ''
-}
-
-<#
-.SYNOPSIS
 Loads previously saved answers from SettingsPath.
 #>
 function Read-SavedSetting {
@@ -428,13 +415,17 @@ function Read-InstallationSetting {
         -Prompt 'Service account distinguished name' `
         -Optional `
         -Help 'Leave empty to resolve it from the UPN.'
+    Write-Host '  REQUIRED: Supply the public root CA certificate (.cer/.pem) that issued the domain controller certificate.' -ForegroundColor Yellow
+    Write-Host '  The installer imports it into the Azure Function package for LDAPS and StartTLS validation.' -ForegroundColor Yellow
+    Write-Host '  Importing it into the installation PC certificate store alone is NOT sufficient. Do not supply a private key.' -ForegroundColor Yellow
     $settings.ActiveDirectoryTrustedCertificatePath = Get-Answer -Name ActiveDirectoryTrustedCertificatePath `
-        -Prompt 'Path to the LDAPS root CA certificate (.cer/.pem)' `
-        -Optional `
-        -Help 'Required when the domain controller certificate is issued by a private CA. Enter - to clear a saved value.'
-    if ($settings.ActiveDirectoryTrustedCertificatePath) {
-        $settings.ActiveDirectoryTrustedCertificatePath = (Resolve-Path -LiteralPath $settings.ActiveDirectoryTrustedCertificatePath).Path
+        -Prompt 'Path to the LDAPS root CA certificate (.cer/.pem) (required)' `
+        -Help 'Installation cannot continue without this certificate file. Export the public root CA certificate from your AD certification authority. Paths with spaces may be entered with or without surrounding quotes.'
+    $certificatePath = $settings.ActiveDirectoryTrustedCertificatePath.Trim()
+    if ($certificatePath -match '^([''"])(.*)\1$') {
+        $certificatePath = $Matches[2]
     }
+    $settings.ActiveDirectoryTrustedCertificatePath = (Resolve-Path -LiteralPath $certificatePath).Path
 
     Write-Section 'Management API'
     $settings.ManagementApiClientId = Get-Answer -Name ManagementApiClientId `
@@ -442,20 +433,19 @@ function Read-InstallationSetting {
         -Optional `
         -Pattern $guidPattern -ValidationMessage 'Enter the application (client) ID GUID.' `
         -Help 'Leave empty to let the installer create the app registration, or to reuse the one of an existing installation.'
-    $settings.ManagementApiAllowedPrincipalObjectId = Get-Answer -Name ManagementApiAllowedPrincipalObjectId `
-        -Prompt 'Object ID of the user or group that receives all management API roles' `
-        -Default (Get-SignedInUserObjectId) `
-        -Pattern $guidPattern -ValidationMessage 'Enter an object ID GUID.'
+    Write-Host '  Function App Owners and Contributors can administer rules and password rotation by default.' -ForegroundColor DarkGray
+    Write-Host '  Additional users and groups can be assigned management API roles later with the required Entra permissions.' -ForegroundColor DarkGray
 
     Write-Section 'Operation'
-    $settings.TaggingSchedule = Get-Answer -Name TaggingSchedule `
-        -Prompt 'Device-tagging schedule (NCRONTAB, UTC)' `
-        -Default '0 */15 * * * *' `
-        -Pattern $ncrontabPattern -ValidationMessage 'Enter six NCRONTAB fields.'
-    $settings.RotationSchedule = Get-Answer -Name RotationSchedule `
-        -Prompt 'Password-rotation check schedule (NCRONTAB, UTC)' `
-        -Default '0 30 2 * * *' `
-        -Pattern $ncrontabPattern -ValidationMessage 'Enter six NCRONTAB fields.'
+    $settings.TaggingIntervalMinutes = Get-Answer -Name TaggingIntervalMinutes `
+        -Prompt 'Tagging interval in minutes (5-1440)' `
+        -Default '15' `
+        -Pattern '^(?:[5-9]|[1-9]\d|[1-9]\d\d|1[0-3]\d\d|14[0-3]\d|1440)$' -ValidationMessage 'Enter a number from 5 to 1440.' `
+        -Help 'Initial value; Function App Owners and Contributors can change it later in the configuration portal.'
+    $settings.PasswordRotationDays = Get-Answer -Name PasswordRotationDays `
+        -Prompt 'Password rotation interval in days (1-29)' `
+        -Default '25' `
+        -Pattern '^(?:[1-9]|1\d|2\d)$' -ValidationMessage 'Enter a number from 1 to 29.'
     $settings.RegisterProviders = [bool](Get-SavedValue -Name RegisterProviders -Fallback $true)
     if (-not $UseSavedSettings) {
         $settings.RegisterProviders = Read-YesNo `
@@ -490,7 +480,7 @@ function ConvertTo-EngineParameter {
     # the UPN from ADServiceAccountCredential, which cannot be combined with ADServiceAccount.
     $parameters = @{}
     foreach ($entry in $Settings.GetEnumerator()) {
-        if ($entry.Key -eq 'ServiceAccountUpn') {
+        if ($entry.Key -in 'ServiceAccountUpn', 'ManagementApiAllowedPrincipalObjectId') {
             continue
         }
         if ($entry.Value -is [bool]) {
@@ -503,7 +493,6 @@ function ConvertTo-EngineParameter {
         }
         $parameters[$entry.Key] = $entry.Value
     }
-    $parameters.ManagementApiAllowedPrincipalObjectId = @([guid]$Settings.ManagementApiAllowedPrincipalObjectId)
     $parameters.ADServiceAccountCredential = $script:ActiveDirectoryCredential
     $parameters
 }

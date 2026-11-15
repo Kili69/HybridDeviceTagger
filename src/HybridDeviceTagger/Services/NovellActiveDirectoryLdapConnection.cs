@@ -18,6 +18,7 @@
  */
 
 using Novell.Directory.Ldap;
+using Novell.Directory.Ldap.Controls;
 
 namespace HybridDeviceTagger.Services;
 
@@ -50,12 +51,7 @@ internal sealed class NovellActiveDirectoryLdapConnection : IActiveDirectoryLdap
                 ToNovellScope(scope),
                 filter,
                 attributes.ToArray());
-            var entries = pageSize.HasValue
-                ? await _connection.SearchUsingSimplePagingAsync(
-                    options,
-                    pageSize.Value,
-                    cancellationToken)
-                : await ReadAllAsync(options, cancellationToken);
+            var entries = await ReadAllAsync(options, pageSize, cancellationToken);
             return entries.Select(entry => ConvertEntry(entry, attributes)).ToArray();
         }
         catch (LdapException exception)
@@ -94,27 +90,73 @@ internal sealed class NovellActiveDirectoryLdapConnection : IActiveDirectoryLdap
     /// <summary>Disposes the underlying Novell connection.</summary>
     public void Dispose() => _connection.Dispose();
 
-    /// <summary>Runs an unpaged search and reads every result.</summary>
+    /// <summary>The OID of the simple paged results control.</summary>
+    private const string PagedResultsOid = "1.2.840.113556.1.4.319";
+
+    /// <summary>Runs a search, optionally paged, and reads every entry.</summary>
+    /// <remarks>
+    /// Subtree searches from a domain root return continuation references to the
+    /// DomainDnsZones and ForestDnsZones partitions. Referrals are not followed, so these
+    /// references surface as <see cref="LdapReferralException"/> and are skipped instead of
+    /// failing the whole search.
+    /// </remarks>
     /// <param name="options">The search base, scope, filter, and attributes.</param>
+    /// <param name="pageSize">The page size, or null for an unpaged search.</param>
     /// <param name="cancellationToken">Cancels the search.</param>
     /// <returns>All returned entries.</returns>
     private async Task<List<LdapEntry>> ReadAllAsync(
         SearchOptions options,
+        int? pageSize,
         CancellationToken cancellationToken)
     {
-        var results = await _connection.SearchAsync(
-            options.SearchBase,
-            options.Scope,
-            options.Filter,
-            options.TargetAttributes,
-            typesOnly: false,
-            cancellationToken);
         var entries = new List<LdapEntry>();
-        while (await results.HasMoreAsync(cancellationToken))
+        var cookie = Array.Empty<byte>();
+        do
         {
-            entries.Add(await results.NextAsync(cancellationToken));
+            var constraints = (LdapSearchConstraints)_connection.SearchConstraints.Clone();
+            constraints.ReferralFollowing = false;
+            if (pageSize.HasValue)
+            {
+                constraints.SetControls(new SimplePagedResultsControl(pageSize.Value, cookie));
+            }
+
+            var results = await _connection.SearchAsync(
+                options.SearchBase,
+                options.Scope,
+                options.Filter,
+                options.TargetAttributes,
+                typesOnly: false,
+                constraints,
+                cancellationToken);
+            while (await results.HasMoreAsync(cancellationToken))
+            {
+                try
+                {
+                    entries.Add(await results.NextAsync(cancellationToken));
+                }
+                catch (LdapReferralException)
+                {
+                }
+            }
+
+            cookie = pageSize.HasValue ? GetPagingCookie(results.ResponseControls) : [];
         }
+        while (cookie.Length > 0);
         return entries;
+    }
+
+    /// <summary>Reads the server cookie of the next result page.</summary>
+    /// <param name="controls">The response controls of the completed page.</param>
+    /// <returns>The cookie, or an empty array after the last page.</returns>
+    private static byte[] GetPagingCookie(LdapControl[]? controls)
+    {
+        var control = controls?.FirstOrDefault(value => value.Id == PagedResultsOid);
+        return control switch
+        {
+            null => [],
+            SimplePagedResultsControl paged => paged.Cookie ?? [],
+            _ => new SimplePagedResultsControl(control.Id, control.Critical, control.GetValue()).Cookie ?? []
+        };
     }
 
     /// <summary>Converts a Novell entry, keeping only the requested attributes.</summary>
@@ -173,5 +215,9 @@ internal sealed class NovellActiveDirectoryLdapConnection : IActiveDirectoryLdap
     /// <param name="exception">The Novell LDAP exception.</param>
     /// <returns>The client-independent exception to throw.</returns>
     private static ActiveDirectoryLdapException Wrap(LdapException exception) =>
-        new("The Active Directory LDAP operation failed.", exception.ResultCode, exception);
+        new(string.IsNullOrWhiteSpace(exception.LdapErrorMessage)
+                ? $"The Active Directory LDAP operation failed: {exception.Message} (LDAP result code {exception.ResultCode})."
+                : $"The Active Directory LDAP operation failed: {exception.Message} (LDAP result code {exception.ResultCode}): {exception.LdapErrorMessage.Trim().TrimEnd('\0').Trim()}",
+            exception.ResultCode,
+            exception);
 }

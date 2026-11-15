@@ -44,39 +44,64 @@ public sealed class ActiveDirectoryCredentialInitializer : IActiveDirectoryCrede
     /// <summary>Tests whether a credential can bind to Active Directory.</summary>
     private readonly IActiveDirectoryPasswordClient _passwordClient;
 
-    /// <summary>The Active Directory settings that identify the service account.</summary>
+    /// <summary>The initial Active Directory settings that identify the service account.</summary>
     private readonly ActiveDirectoryOptions _activeDirectoryOptions;
+
+    /// <summary>Supplies the effective service-account override.</summary>
+    private readonly IActiveDirectoryConfigurationStore _configurationStore;
 
     /// <summary>Initializes a new credential initializer.</summary>
     /// <param name="credentialStore">Stores the active service-account credential.</param>
     /// <param name="passwordClient">Tests whether a credential can bind to Active Directory.</param>
     /// <param name="activeDirectoryOptions">The Active Directory settings that identify the service account.</param>
+    /// <param name="configurationStore">The service-account override store.</param>
     public ActiveDirectoryCredentialInitializer(
         IActiveDirectoryCredentialStore credentialStore,
         IActiveDirectoryPasswordClient passwordClient,
-        IOptions<ActiveDirectoryOptions> activeDirectoryOptions)
+        IOptions<ActiveDirectoryOptions> activeDirectoryOptions,
+        IActiveDirectoryConfigurationStore configurationStore)
     {
         _credentialStore = credentialStore;
         _passwordClient = passwordClient;
         _activeDirectoryOptions = activeDirectoryOptions.Value;
+        _configurationStore = configurationStore;
     }
 
     /// <inheritdoc />
     public async Task InitializeAsync(string password, CancellationToken cancellationToken)
     {
+        var configuration = await _configurationStore.GetAsync(cancellationToken);
         var credential = new StoredDirectoryCredential(
-            _activeDirectoryOptions.BindUsername,
+            configuration.GetServiceAccount(_activeDirectoryOptions).Username,
             password,
             null);
-        if (!await _passwordClient.CanBindAsync(credential, cancellationToken))
+        var validation = await _passwordClient.ValidateAccessAsync(credential, cancellationToken);
+        if (!validation.Succeeded)
         {
-            throw new ActiveDirectoryCredentialValidationException();
+            throw new ActiveDirectoryCredentialValidationException(validation);
         }
 
         await _credentialStore.InitializeCurrentAsync(password, cancellationToken);
     }
 }
 
-/// <summary>Indicates that the supplied password cannot authenticate the configured AD account.</summary>
-public sealed class ActiveDirectoryCredentialValidationException()
-    : InvalidOperationException("The supplied password cannot authenticate the configured Active Directory account.");
+/// <summary>Indicates that a credential could not be validated against Active Directory.</summary>
+/// <remarks>
+/// Distinguishes rejected credentials from TLS, DNS, or connectivity failures so the caller sees
+/// the actual cause. The message never contains the password.
+/// </remarks>
+public sealed class ActiveDirectoryCredentialValidationException : InvalidOperationException
+{
+    /// <summary>Initializes the exception from a validation result.</summary>
+    /// <param name="validation">The failed validation result.</param>
+    public ActiveDirectoryCredentialValidationException(ActiveDirectoryAccessValidationResult validation)
+        : base(validation.InvalidCredentials
+            ? "The supplied password cannot authenticate the configured Active Directory account."
+            : $"Active Directory could not be reached securely, so the password was not validated: {validation.Error}")
+    {
+        Validation = validation;
+    }
+
+    /// <summary>Gets the validation result with every connection attempt.</summary>
+    public ActiveDirectoryAccessValidationResult Validation { get; }
+}

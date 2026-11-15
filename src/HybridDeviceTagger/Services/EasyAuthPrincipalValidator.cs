@@ -88,6 +88,53 @@ public static class EasyAuthPrincipalValidator
         return Guid.TryParse(claim?.Value, out objectId);
     }
 
+    /// <summary>Gets a human-readable, non-secret description of the authenticated principal.</summary>
+    /// <remarks>
+    /// Combines the user principal name or display name with the object ID, for example
+    /// <c>admin@contoso.com (oid 1111…)</c>. Returns <c>anonymous</c> without a valid principal.
+    /// </remarks>
+    /// <param name="request">The HTTP request carrying the Easy Auth principal header.</param>
+    /// <returns>The actor description used in the activity log.</returns>
+    public static string GetActor(HttpRequest request)
+    {
+        var claims = ReadClaims(request);
+        if (claims is null)
+        {
+            return "anonymous";
+        }
+
+        string? Find(params string[] types) => claims.FirstOrDefault(claim =>
+            types.Contains(claim.Type, StringComparer.OrdinalIgnoreCase)).Value;
+        var name = Find(
+            "preferred_username",
+            "upn",
+            "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn",
+            "unique_name",
+            "name",
+            "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name");
+        var objectId = Find(ObjectIdClaim, ObjectIdClaimUri);
+        return (name, objectId) switch
+        {
+            (not null, not null) => $"{name} (oid {objectId})",
+            (not null, null) => name,
+            (null, not null) => $"oid {objectId}",
+            _ => "unknown principal"
+        };
+    }
+
+    /// <summary>Gets the display name of the authenticated principal for the portal header.</summary>
+    /// <param name="request">The HTTP request carrying the Easy Auth principal header.</param>
+    /// <returns>The display name, else the user principal name, else <c>unknown</c>.</returns>
+    public static string GetDisplayName(HttpRequest request)
+    {
+        var claims = ReadClaims(request);
+        string? Find(params string[] types) => claims?.FirstOrDefault(claim =>
+            types.Contains(claim.Type, StringComparer.OrdinalIgnoreCase)).Value;
+        return Find("name", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/name") ??
+            Find("preferred_username", "upn", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/upn") ??
+            "unknown";
+    }
+
     /// <summary>Returns whether an Entra principal has at least one required application role.</summary>
     /// <remarks>Role values are compared case-sensitively.</remarks>
     /// <param name="request">The HTTP request carrying the Easy Auth principal header.</param>

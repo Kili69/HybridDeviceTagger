@@ -33,15 +33,57 @@ public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPassword
     /// <summary>The service-account directory settings.</summary>
     private readonly ActiveDirectoryOptions _options;
 
+    /// <summary>Resolves the account DN when installation had no local directory access.</summary>
+    private readonly LdapActiveDirectoryDeviceSource _directorySource;
+
+    /// <summary>Supplies the effective service-account override.</summary>
+    private readonly IActiveDirectoryConfigurationStore _configurationStore;
+
     /// <summary>Initializes a new instance of the <see cref="LdapActiveDirectoryPasswordClient"/> class.</summary>
     /// <param name="connectionFactory">The authenticated LDAP connection factory.</param>
     /// <param name="options">The service-account directory settings.</param>
+    /// <param name="directorySource">The forest-aware service-account resolver.</param>
+    /// <param name="configurationStore">The service-account override store.</param>
     public LdapActiveDirectoryPasswordClient(
         ActiveDirectoryLdapConnectionFactory connectionFactory,
-        IOptions<ActiveDirectoryOptions> options)
+        IOptions<ActiveDirectoryOptions> options,
+        LdapActiveDirectoryDeviceSource directorySource,
+        IActiveDirectoryConfigurationStore configurationStore)
     {
         _connectionFactory = connectionFactory;
         _options = options.Value;
+        _directorySource = directorySource;
+        _configurationStore = configurationStore;
+    }
+
+    /// <inheritdoc />
+    public async Task<ActiveDirectoryAccessValidationResult> ValidateAccessAsync(
+        StoredDirectoryCredential credential,
+        CancellationToken cancellationToken)
+    {
+        var attempts = new List<ActiveDirectoryLdapConnectionAttempt>();
+        try
+        {
+            using var connection = await _connectionFactory.CreateBoundConnectionAsync(
+                credential,
+                server: null,
+                cancellationToken,
+                attempts);
+            return new ActiveDirectoryAccessValidationResult(true, false, null, attempts);
+        }
+        catch (ActiveDirectoryLdapException exception)
+        {
+            return new ActiveDirectoryAccessValidationResult(
+                false,
+                exception.ResultCode == 49,
+                ActiveDirectoryLdapConnectionFactory.Describe(exception),
+                attempts);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // DNS discovery and trust-anchor loading fail before any LDAP attempt.
+            return new ActiveDirectoryAccessValidationResult(false, false, exception.Message, attempts);
+        }
     }
 
     /// <inheritdoc />
@@ -110,14 +152,94 @@ public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPassword
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var distinguishedName = await GetDistinguishedNameAsync(cancellationToken);
         using var connection = await _connectionFactory.CreateSecureBoundConnectionAsync(
             currentCredential,
             cancellationToken);
         await connection.ChangePasswordAsync(
-            _options.BindUserDistinguishedName,
+            distinguishedName,
             ToUnicodePassword(currentCredential.Password),
             ToUnicodePassword(newPassword),
             cancellationToken);
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Reads <c>pwdLastSet</c> of the account and the minimum password age of its resultant
+    /// fine-grained password policy. When no policy applies or it cannot be read, the domain's
+    /// <c>minPwdAge</c> is used. Active Directory stores both ages as negative 100-nanosecond intervals.
+    /// </remarks>
+    public async Task<PasswordChangeWindow?> GetPasswordChangeWindowAsync(
+        StoredDirectoryCredential credential,
+        CancellationToken cancellationToken)
+    {
+        var distinguishedName = await GetDistinguishedNameAsync(cancellationToken);
+        using var connection = await _connectionFactory.CreateSecureBoundConnectionAsync(credential, cancellationToken);
+        var account = (await connection.SearchAsync(
+            distinguishedName,
+            "(objectClass=*)",
+            ActiveDirectoryLdapSearchScope.Base,
+            ["pwdLastSet", "msDS-ResultantPSO"],
+            pageSize: null,
+            cancellationToken)).FirstOrDefault();
+        if (!long.TryParse(account?.GetString("pwdLastSet"), out var lastSetFileTime) || lastSetFileTime <= 0)
+        {
+            return null;
+        }
+
+        var lastSet = DateTimeOffset.FromFileTime(lastSetFileTime).ToUniversalTime();
+        if (account!.GetString("msDS-ResultantPSO") is { Length: > 0 } policyDn)
+        {
+            try
+            {
+                var policy = (await connection.SearchAsync(
+                    policyDn,
+                    "(objectClass=*)",
+                    ActiveDirectoryLdapSearchScope.Base,
+                    ["msDS-MinimumPasswordAge"],
+                    pageSize: null,
+                    cancellationToken)).FirstOrDefault();
+                if (ParseInterval(policy?.GetString("msDS-MinimumPasswordAge")) is { } policyAge)
+                {
+                    return new PasswordChangeWindow(lastSet, policyAge, "fineGrainedPolicy");
+                }
+            }
+            catch (ActiveDirectoryLdapException)
+            {
+                // Reading password settings objects usually requires delegated rights; fall back to the domain.
+            }
+        }
+
+        var domainIndex = distinguishedName.IndexOf(",DC=", StringComparison.OrdinalIgnoreCase);
+        var domainDn = domainIndex < 0 ? distinguishedName : distinguishedName[(domainIndex + 1)..];
+        var domain = (await connection.SearchAsync(
+            domainDn,
+            "(objectClass=*)",
+            ActiveDirectoryLdapSearchScope.Base,
+            ["minPwdAge"],
+            pageSize: null,
+            cancellationToken)).FirstOrDefault();
+        return ParseInterval(domain?.GetString("minPwdAge")) is { } domainAge
+            ? new PasswordChangeWindow(lastSet, domainAge, "domain")
+            : null;
+    }
+
+    /// <summary>Converts an Active Directory interval (negative 100-nanosecond units) to a time span.</summary>
+    /// <param name="value">The attribute value.</param>
+    /// <returns>The interval, or null when the value is missing or malformed.</returns>
+    internal static TimeSpan? ParseInterval(string? value) =>
+        long.TryParse(value, out var ticks) && ticks != long.MinValue ? TimeSpan.FromTicks(Math.Abs(ticks)) : null;
+
+    /// <summary>Gets the configured service-account DN or resolves it from the UPN.</summary>
+    /// <param name="cancellationToken">Cancels the resolution.</param>
+    /// <returns>The service-account distinguished name.</returns>
+    private async Task<string> GetDistinguishedNameAsync(CancellationToken cancellationToken)
+    {
+        var (username, configuredDistinguishedName) =
+            (await _configurationStore.GetAsync(cancellationToken)).GetServiceAccount(_options);
+        return string.IsNullOrWhiteSpace(configuredDistinguishedName)
+            ? await _directorySource.ResolveServiceAccountDistinguishedNameAsync(username, cancellationToken)
+            : configuredDistinguishedName;
     }
 
     /// <summary>Encodes the quoted UTF-16LE representation required by AD's <c>unicodePwd</c>.</summary>

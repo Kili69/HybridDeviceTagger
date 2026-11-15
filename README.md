@@ -94,9 +94,9 @@ Fehlt die Azure-CLI-Anmeldung, bietet `Install.ps1` `az login` selbst an. Vor de
 - **Azure-Ziel:** Subscription (Vorschlag: aktuelle `az login`-Subscription), Ressourcengruppe (`rg-HybridDeviceTagger`, wird bei Bedarf angelegt), Region (`westeurope`) sowie Namen für Function App (`func-hybriddevicetagger`) und Storage Account
 - **Netzwerk:** Subscription und Ressourcengruppe des vorhandenen VNet, VNet-Name, an `Microsoft.App/environments` delegiertes Function-Integrationssubnetz und separates Private-Endpoint-Subnetz
 - **Key Vault:** Auswahl zwischen einem neuen privaten Vault und einem vorhandenen Vault; bei einem vorhandenen Vault zusätzlich Subscription und Ressourcengruppe; in beiden Fällen der Name
-- **Active Directory:** Forest-DNS-Name, optional ein Domain Controller nur für die Validierung des Installers (leer: Ermittlung über DNS-SRV), UPN des Servicekontos, optional dessen Distinguished Name (leer: Ermittlung aus dem UPN) und optional der Pfad zum Root-CA-Zertifikat der LDAPS-Zertifikate, wenn die Domain Controller Zertifikate einer privaten CA verwenden
+- **Active Directory:** Forest-DNS-Name, optional ein Domain Controller nur für die Validierung des Installers (leer: Ermittlung über DNS-SRV), UPN des Servicekontos, optional dessen Distinguished Name (leer: Ermittlung aus dem UPN) und **verpflichtend der Pfad zum öffentlichen Root-CA-Zertifikat (.cer/.pem)** der Domain-Controller-Zertifikate
 - **Management API:** optional die Client-ID der App-Registrierung. Bleibt der Wert leer, erstellt der Installer bei einer Erstinstallation die single-tenant Entra-App-Registrierung und Enterprise Application automatisch beziehungsweise verwendet bei einem Update die Registrierung der vorhandenen Installation. Außerdem die Objekt-ID des Benutzers oder der Gruppe, die alle Rollen der Management API erhält (Vorschlag: angemeldeter Benutzer)
-- **Betrieb:** Zeitplan des Geräte-Taggings (`0 */15 * * * *`), Zeitplan der Kennwortrotationsprüfung (`0 30 2 * * *`) und ob fehlende Azure-Ressourcenanbieter automatisch registriert werden
+- **Betrieb:** Startwerte für das Tagging-Intervall in Minuten (5–1440, Vorschlag 15) und das Kennwortwechsel-Intervall in Tagen (1–29, Vorschlag 25) sowie ob fehlende Azure-Ressourcenanbieter automatisch registriert werden. Beide Intervalle lassen sich später im Konfigurationsportal (Bereich **Zeitpläne**) ohne Neustart ändern; die dort gespeicherten Werte bleiben bei einer erneuten Installation erhalten.
 
 Die Antworten werden ohne Kennwörter in `installation-settings.json` neben dem Skript gespeichert und beim nächsten Aufruf als Vorschläge angeboten. Mit `-UseSavedSettings` werden sie ohne erneute Abfrage übernommen, etwa für ein Update. Die Datei wird nie in ein Installationspaket übernommen.
 
@@ -131,7 +131,7 @@ Danach führt die Engine ohne weitere Rückfragen aus:
 4. in einem vorhandenen Key Vault fehlende Kennwort-Secrets als unbrauchbare Platzhalter anlegen und der Managed Identity `Key Vault Secrets Officer` nur auf diesen beiden Secrets zuweisen;
 5. ersetzte Rollenzuweisungen der Managed Identity entfernen (`Storage Blob Data Owner` und bei einem vorhandenen Vault `Key Vault Secrets Officer` auf dem gesamten Key Vault);
 6. die Microsoft-Graph-Berechtigungen der Managed Identity zuweisen;
-7. die vorkompilierte Function aus `function/HybridDeviceTagger.zip`, gegebenenfalls ergänzt um das LDAPS-Root-Zertifikat, in die Function App hochladen;
+7. die vorkompilierte Function aus `function/HybridDeviceTagger.zip`, ergänzt um das erforderliche LDAPS-Root-Zertifikat, in die Function App hochladen;
 8. das AD-Kennwort über die Function und deren Managed Identity im Key Vault initialisieren.
 
 Ist LDAPS nicht verfügbar, verwendet der Installer automatisch LDAP mit StartTLS; Anmeldedaten werden niemals über eine ungeschützte LDAP-Verbindung übertragen. Die Installation ist idempotent; für ein Update wird sie mit einem neueren Paket und `-UseSavedSettings` erneut ausgeführt. Nach einer erfolgreichen Installation ist die Function bereitgestellt, bleibt ohne Tagging-Regeln aber inaktiv.
@@ -144,6 +144,7 @@ Alternativ kann die Engine direkt aufgerufen werden. Alle Werte können als Para
 $parameters = @{
     SubscriptionId = '<Azure-Subscription-ID>'
     ResourceGroupName = 'rg-hybrid-device-tagger'
+    ActiveDirectoryTrustedCertificatePath = 'C:\Certificates\Contoso-Root-CA.cer'
     Location = 'westeurope'
     FunctionAppName = 'func-hybrid-device-tagger'
     StorageAccountName = 'sthybriddevicetagger'
@@ -191,6 +192,7 @@ Eine plattformneutrale Pipeline sollte die folgenden Stufen verwenden:
 $parameters = @{
     SubscriptionId = $env:HDT_SUBSCRIPTION_ID
     ResourceGroupName = $env:HDT_RESOURCE_GROUP
+    ActiveDirectoryTrustedCertificatePath = $env:HDT_ROOT_CA_CERTIFICATE_PATH
     # Alle weiteren nicht vertraulichen Installerwerte aus Pipelinevariablen
 }
 
@@ -205,7 +207,7 @@ $parameters.ADServiceAccountCredential = [pscredential]::new(
 ./Install-HybridDeviceTagger.ps1 @parameters -Force
 ```
 
-Pipeline-Secrets dürfen weder in Parameterdateien eingecheckt noch in Logs ausgegeben werden. `-Force` deaktiviert sämtliche Installer-Rückfragen und bricht bei fehlenden Angaben ab. Bei einem Fehler endet die Engine mit Exit-Code `1`, sodass die Pipeline den Fehlschlag erkennt. Die Linux-basierte Flex-Consumption-Function verwendet ausschließlich TLS-geschützte LDAP-Verbindungen: bevorzugt LDAPS, ersatzweise StartTLS. `ActiveDirectoryTrustedCertificatePath` bleibt für private Zertifizierungsstellen erforderlich. Mit `-SkipCodeDeployment` können Infrastruktur- und Anwendungsdeployment in getrennte Pipeline-Stufen aufgeteilt werden.
+Pipeline-Secrets dürfen weder in Parameterdateien eingecheckt noch in Logs ausgegeben werden. `-Force` deaktiviert sämtliche Installer-Rückfragen und bricht bei fehlenden Angaben ab. Bei einem Fehler endet die Engine mit Exit-Code `1`, sodass die Pipeline den Fehlschlag erkennt. Die Linux-basierte Flex-Consumption-Function verwendet ausschließlich TLS-geschützte LDAP-Verbindungen: bevorzugt LDAPS, ersatzweise StartTLS. `ActiveDirectoryTrustedCertificatePath` ist für Installation, Validierung und Updates immer erforderlich, auch ohne lokale AD-DNS-Auflösung. Das öffentliche Root-CA-Zertifikat wird in das Azure-Function-Paket importiert; ein Import nur in den Zertifikatsspeicher des Installations-PCs reicht nicht. Private Schlüssel dürfen nicht mitgegeben werden. Mit `-SkipCodeDeployment` können Infrastruktur- und Anwendungsdeployment in getrennte Pipeline-Stufen aufgeteilt werden.
 
 ### Gemeinsame Konfiguration
 
@@ -221,7 +223,7 @@ Das AD-Kennwort wird nicht durch die Installationsidentität in den Key Vault ge
 
 #### Berechtigungen für Regel- und Kennwortverwaltung
 
-Regel- und Kennwortverwaltung werden durch Anwendungsrollen der Entra Enterprise Application für die HybridDeviceTagger Management API geschützt. Zusätzlich erhalten alle Principals mit der Azure-RBAC-Rolle `Owner` oder `Contributor` auf der Function App automatisch dieselben Rechte wie `HybridDeviceTagger.RuleAdministrator` und `HybridDeviceTagger.PasswordRotationAdministrator`. Das gilt auch für über Sicherheitsgruppen oder übergeordnete Scopes geerbte Zuweisungen.
+Regel- und Kennwortverwaltung werden durch Anwendungsrollen der Entra Enterprise Application für die HybridDeviceTagger Management API geschützt. Zusätzlich erhalten alle Principals mit der Azure-RBAC-Rolle `Owner` oder `Contributor` auf der Function App automatisch dieselben Rechte wie `HybridDeviceTagger.RuleAdministrator` und `HybridDeviceTagger.PasswordRotationAdministrator`. Das gilt auch für über Sicherheitsgruppen oder übergeordnete Scopes geerbte Zuweisungen; Zuweisungen auf untergeordneten Ressourcen der Function App (z. B. Slots) zählen nicht. Da die Managed Identity Mitgliedschaften beliebiger Gruppen und Verwaltungseinheiten ändern kann, dürfen nur Owner und Contributor neue Entra-Gruppen oder Verwaltungseinheiten als Ziel in Regeln aufnehmen; reine `RuleAdministrator` können bereits in Regeln verwendete Ziele wiederverwenden sowie Attribute und Filter ändern.
 
 | Verwaltungsaufgabe | Erforderliche Anwendungsrolle | Installer-Parameter |
 | --- | --- | --- |
@@ -230,7 +232,7 @@ Regel- und Kennwortverwaltung werden durch Anwendungsrollen der Entra Enterprise
 
 Die Parameter akzeptieren die Entra Object IDs von Benutzern, Sicherheitsgruppen oder Service Principals. Für die dauerhafte Administration sollten Sicherheitsgruppen verwendet und nach dem Least-Privilege-Prinzip nur der jeweils benötigten Rolle zugewiesen werden. Alternativ weist `ManagementApiAllowedPrincipalObjectId` einem Bootstrap-Principal alle vier Management-API-Rollen (`Reader`, `RuleAdministrator`, `TaggingOperator`, `PasswordRotationAdministrator`) zu. Diese breite Zuweisung eignet sich nur für Migration oder Ersteinrichtung; `Install.ps1` verwendet sie für den abgefragten Principal.
 
-Kennwortadministratoren benötigen keinen direkten Key-Vault-Zugriff. Nach einer neuen API-Anwendungsrollenzuweisung muss das Zugriffstoken erneuert werden. Änderungen an Owner-/Contributor-Zuweisungen prüft die Function bei der nächsten API-Anfrage über Azure Resource Manager. Andere Azure-RBAC-Rollen berechtigen nicht zur Management API; Owner und Contributor erhalten keine Leser- oder Tagging-Operator-Rechte.
+Kennwortadministratoren benötigen keinen direkten Key-Vault-Zugriff. Nach einer neuen API-Anwendungsrollenzuweisung muss das Zugriffstoken erneuert werden. Änderungen an Owner-/Contributor-Zuweisungen prüft die Function bei der nächsten API-Anfrage über Azure Resource Manager. Andere Azure-RBAC-Rollen berechtigen nicht zur Management API; Owner und Contributor dürfen zusätzlich Tagging-Läufe starten, erhalten aber keine Leserrolle.
 
 #### Active Directory und Tagging-Regeln
 
@@ -306,9 +308,25 @@ Alle Parameter, Berechtigungen und vollständigen Beispiele stehen in [installat
 
 ## Administration
 
+### Konfigurationsportal
+
+Nach der Installation steht unter `https://<function-app>.azurewebsites.net/api/portal` eine Konfigurationsseite zur Verfügung; der Installer gibt die URL am Ende aus. Die Seite ist zwischen **Deutsch** und **Englisch** umschaltbar und ausschließlich für Benutzer mit der Azure-Rolle **Owner** oder **Contributor** an der Function App zugänglich (direkt, über Gruppen oder geerbt). Rollen der Management API wie `RuleAdministrator` genügen für die Seite nicht. Die Anmeldung erfolgt mit Microsoft Entra ID (Authorization Code Flow mit PKCE, ohne Client-Secret und ohne externe Skripte); Rollenänderungen werden spätestens nach einer Minute wirksam.
+
+| Bereich | Funktionen |
+| --- | --- |
+| **Aktivitäten** | Aktivitätsprotokoll der letzten 1 Stunde bis 30 Tage, filterbar nach Kategorie (Konfiguration, Tagging, Kennwort/LDAP, Zugriff), Ergebnis und Freitext. Die Ansicht aktualisiert sich jede Minute und zeigt den Stand; neue Einträge erscheinen wegen der Log-Analytics-Verzögerung erst nach einigen Minuten. |
+| **Regeln** | Regel in der Liste auswählen und vollständig anzeigen (Gruppen und Verwaltungseinheiten mit Namen), hinzufügen, bearbeiten und löschen. Jedes ExtensionAttribute kann pro Regel nur einmal vergeben werden; Gruppen und Verwaltungseinheiten werden per Namenssuche in Entra ausgewählt (dynamische, mail-aktivierte und lokal synchronisierte Gruppen sowie dynamische Verwaltungseinheiten sind nicht auswählbar). **Tagging jetzt ausführen** startet sofort einen Lauf und zeigt dessen Ergebnis. |
+| **LDAP** | Schaltflächen **LDAP-Zugriff prüfen** und **Kennwortwechsel auslösen** (mit Status und konkreter Fehlerursache des letzten Laufs), Forest-DNS-Namen korrigieren, LDAP-Zugriff mit dem gespeicherten Kennwort prüfen (je DC und Transport mit konkreter Fehlerursache, etwa Namensabweichung, nicht vertrauenswürdige Zertifizierungsstelle oder nicht erreichbare Sperrliste), initiales Kennwort setzen, LDAP-Benutzer ändern, Kennwortwechsel auslösen |
+| **Zertifikate** | LDAPS/StartTLS-Vertrauensanker anzeigen, hinzufügen, ersetzen und löschen |
+| **Zeitpläne** | Tagging-Intervall (wie oft LDAP abgefragt wird, 5–1440 Minuten) und Kennwortwechsel-Intervall (1–29 Tage) ändern; wirksam ab dem nächsten Zeitgeber-Takt |
+
+Ein neuer LDAP-Benutzer wird nur zusammen mit seinem aktuellen Kennwort gespeichert, nachdem ein TLS-geschützter LDAP-Bind erfolgreich war. Während der Umstellung ist die Kennwortrotation gesperrt; ein vorbereitetes Rotationskennwort des bisherigen Kontos wird verworfen. Mit demselben Benutzernamen ersetzt die Funktion nur das gespeicherte Kennwort.
+
+Alle Änderungen, ausgelösten Läufe, Kennwortaktionen, Portal-Anmeldungen und verweigerten Zugriffe werden mit ausführender Person im Aktivitätsprotokoll erfasst. Jedes geänderte Entra-Gerät erscheint mit Anzeigename und Objekt-ID; der Abschlusseintrag eines Tagging-Laufs nennt die Namen aller geänderten Geräte (bis zu 50). Kennwörter und Attributwerte werden nie protokolliert. Das Protokoll liegt im Log-Analytics-Workspace `<function-app>-law` (30 Tage Aufbewahrung, Tabelle `AppTraces`, Kategorie `HybridDeviceTagger.Activity`); neue Einträge erscheinen nach wenigen Minuten.
+
 ### Tagging-Regeln verwalten
 
-Tagging-Regeln werden mit dem PowerShell-Modul `installationspackage/HybridDeviceTagger.Management` verwaltet. Zuerst das Modul importieren und mit der Management API verbinden:
+Tagging-Regeln werden im Konfigurationsportal oder mit dem PowerShell-Modul `installationspackage/HybridDeviceTagger.Management` verwaltet. Zuerst das Modul importieren und mit der Management API verbinden:
 
 ```powershell
 Import-Module ./installationspackage/HybridDeviceTagger.Management
@@ -420,17 +438,13 @@ Die Function validiert das Kennwort durch einen AD-Bind und speichert es anschli
 
 Das Laufzeitkonto muss vor der Installation existieren und bleibt reguläres Mitglied von `Domain Users`. Zusätzlich müssen auf dem Konto `SELF / Change Password` erlaubt, `User cannot change password` deaktiviert und **Benutzer muss Kennwort bei der nächsten Anmeldung ändern** ausgeschaltet sein. Das Laufzeitkonto benötigt weder administrative AD-Gruppen noch Reset-Password-Rechte. Der Installer erstellt das Konto nicht und setzt dessen Kennwort nicht administrativ zurück.
 
-### LDAPS-Vertrauensanker wechseln
+### LDAPS-Vertrauensanker verwalten
 
-Der LDAPS-Vertrauensanker ist ausschließlich das vom Installer mit `-ActiveDirectoryTrustedCertificatePath` (in `Install.ps1`: **Path to the LDAPS root CA certificate**) in das Function-Paket übernommene, unveränderliche Zertifikat. Ohne ein solches Zertifikat gilt der Zertifikatsspeicher des Betriebssystems, also öffentliche Zertifizierungsstellen. Zur Laufzeit lässt sich der Vertrauensanker weder über die API noch über den Storage Account ändern. Dadurch kann niemand mit Storage- oder API-Zugriff ein eigenes Zertifikat einschleusen und das Kennwort des Servicekontos beim LDAPS-Bind abgreifen.
+Das bei der Installation mit dem verpflichtenden Parameter `-ActiveDirectoryTrustedCertificatePath` (in `Install.ps1`: **Path to the LDAPS root CA certificate**) angegebene Root-CA-Zertifikat wird in das Function-Paket übernommen und ist der erste Vertrauensanker. Im Konfigurationsportal (Bereich **Zertifikate**) können Owner und Contributor der Function App weitere Zertifikate hinzufügen, ein Zertifikat ersetzen (etwa bei einer CA-Erneuerung) oder löschen. Die erste Änderung übernimmt das Installer-Zertifikat in die verwaltete Liste im privaten Storage-Blob `run-traces/active-directory-trust-anchors.json`; neue LDAP-Verbindungen verwenden die Liste sofort, ohne Neustart.
 
-Für einen Zertifikatswechsel wird die Installation mit dem neuen Zertifikat erneut ausgeführt:
+Akzeptiert werden ausschließlich gültige öffentliche X.509-Zertifikate als PEM oder DER (`.cer`). Dateien mit privatem Schlüssel, abgelaufene Zertifikate und Duplikate werden abgelehnt; das letzte Zertifikat kann nicht gelöscht werden. Wer einen Vertrauensanker einschleusen könnte, könnte einen Domain Controller vortäuschen und das Kennwort des Servicekontos beim Bind abgreifen. Deshalb ist die Verwaltung auf Owner und Contributor der Function App beschränkt, die ohnehin Code und Einstellungen der Function ändern können; der Storage Account ist nur privat erreichbar. Jede Änderung wird im Aktivitätsprotokoll erfasst.
 
-```powershell
-.\Install.ps1 -Mode Install
-```
-
-Die gespeicherten Antworten werden mit **Enter** übernommen; bei **Path to the LDAPS root CA certificate** wird die neue Zertifikatsdatei angegeben. Die Validierung prüft LDAPS vorab gegen das neue Zertifikat; die Installation paketiert es anschließend mit dem Function-Code. Die frühere Laufzeitverwaltung von Vertrauenszertifikaten einschließlich der Rolle `HybridDeviceTagger.CertificateAdministrator` wurde entfernt; der Installer entfernt diese Rolle und ihre Zuweisungen.
+Alternativ kann die Installation mit einem neuen Zertifikat erneut ausgeführt werden. Ist bereits eine verwaltete Liste vorhanden, hat sie Vorrang vor dem paketierten Zertifikat. Die frühere Rolle `HybridDeviceTagger.CertificateAdministrator` bleibt entfernt; die Verwaltung erfolgt über die Azure-RBAC-Rollen.
 
 ### PowerShell-Management-Modul
 
@@ -456,6 +470,8 @@ Import-Module HybridDeviceTagger.Management
 | `Get-HybridDeviceTaggerTrace` | Lädt den letzten JSONL-Trace und gibt jedes Ereignis als strukturiertes `HybridDeviceTagger.TraceEvent`-Objekt für Filterung, Auswahl oder Export in der Pipeline aus. |
 | `Add-HybridDeviceTaggerRule` | Fügt eine vollständige Regel hinzu oder ersetzt eine gleichnamige Regel. Akzeptiert über `-Rule` eine einzelne Regel oder ein Objekt mit einer `Rules`-Eigenschaft; alle übrigen Regeln bleiben erhalten. |
 | `Remove-HybridDeviceTaggerRule` | Entfernt die mit `-Name` angegebene Regel. Die API verhindert, dass dadurch keine gültige Tagging-Regel mehr verbleibt. |
+| `Get-HybridDeviceTaggerActiveDirectoryConfiguration` | Liest die wirksame Forest-Domäne mit ETag und Quelle, ohne Active Directory zu kontaktieren. |
+| `Set-HybridDeviceTaggerActiveDirectoryConfiguration` | Korrigiert mit `-Domain` den Forest-DNS-Namen, auch bei defekter AD-Verbindung. Neue Forest-Verbindungen verwenden die gespeicherte Änderung ohne Neustart. Erfordert Kennwortadministration oder Owner-/Contributor-Rechte. |
 | `Initialize-HybridDeviceTaggerActiveDirectoryCredential` | Validiert das mit `-Password` als `SecureString` übergebene initiale AD-Servicekonto-Kennwort und lässt es durch die Managed Identity der Function im Key Vault speichern. Nur ein fehlendes Secret oder ein Platzhalter wird ersetzt. |
 | `Invoke-HybridDeviceTagging` | Stellt denselben Geräteabgleich wie der Timer zur sofortigen Ausführung in die Warteschlange und gibt Invocation-ID, Status `Queued` und Status-URI zurück. Mit `-Wait` wartet das Kommando auf das Ende des Laufs und gibt den finalen Status zurück; `-TimeoutSeconds` begrenzt die Wartezeit (Standard 1.800 Sekunden). Ein laufender Tagging-Lauf führt zu einem Konflikt. |
 | `Invoke-HybridDeviceTaggerPasswordRotation` | Stellt eine erzwungene Kennwortrotation unabhängig vom Kennwortalter in die Warteschlange. Prüfung des aktuellen Kennworts, LDAPS, Staging, Validierung und Promotion bleiben verpflichtend. `-Wait` und `-TimeoutSeconds` (Standard 600 Sekunden) wie oben. |
@@ -476,6 +492,32 @@ Invoke-HybridDeviceTaggerPasswordRotation -Wait -Confirm
 
 Ohne `-Wait` kann der Status später mit `Get-HybridDeviceTaggerLastRunStatus` beziehungsweise `Get-HybridDeviceTaggerPasswordRotationStatus` abgefragt werden.
 
+### Installation ohne lokales AD-DNS
+
+Kann der Installations-PC den internen AD-SRV-Namen nicht auflösen, warnt der Installer und
+verschiebt die lokalen AD-Prüfungen in die Function. Diese muss aus ihrem VNet weiterhin
+DNS, Routing, TLS und den AD-Bind erfolgreich ausführen; echte Laufzeitfehler bleiben Fehler.
+Ein fehlender Dienstkonto-DN wird vor der Kennwortrotation im Forest anhand der UPN ermittelt.
+Die fehlende lokale Auflösung kann sowohl fehlenden internen DNS-Zugriff als auch einen Tippfehler bedeuten.
+Andere Prüfungen, etwa gegen private VNet-DNS-Server, können weiterhin lokalen Netzwerkzugriff benötigen.
+Bei fehlerhafter Private-Endpoint-Auflösung zeigt der Installer die konkreten A-Records für
+Blob, Queue und einen neu erstellten Key Vault mit privaten IP-Adressen. Nach Korrektur der
+DNS-Zonen bestätigt **Enter** die Eingaben des Anwenders und setzt die Installation ohne erneute
+DNS-Prüfung fort. Eine Warnung kennzeichnet die DNS-Konfiguration als nicht unabhängig validiert.
+Mit **A** kann abgebrochen werden. Unbeaufsichtigte Aufrufe scheitern weiterhin ohne Rückfrage.
+
+Eine falsche Forest-Domäne lässt sich nach Bereitstellung im Konfigurationsportal oder per PowerShell korrigieren. Das ist nur Owner- und Contributor-Rechten an der Function App vorbehalten, weil die Domäne bestimmt, welche Server beim Bind das Kennwort des Dienstkontos erhalten:
+
+```powershell
+Connect-HybridDeviceTagger -ApiBaseUri 'https://<function-app>.azurewebsites.net/api/management' `
+    -ClientId '<management-api-client-id>' -SkipValidation
+Set-HybridDeviceTaggerActiveDirectoryConfiguration -Domain 'contoso.com' -Confirm
+```
+
+Falls die initiale Kennwortspeicherung fehlgeschlagen ist, danach
+`Initialize-HybridDeviceTaggerActiveDirectoryCredential` erneut ausführen.
+Die Forest-Änderung wird dauerhaft gespeichert und hat Vorrang vor `ActiveDirectory__Domain`.
+
 ## Azure-Betrieb
 
 Die Function App muss aus ihrem virtuellen Netzwerk die AD-SRV-Records der konfigurierten Forest-Domäne sowie der über Forest-CrossRefs ermittelten Domains auflösen können. Sie verbindet sich mit den gefundenen Domain Controllern bevorzugt per LDAPS auf Port 636 und ersatzweise per LDAP mit StartTLS auf Port 389, beispielsweise über Site-to-Site-VPN oder ExpressRoute. Legen Sie alle Werte aus der Konfiguration als Function-App-Settings an und aktivieren Sie Managed Identity. Weisen Sie deren Service Principal die drei beschriebenen Graph-App-Rollen, `Key Vault Secrets Officer` auf den beiden Kennwort-Secrets (bei einem dedizierten, mit `-CreateKeyVault` erstellten Vault auf dem Vault) sowie `Storage Blob Data Contributor` und `Storage Queue Data Contributor` auf dem Storage Account zu. Für Geräte in eingeschränkten administrativen Einheiten benötigt die Managed Identity zusätzlich die vom Installer erzeugte Least-Privilege-Rolle direkt am jeweiligen RMAU-Scope.
@@ -487,6 +529,19 @@ Unter Linux verwendet die Function für LDAPS und StartTLS `Novell.Directory.Lda
 Geräte-Tagging und Kennwortrotation laufen über alle Instanzen hinweg jeweils höchstens einmal gleichzeitig. Jeder Lauf erwirbt vorher eine erneuerbare Blob-Lease (`run-traces/locks/*.lock`, 60 Sekunden, alle 20 Sekunden verlängert). Das gilt auch, wenn Flex Consumption Timer-, Queue- und HTTP-Functions auf getrennten Instanzen ausführt. Gelingt die Verlängerung 45 Sekunden lang nicht, bricht ein Watchdog den Lauf ab, bevor die Lease abläuft. Ein Timer-Lauf, der die Lease nicht erhält, wird mit einer Warnung übersprungen. Stürzt eine Instanz ab, läuft die Lease automatisch aus. Zusätzlich ist `maximumInstanceCount` standardmäßig auf `1` je Scale-Gruppe begrenzt.
 
 Die Funktion markiert Geräte innerhalb der Ziel-OUs. Verlässt ein Computer alle konfigurierten Ziel-OUs, entfernt der nächste Lauf die noch unveränderten verwalteten Extension Attributes sowie die vom Tagger angelegten Gruppen-, AU- und RMAU-Mitgliedschaften.
+
+Das Aktivitätsprotokoll wird als strukturierter Log mit der Kategorie `HybridDeviceTagger.Activity` über Application Insights in den Log-Analytics-Workspace geschrieben. Die Managed Identity erhält dafür `Monitoring Metrics Publisher` (Schreiben) und `Monitoring Reader` (Abfrage für das Portal) auf der Application-Insights-Ressource. Die lokale Authentifizierung von Application Insights ist deaktiviert, sodass nur Entra-authentifizierte Telemetrie angenommen wird und die Connection String allein keine Einträge fälschen kann. Direkt im Workspace:
+
+```kusto
+AppTraces
+| where tostring(Properties.CategoryName) == "HybridDeviceTagger.Activity"
+| project TimeGenerated, Category = tostring(Properties.ActivityCategory), Action = tostring(Properties.ActivityAction),
+    Outcome = tostring(Properties.ActivityOutcome), Actor = tostring(Properties.ActivityActor),
+    Target = tostring(Properties.ActivityTarget), Details = tostring(Properties.ActivityDetails)
+| order by TimeGenerated desc
+```
+
+Für die Portal-Anmeldung registriert der Installer `https://<function-app>.azurewebsites.net/api/portal` als SPA-Redirect-URI der Management-API-App und erteilt mandantenweit die Zustimmung für deren Berechtigung `access_as_user`. Schlägt die Zustimmung mangels Berechtigung fehl, gibt der Installer nur eine Warnung aus; dann muss ein Administrator die Zustimmung im Microsoft Entra Admin Center erteilen, sofern Benutzer nicht selbst zustimmen dürfen. Die statischen Portaldateien unter `/api/portal` sind von der App-Service-Authentifizierung ausgenommen, enthalten aber keine Daten.
 
 ## Versionierung und Release
 

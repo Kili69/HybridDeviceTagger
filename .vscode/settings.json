@@ -3,5 +3,23 @@
     "azureFunctions.projectLanguage": "C#",
     "azureFunctions.projectRuntime": "~4",
     "debug.internalConsoleOptions": "neverOpen",
-    "azureFunctions.preDeployTask": "publish (functions)"
+    "azureFunctions.preDeployTask": "publish (functions)",
+    "cSpell.words": [
+        "BDML",
+        "cloudbasierten",
+        "contoso",
+        "installationspackage",
+        "kili",
+        "LDAPS",
+        "ncrontab",
+        "preauthorization",
+        "pscredential",
+        "pscustomobject",
+        "rethrowing",
+        "RMAU",
+        "RMAUs",
+        "Validierungslauf",
+        "vnet"
+    ],
+    "azureFunctions.projectSubpath": "src\\HybridDeviceTagger"
 }

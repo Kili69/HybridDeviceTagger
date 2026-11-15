@@ -99,7 +99,8 @@ never performs an unencrypted LDAP bind.
 LDAP fallback port. The default is 389.
 
 .PARAMETER ActiveDirectoryTrustedCertificatePath
-Optional path to a public root CA or self-signed lab DC certificate used as the LDAPS trust anchor.
+Required path to a public root CA or self-signed lab DC certificate used as the LDAPS and StartTLS trust anchor.
+The certificate is imported into the Azure Function package; importing it into the installation PC store alone is insufficient.
 Private keys are rejected and never packaged.
 
 .PARAMETER ADServiceAccount
@@ -122,8 +123,9 @@ omitted for a new Function App, the installer creates and configures the registr
 automatically. Updates reuse the client ID stored in the existing Function App configuration.
 
 .PARAMETER ManagementApiAllowedPrincipalObjectId
-Bootstrap users, groups, or service principals that receive all four management API roles unless a
-role-specific principal list is supplied. This preserves existing installations during migration.
+Optional bootstrap users, groups, or service principals that receive all four management API roles
+unless a role-specific principal list is supplied. When omitted, no bootstrap roles are assigned;
+Function App Owners and Contributors can administer rules and password rotation through Azure RBAC.
 
 .PARAMETER ManagementApiReaderPrincipalObjectId
 Users, groups, or service principals allowed to read all rules, statuses, and traces.
@@ -150,11 +152,19 @@ Name of the Key Vault secret containing the active AD password.
 .PARAMETER StagedCredentialEntryName
 Name of the Key Vault secret used while rotating or recovering the AD password.
 
+.PARAMETER TaggingIntervalMinutes
+Initial minutes between scheduled tagging runs, 5 to 1440. Defaults to 15. Function App Owners and
+Contributors can change it at runtime in the configuration portal; a runtime value takes precedence.
+
+.PARAMETER PasswordRotationDays
+Initial password age in days at which the service-account password is changed, 1 to 29. Defaults to
+25. The age is checked hourly. The configuration portal can change it at runtime.
+
 .PARAMETER TaggingSchedule
-Six-field NCRONTAB schedule for device reconciliation. The default runs every 15 minutes.
+Obsolete. The timers now tick at fixed rates; use TaggingIntervalMinutes. Accepted and ignored.
 
 .PARAMETER RotationSchedule
-Six-field NCRONTAB schedule for password-rotation checks. The default runs daily at 02:30 UTC.
+Obsolete. Use PasswordRotationDays. Accepted and ignored.
 
 .PARAMETER MaximumInstanceCount
 Maximum Flex Consumption instance count per function scale group. Defaults to 1. Tagging and
@@ -352,13 +362,15 @@ param(
     [ValidateLength(1, 127)]
     [string]$StagedCredentialEntryName = 'hybrid-device-tagger-ad-password-next',
 
-    [ValidateNotNullOrEmpty()]
-    [ValidateLength(1, 100)]
-    [string]$TaggingSchedule = '0 */15 * * * *',
+    [ValidateRange(5, 1440)]
+    [int]$TaggingIntervalMinutes = 15,
 
-    [ValidateNotNullOrEmpty()]
-    [ValidateLength(1, 100)]
-    [string]$RotationSchedule = '0 30 2 * * *',
+    [ValidateRange(1, 29)]
+    [int]$PasswordRotationDays = 25,
+
+    [string]$TaggingSchedule,
+
+    [string]$RotationSchedule,
 
     [ValidateRange(1, 1000)]
     [int]$MaximumInstanceCount = 1,
@@ -668,6 +680,8 @@ function Write-InstallationSummary {
     }
     Write-Host '  - Four least-privilege Entra application roles plus Function App Owner/Contributor authorization'
     Write-Host '  - Managed-identity Storage Blob and Queue Data Contributor roles on the Storage account'
+    Write-Host '  - Managed-identity Monitoring Reader role on Application Insights for the activity log'
+    Write-Host "  - Configuration portal for Function App Owners and Contributors: https://$FunctionAppName.azurewebsites.net/api/portal (SPA redirect URI and tenant-wide consent for access_as_user)"
     if ($CreateKeyVault) {
         Write-Host '  - Managed-identity Key Vault Secrets Officer role on the new, dedicated Key Vault'
     }
@@ -780,7 +794,7 @@ function Invoke-AzureCli {
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             $process.Kill($true)
             $process.WaitForExit()
-            throw "Azure CLI timed out after $TimeoutSeconds seconds (az $($Arguments -join ' '))."
+            throw [TimeoutException]::new("Azure CLI timed out after $TimeoutSeconds seconds (az $($Arguments -join ' ')).")
         }
         $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
         $standardError = $standardErrorTask.GetAwaiter().GetResult()
@@ -836,6 +850,7 @@ Polls a resource-group deployment until it succeeds, fails, is canceled, or time
 .DESCRIPTION
 Reports state changes and at least every 30 seconds while the deployment runs. Throws with the
 ARM error details when the deployment fails or is canceled, and throws when the timeout expires.
+Status-query timeouts produce a warning and are retried within the overall timeout; other errors propagate.
 
 .PARAMETER DeploymentName
 Name of the deployment in the target resource group.
@@ -857,12 +872,25 @@ function Wait-AzureGroupDeployment {
     $lastReportedState = $null
     $lastProgressReport = [DateTimeOffset]::MinValue
     while ([DateTimeOffset]::UtcNow -lt $deadline) {
-        $deployment = Get-AzureJson -Arguments @(
-            'deployment', 'group', 'show',
-            '--subscription', $SubscriptionId,
-            '--resource-group', $ResourceGroupName,
-            '--name', $DeploymentName
-        ) -TimeoutSeconds 60
+        $queryTimeoutSeconds = [Math]::Max(1, [Math]::Min(
+            60, [Math]::Floor(($deadline - [DateTimeOffset]::UtcNow).TotalSeconds)))
+        try {
+            $deployment = Get-AzureJson -Arguments @(
+                'deployment', 'group', 'show',
+                '--subscription', $SubscriptionId,
+                '--resource-group', $ResourceGroupName,
+                '--name', $DeploymentName
+            ) -TimeoutSeconds $queryTimeoutSeconds
+        }
+        catch [TimeoutException] {
+            Write-Warning "Status query for Azure deployment '$DeploymentName' timed out. The deployment may still be running in Azure. Retrying within the overall $TimeoutSeconds-second monitoring limit. Details: $($_.Exception.Message)"
+            $retryDelaySeconds = [Math]::Min(10, [Math]::Max(
+                0, [Math]::Floor(($deadline - [DateTimeOffset]::UtcNow).TotalSeconds)))
+            if ($retryDelaySeconds -gt 0) {
+                Start-Sleep -Seconds $retryDelaySeconds
+            }
+            continue
+        }
         $state = [string]$deployment.properties.provisioningState
         $now = [DateTimeOffset]::UtcNow
         if ($state -ne $lastReportedState -or
@@ -887,7 +915,7 @@ function Wait-AzureGroupDeployment {
         Start-Sleep -Seconds 10
     }
 
-    throw "Azure deployment '$DeploymentName' is still running after $TimeoutSeconds seconds. Check its status in Azure before retrying; do not start a concurrent deployment with the same resources."
+    throw "Monitoring Azure deployment '$DeploymentName' timed out after $TimeoutSeconds seconds without confirming a terminal state. The deployment may still be running or may already have completed. Check its status in Azure before retrying; do not start a concurrent deployment with the same resources."
 }
 
 <#
@@ -1608,11 +1636,18 @@ weight. Throws when the lookup fails or returns no domain controllers.
 .PARAMETER Domain
 DNS name of the Active Directory domain.
 
+.PARAMETER AllowUnavailable
+Warns and returns no candidates when local DNS discovery is unavailable, deferring validation
+to the deployed Function instead of requiring internal AD DNS on the installation computer.
+
 .OUTPUTS
 System.String[]. Unique domain controller host names without a trailing dot.
 #>
 function Get-ActiveDirectoryDomainControllerList {
-    param([Parameter(Mandatory)][string]$Domain)
+    param(
+        [Parameter(Mandatory)][string]$Domain,
+        [switch]$AllowUnavailable
+    )
 
     $queryName = "_ldap._tcp.dc._msdcs.$($Domain.Trim().TrimEnd('.'))"
     try {
@@ -1626,9 +1661,17 @@ function Get-ActiveDirectoryDomainControllerList {
             })
     }
     catch {
+        if ($AllowUnavailable) {
+            Write-Warning "Local AD DNS discovery for '$queryName' is unavailable. Local directory checks are deferred to the Function in Azure. Verify the forest domain and the Function VNet DNS/connectivity. Details: $($_.Exception.Message)"
+            return
+        }
         throw "Active Directory DNS discovery failed for '$Domain' using '$queryName': $($_.Exception.Message)"
     }
     if ($records.Count -eq 0) {
+        if ($AllowUnavailable) {
+            Write-Warning "Local AD DNS discovery returned no domain controllers for '$queryName'. Local directory checks are deferred to the Function in Azure."
+            return
+        }
         throw "Active Directory DNS discovery returned no domain controllers for '$Domain' using '$queryName'."
     }
 
@@ -2203,8 +2246,8 @@ function Get-DeploymentParameter {
         managementApiClientId = $ManagementApiClientId
         currentPasswordSecretName = $CurrentCredentialEntryName
         nextPasswordSecretName = $StagedCredentialEntryName
-        taggingSchedule = $TaggingSchedule
-        rotationSchedule = $RotationSchedule
+        taggingIntervalMinutes = $TaggingIntervalMinutes
+        passwordRotationDays = $PasswordRotationDays
         maximumInstanceCount = $MaximumInstanceCount
         instanceMemoryMB = $InstanceMemoryMB
         tags = $Tags
@@ -2235,7 +2278,7 @@ function Grant-GraphApplicationPermission {
         'rest', '--method', 'get',
         '--url', 'https://graph.microsoft.com/v1.0/servicePrincipals?$filter=appId%20eq%20%2700000003-0000-0000-c000-000000000000%27'
     )
-    $graph = @($graphServicePrincipal.value)[0]
+    $graph = $graphServicePrincipal.value | Select-Object -First 1
     if (-not $graph) {
         throw 'Microsoft Graph service principal was not found in the tenant.'
     }
@@ -2248,9 +2291,9 @@ function Grant-GraphApplicationPermission {
         'GroupMember.ReadWrite.All',
         'AdministrativeUnit.ReadWrite.All'
     )) {
-        $appRole = @($graph.appRoles | Where-Object {
+        $appRole = $graph.appRoles | Where-Object {
             $_.value -eq $permission -and $_.allowedMemberTypes -contains 'Application'
-        })[0]
+        } | Select-Object -First 1
         if (-not $appRole) {
             throw "Microsoft Graph application role $permission was not found."
         }
@@ -2461,6 +2504,97 @@ function Remove-RetiredManagementApiRole {
 
 <#
 .SYNOPSIS
+Configures Microsoft Entra sign-in for the configuration portal.
+
+.DESCRIPTION
+Adds https://<Function App>.azurewebsites.net/api/portal as a single-page-application redirect URI
+of the management API app registration, preserving unrelated redirect URIs. The portal signs in
+with the authorization code flow and PKCE and requests the app's own access_as_user scope, so the
+function also grants tenant-wide (AllPrincipals) consent for that scope from the app to itself.
+Consent failures are reported as warnings because users can still consent individually when the
+tenant allows it. Existing matching settings are left unchanged.
+
+.OUTPUTS
+The configuration portal URL.
+#>
+function Set-ConfigurationPortalSignIn {
+    $portalUrl = "https://$FunctionAppName.azurewebsites.net/api/portal"
+    $applicationResponse = Get-AzureJson -Arguments @(
+        'rest', '--method', 'get',
+        '--url', "https://graph.microsoft.com/v1.0/applications?`$filter=appId%20eq%20%27$ManagementApiClientId%27&`$select=id,spa"
+    )
+    $application = $applicationResponse.value | Select-Object -First 1
+    if (-not $application) {
+        throw "Management API application '$ManagementApiClientId' was not found in Microsoft Entra ID."
+    }
+
+    $spaProperty = $application.PSObject.Properties['spa']
+    $redirectUris = @(if ($spaProperty -and $spaProperty.Value) {
+        $spaProperty.Value.redirectUris | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+    })
+    if ($redirectUris -notcontains $portalUrl) {
+        $body = ConvertTo-AzureCliJsonArgument -Json (@{
+            spa = @{ redirectUris = @($redirectUris + $portalUrl) }
+        } | ConvertTo-Json -Depth 5 -Compress)
+        $null = Invoke-AzureCli -Arguments @(
+            'rest', '--method', 'patch',
+            '--url', "https://graph.microsoft.com/v1.0/applications/$($application.id)",
+            '--headers', 'Content-Type=application/json',
+            '--body', $body,
+            '--only-show-errors'
+        )
+        Write-Host "Configuration portal sign-in redirect URI '$portalUrl' configured."
+    }
+
+    $servicePrincipalResponse = Get-AzureJson -Arguments @(
+        'rest', '--method', 'get',
+        '--url', "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId%20eq%20%27$ManagementApiClientId%27&`$select=id"
+    )
+    $servicePrincipal = $servicePrincipalResponse.value | Select-Object -First 1
+    if (-not $servicePrincipal) {
+        throw "Management API enterprise application '$ManagementApiClientId' was not found."
+    }
+
+    $consentWarning = 'Tenant-wide consent for the configuration portal could not be granted. Users are asked to consent at first sign-in if the tenant allows it; otherwise grant admin consent for the access_as_user permission of the management API app registration in the Microsoft Entra admin center.'
+    $grants = Get-AzureJson -Arguments @(
+        'rest', '--method', 'get',
+        '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$($servicePrincipal.id)/oauth2PermissionGrants"
+    )
+    $grant = @($grants.value) | Where-Object {
+        [string]$_.resourceId -eq [string]$servicePrincipal.id -and [string]$_.consentType -eq 'AllPrincipals'
+    } | Select-Object -First 1
+    $scopes = @(if ($grant) { ([string]$grant.scope).Split(' ', [StringSplitOptions]::RemoveEmptyEntries) })
+    if ($scopes -ccontains 'access_as_user') {
+        return $portalUrl
+    }
+
+    $arguments = if ($grant) {
+        @('rest', '--method', 'patch',
+            '--url', "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$($grant.id)",
+            '--body', (ConvertTo-AzureCliJsonArgument -Json (@{ scope = (@($scopes) + 'access_as_user') -join ' ' } | ConvertTo-Json -Compress)))
+    }
+    else {
+        @('rest', '--method', 'post',
+            '--url', 'https://graph.microsoft.com/v1.0/oauth2PermissionGrants',
+            '--body', (ConvertTo-AzureCliJsonArgument -Json (@{
+                clientId = [string]$servicePrincipal.id
+                consentType = 'AllPrincipals'
+                resourceId = [string]$servicePrincipal.id
+                scope = 'access_as_user'
+            } | ConvertTo-Json -Compress)))
+    }
+    $result = Invoke-AzureCli -Arguments ($arguments + @('--headers', 'Content-Type=application/json', '--only-show-errors')) -AllowFailure
+    if ($result.ExitCode -eq 0) {
+        Write-Host 'Tenant-wide consent for the configuration portal granted.'
+    }
+    else {
+        Write-Warning "$consentWarning`n$($result.Output)"
+    }
+    return $portalUrl
+}
+
+<#
+.SYNOPSIS
 Configures the management API application roles, role assignments, and assignment requirement.
 
 .DESCRIPTION
@@ -2479,7 +2613,7 @@ function Set-ManagementApiAuthorization {
         'rest', '--method', 'get',
         '--url', "https://graph.microsoft.com/v1.0/applications?`$filter=appId%20eq%20%27$ManagementApiClientId%27&`$select=id,appId,appRoles,identifierUris,api"
     )
-    $application = @($applicationResponse.value)[0]
+    $application = $applicationResponse.value | Select-Object -First 1
     if (-not $application) {
         throw "Management API application '$ManagementApiClientId' was not found in Microsoft Entra ID."
     }
@@ -2488,7 +2622,7 @@ function Set-ManagementApiAuthorization {
         'rest', '--method', 'get',
         '--url', "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId%20eq%20%27$ManagementApiClientId%27&`$select=id,appId,appRoleAssignmentRequired"
     )
-    $servicePrincipal = @($servicePrincipalResponse.value)[0]
+    $servicePrincipal = $servicePrincipalResponse.value | Select-Object -First 1
     if (-not $servicePrincipal) {
         throw "Management API enterprise application '$ManagementApiClientId' was not found."
     }
@@ -2504,10 +2638,10 @@ function Set-ManagementApiAuthorization {
             -Application $application `
             -ServicePrincipalId ([string]$servicePrincipal.id) `
             -RetiredRoleIds $retiredRoleIds
-        $application = @((Get-AzureJson -Arguments @(
+        $application = Get-AzureJson -Arguments @(
             'rest', '--method', 'get',
             '--url', "https://graph.microsoft.com/v1.0/applications/$($application.id)?`$select=id,appId,appRoles,identifierUris,api"
-        )))[0]
+        )
     }
     $requiredIdentifierUri = "api://$ManagementApiClientId"
     if (@($application.identifierUris) -notcontains $requiredIdentifierUri) {
@@ -2543,10 +2677,10 @@ function Set-ManagementApiAuthorization {
         $updatedScopes.Add($existingScope)
     }
     $updatedScopes.Add($delegatedPermission)
-    $currentDelegatedPermission = @($application.api.oauth2PermissionScopes | Where-Object {
+    $currentDelegatedPermission = $application.api.oauth2PermissionScopes | Where-Object {
         [string]$_.id -eq $delegatedPermissionId -or
         [string]$_.value -eq $delegatedPermission.value
-    })[0]
+    } | Select-Object -First 1
     $scopeNeedsUpdate = $null -eq $currentDelegatedPermission -or
         [string]$currentDelegatedPermission.id -ne $delegatedPermissionId -or
         [string]$currentDelegatedPermission.value -cne $delegatedPermission.value -or
@@ -2572,9 +2706,9 @@ function Set-ManagementApiAuthorization {
         appId = $azureCliApplicationId
         delegatedPermissionIds = @($delegatedPermissionId)
     })
-    $currentPreAuthorization = @($application.api.preAuthorizedApplications | Where-Object {
+    $currentPreAuthorization = $application.api.preAuthorizedApplications | Where-Object {
         [string]$_.appId -eq $azureCliApplicationId
-    })[0]
+    } | Select-Object -First 1
     $preAuthorizationNeedsUpdate = $null -eq $currentPreAuthorization -or
         @($currentPreAuthorization.delegatedPermissionIds) -notcontains $delegatedPermissionId
 
@@ -2616,7 +2750,8 @@ function Set-ManagementApiAuthorization {
     $updatedRoles = [System.Collections.Generic.List[object]]::new()
     foreach ($existingRole in @($application.appRoles)) {
         if ($roleDefinitions.id -notcontains [string]$existingRole.id) {
-            $conflict = @($roleDefinitions | Where-Object value -EQ ([string]$existingRole.value))[0]
+            $conflict = $roleDefinitions | Where-Object value -EQ ([string]$existingRole.value) |
+                Select-Object -First 1
             if ($conflict) {
                 throw "Application role '$($existingRole.value)' already exists with unexpected ID '$($existingRole.id)'."
             }
@@ -2629,7 +2764,8 @@ function Set-ManagementApiAuthorization {
 
     $rolesNeedUpdate = $false
     foreach ($roleDefinition in $roleDefinitions) {
-        $currentRole = @($application.appRoles | Where-Object id -EQ $roleDefinition.id)[0]
+        $currentRole = $application.appRoles | Where-Object id -EQ $roleDefinition.id |
+            Select-Object -First 1
         $memberTypesDiffer = $null -eq $currentRole -or
             $null -ne (Compare-Object `
                 @($currentRole.allowedMemberTypes) `
@@ -2663,7 +2799,7 @@ function Set-ManagementApiAuthorization {
         '--url', "https://graph.microsoft.com/v1.0/servicePrincipals/$($servicePrincipal.id)/appRoleAssignedTo?`$select=principalId,appRoleId"
     )
     foreach ($roleDefinition in $roleDefinitions) {
-        foreach ($principalId in @($script:ManagementApiRoleAssignments[$roleDefinition.value])) {
+        foreach ($principalId in $script:ManagementApiRoleAssignments[$roleDefinition.value]) {
             $alreadyAssigned = @($existingAssignments.value | Where-Object {
                 [string]$_.principalId -eq [string]$principalId -and
                 [string]$_.appRoleId -eq [string]$roleDefinition.id
@@ -2893,11 +3029,11 @@ function Get-PrivateEndpointAddress {
 
 <#
 .SYNOPSIS
-Verifies that every custom DNS server resolves a host name to its private endpoint address.
+Tests whether every custom DNS server resolves a host name to its private endpoint address.
 
 .DESCRIPTION
-Queries each DNS server up to six times at five-second intervals. Throws with conditional-forwarder
-guidance when a server does not return any of the expected addresses.
+Queries each DNS server once. Reports each failed server,
+including the observed addresses or DNS error, and returns false if any server fails.
 
 .PARAMETER DnsServers
 Custom DNS servers configured on the virtual network.
@@ -2906,15 +3042,18 @@ Custom DNS servers configured on the virtual network.
 Public service host name that must resolve to the private endpoint.
 
 .PARAMETER PrivateDnsZoneName
-Private DNS zone that must be forwarded to Azure DNS.
+Private DNS zone containing the endpoint A records, hosted locally or resolved through forwarding.
 
 .PARAMETER ExpectedAddresses
 Private IP addresses of the private endpoint.
 
 .PARAMETER EndpointLabel
 Service label used in error messages.
+
+.OUTPUTS
+System.Boolean. True only when every configured DNS server returns an expected private address.
 #>
-function Assert-CustomDnsPrivateEndpointResolution {
+function Test-CustomDnsPrivateEndpointResolution {
     param(
         [Parameter(Mandatory)][string[]]$DnsServers,
         [Parameter(Mandatory)][string]$HostName,
@@ -2923,36 +3062,74 @@ function Assert-CustomDnsPrivateEndpointResolution {
         [Parameter(Mandatory)][string]$EndpointLabel
     )
 
+    $allResolved = $true
     foreach ($dnsServer in $DnsServers) {
-        for ($attempt = 1; $attempt -le 6; $attempt++) {
-            $resolvedAddresses = @(
-                Resolve-DnsName `
-                    -Name $HostName `
-                    -Server $dnsServer `
-                    -Type A `
-                    -DnsOnly `
-                    -ErrorAction SilentlyContinue |
-                    Where-Object { $null -ne $_.PSObject.Properties['IPAddress'] } |
-                    ForEach-Object { [string]$_.PSObject.Properties['IPAddress'].Value } |
-                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-            )
-            if (@($resolvedAddresses | Where-Object { $ExpectedAddresses -contains $_ }).Count -gt 0) {
-                break
-            }
-            if ($attempt -lt 6) {
-                Start-Sleep -Seconds 5
-            }
-        }
+        $dnsErrors = @()
+        $resolvedAddresses = @(
+            Resolve-DnsName `
+                -Name $HostName `
+                -Server $dnsServer `
+                -Type A `
+                -DnsOnly `
+                -ErrorAction SilentlyContinue -ErrorVariable dnsErrors |
+                Where-Object { $null -ne $_.PSObject.Properties['IPAddress'] } |
+                ForEach-Object { [string]$_.PSObject.Properties['IPAddress'].Value } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
 
         if (@($resolvedAddresses | Where-Object { $ExpectedAddresses -contains $_ }).Count -eq 0) {
-            throw @"
-Custom DNS server '$dnsServer' does not resolve '$HostName' to the $EndpointLabel private endpoint address $($ExpectedAddresses -join ', ').
-Configure a conditional forwarder for '$PrivateDnsZoneName' to Azure DNS '168.63.129.16', then retry the installation.
-On a Windows DNS server, run as a DNS administrator:
-Add-DnsServerConditionalForwarderZone -Name '$PrivateDnsZoneName' -MasterServers 168.63.129.16 -ReplicationScope Forest
-"@
+            $allResolved = $false
+            $observed = if ($resolvedAddresses.Count -gt 0) {
+                "Returned addresses: $($resolvedAddresses -join ', ')."
+            }
+            elseif ($dnsErrors.Count -gt 0) {
+                "DNS query error: $($dnsErrors[0].Exception.Message)"
+            }
+            else {
+                'No A records were returned.'
+            }
+            Write-Warning "Custom DNS server '$dnsServer' does not resolve '$HostName' to the $EndpointLabel private address(es) $($ExpectedAddresses -join ', '). $observed Required private zone: '$PrivateDnsZoneName'."
         }
     }
+    $allResolved
+}
+
+<#
+.SYNOPSIS
+Prints the zone-file A records required by the deployed private endpoints.
+
+.DESCRIPTION
+Shows every deployed endpoint before asking for confirmation, so Blob, Queue, and Key Vault DNS can
+be corrected together. The records must be served by the VNet DNS servers, not the PC hosts file.
+No DNS configuration is changed automatically.
+
+.PARAMETER Endpoints
+Endpoint dictionaries containing HostName, PrivateDnsZoneName, and ExpectedAddresses.
+
+.PARAMETER DnsServers
+Custom DNS servers configured on the Function virtual network.
+#>
+function Write-PrivateEndpointDnsGuidance {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary[]]$Endpoints,
+        [Parameter(Mandatory)][string[]]$DnsServers
+    )
+
+    Write-Host "`nCorrect the private zones served by DNS server(s): $($DnsServers -join ', ')." -ForegroundColor Yellow
+    Write-Host 'Use the following fully qualified A records in the corresponding local DNS zone files:'
+    foreach ($endpoint in $Endpoints) {
+        $label = ([string]$endpoint.HostName).Split('.')[0]
+        Write-Host "`nZone: $($endpoint.PrivateDnsZoneName)"
+        foreach ($address in $endpoint.ExpectedAddresses) {
+            Write-Host "$label.$($endpoint.PrivateDnsZoneName). 300 IN A $address"
+        }
+        Write-Host "Verify the public service name: $($endpoint.HostName)"
+    }
+    Write-Host "`nThe public service CNAME must still resolve through these private zones."
+    Write-Host 'Do not create replacement zones for all of blob.core.windows.net, queue.core.windows.net, or vault.azure.net.'
+    Write-Host 'Alternatively, use conditional forwarding to Azure DNS 168.63.129.16 from a DNS server inside Azure, or to a reachable Azure DNS Private Resolver inbound endpoint.'
+    Write-Host 'Reload the zone files and clear stale DNS caches as appropriate before confirming.'
+    Write-Host 'If the installation computer cannot query these DNS servers, verify the records from the VNet instead. Editing only the PC hosts file does not configure Function VNet DNS.'
 }
 
 <#
@@ -2961,7 +3138,10 @@ Validates private endpoint DNS resolution through the custom DNS servers of the 
 
 .DESCRIPTION
 Checks the Blob and Queue Storage endpoints and, for a vault created by the installer, the Key
-Vault endpoint. Returns without checks when the virtual network uses Azure-provided DNS.
+Vault endpoint once per DNS server. On failure, prints the required zone records and waits for
+interactive confirmation, or terminates without prompting in unattended mode. Confirmation resumes
+installation without rechecking DNS and warns that the configuration was not independently verified.
+Returns without checks when the VNet uses Azure-provided DNS.
 #>
 function Assert-PrivateEndpointDnsResolution {
     $customDnsServers = @($virtualNetwork.dhcpOptions.dnsServers)
@@ -2975,22 +3155,24 @@ function Assert-PrivateEndpointDnsResolution {
         '--resource-group', $ResourceGroupName,
         '--name', $StorageAccountName
     )
-    Assert-CustomDnsPrivateEndpointResolution `
-        -DnsServers $customDnsServers `
-        -HostName ([uri][string]$storageAccount.primaryEndpoints.blob).Host `
-        -PrivateDnsZoneName 'privatelink.blob.core.windows.net' `
-        -ExpectedAddresses @(Get-PrivateEndpointAddress `
-            -PrivateEndpointName "pe-$StorageAccountName-blob" `
-            -PrivateEndpointLabel 'Storage') `
-        -EndpointLabel 'Storage'
-    Assert-CustomDnsPrivateEndpointResolution `
-        -DnsServers $customDnsServers `
-        -HostName ([uri][string]$storageAccount.primaryEndpoints.queue).Host `
-        -PrivateDnsZoneName 'privatelink.queue.core.windows.net' `
-        -ExpectedAddresses @(Get-PrivateEndpointAddress `
-            -PrivateEndpointName "pe-$StorageAccountName-queue" `
-            -PrivateEndpointLabel 'Queue Storage') `
-        -EndpointLabel 'Queue Storage'
+    $endpoints = @(
+        @{
+            HostName = ([uri][string]$storageAccount.primaryEndpoints.blob).Host
+            PrivateDnsZoneName = 'privatelink.blob.core.windows.net'
+            ExpectedAddresses = @(Get-PrivateEndpointAddress `
+                -PrivateEndpointName "pe-$StorageAccountName-blob" `
+                -PrivateEndpointLabel 'Storage')
+            EndpointLabel = 'Storage'
+        }
+        @{
+            HostName = ([uri][string]$storageAccount.primaryEndpoints.queue).Host
+            PrivateDnsZoneName = 'privatelink.queue.core.windows.net'
+            ExpectedAddresses = @(Get-PrivateEndpointAddress `
+                -PrivateEndpointName "pe-$StorageAccountName-queue" `
+                -PrivateEndpointLabel 'Queue Storage')
+            EndpointLabel = 'Queue Storage'
+        }
+    )
 
     if ($CreateKeyVault) {
         $vault = Get-AzureJson -Arguments @(
@@ -2999,17 +3181,42 @@ function Assert-PrivateEndpointDnsResolution {
             '--resource-group', $KeyVaultResourceGroupName,
             '--name', $KeyVaultName
         )
-        Assert-CustomDnsPrivateEndpointResolution `
-            -DnsServers $customDnsServers `
-            -HostName ([uri][string]$vault.properties.vaultUri).Host `
-            -PrivateDnsZoneName 'privatelink.vaultcore.azure.net' `
-            -ExpectedAddresses @(Get-PrivateEndpointAddress `
+        $endpoints += @{
+            HostName = ([uri][string]$vault.properties.vaultUri).Host
+            PrivateDnsZoneName = 'privatelink.vaultcore.azure.net'
+            ExpectedAddresses = @(Get-PrivateEndpointAddress `
                 -PrivateEndpointName "pe-$KeyVaultName" `
-                -PrivateEndpointLabel 'Key Vault') `
-            -EndpointLabel 'Key Vault'
+                -PrivateEndpointLabel 'Key Vault')
+            EndpointLabel = 'Key Vault'
+        }
     }
 
-    Write-Host "Private endpoint DNS resolution validated through custom DNS server(s): $($customDnsServers -join ', ')." -ForegroundColor Green
+    $allResolved = $true
+    foreach ($endpoint in $endpoints) {
+        if (-not (Test-CustomDnsPrivateEndpointResolution -DnsServers $customDnsServers @endpoint)) {
+            $allResolved = $false
+        }
+    }
+    if ($allResolved) {
+        Write-Host "Private endpoint DNS resolution validated through custom DNS server(s): $($customDnsServers -join ', ')." -ForegroundColor Green
+        return
+    }
+
+    Write-PrivateEndpointDnsGuidance -Endpoints $endpoints -DnsServers $customDnsServers
+    if ($script:NonInteractive) {
+        throw 'Private endpoint DNS validation failed. Correct the listed DNS records or forwarding and rerun the installation.'
+    }
+    while ($true) {
+        $answer = (Read-Host 'After configuring DNS, press ENTER to confirm and continue WITHOUT rechecking, or enter A to abort').Trim()
+        if ($answer -eq 'A') {
+            throw 'Installation aborted because private endpoint DNS is not ready. Azure resources already deployed remain in place.'
+        }
+        if ([string]::IsNullOrEmpty($answer)) {
+            Write-Warning 'Continuing based on user-confirmed DNS configuration WITHOUT rechecking. Private endpoint DNS was not independently verified from this computer; the Function VNet must resolve and reach these endpoints. Subsequent deployment and runtime errors remain failures.'
+            return
+        }
+        Write-Warning 'Press ENTER to confirm the DNS configuration and continue without rechecking, or enter A to abort.'
+    }
 }
 
 # Main execution flow. Everything below runs inside a transcript; the outer catch block removes an
@@ -3021,6 +3228,10 @@ try {
     Start-Transcript -Path $installerLogPath -Force -Confirm:$false | Out-Null
     $transcriptStarted = $true
     Write-Host "Installer log: $installerLogPath"
+
+if ([string]::IsNullOrWhiteSpace($ActiveDirectoryTrustedCertificatePath)) {
+    throw 'A public root CA certificate (.cer/.pem) is REQUIRED for installation, validation, and updates. Supply -ActiveDirectoryTrustedCertificatePath. The certificate is imported into the Azure Function package for LDAPS and StartTLS; importing it into the installation PC certificate store alone is insufficient.'
+}
 
 # Phase 1: select the Azure subscription, then collect missing target values in installation order.
 Write-Step 'Validating Azure subscription'
@@ -3333,15 +3544,19 @@ if ([string]::IsNullOrWhiteSpace($ActiveDirectoryForestDomain)) {
     }
 }
 
+$script:DeferredActiveDirectoryValidation = $false
 if ([string]::IsNullOrWhiteSpace($ActiveDirectoryServer)) {
     $script:ActiveDirectoryServerCandidates = @(
-        Get-ActiveDirectoryDomainControllerList -Domain $ActiveDirectoryForestDomain
+        Get-ActiveDirectoryDomainControllerList -Domain $ActiveDirectoryForestDomain -AllowUnavailable
     )
-    $ActiveDirectoryServer = $script:ActiveDirectoryServerCandidates[0]
-    Write-Host (
-        "Discovered Active Directory domain controllers through DNS SRV: {0}" -f
-        ($script:ActiveDirectoryServerCandidates -join ', ')
-    )
+    $script:DeferredActiveDirectoryValidation = $script:ActiveDirectoryServerCandidates.Count -eq 0
+    if (-not $script:DeferredActiveDirectoryValidation) {
+        $ActiveDirectoryServer = $script:ActiveDirectoryServerCandidates[0]
+        Write-Host (
+            "Discovered Active Directory domain controllers through DNS SRV: {0}" -f
+            ($script:ActiveDirectoryServerCandidates -join ', ')
+        )
+    }
 }
 else {
     $script:ActiveDirectoryServerCandidates = @($ActiveDirectoryServer)
@@ -3516,39 +3731,6 @@ if ([string]::IsNullOrWhiteSpace($ManagementApiClientId)) {
 if ($ManagementApiClientId -notmatch '^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
     throw 'ManagementApiClientId must be a valid GUID.'
 }
-# Without explicit bootstrap principals, the signed-in Entra user receives management API access.
-if ($null -eq $ManagementApiAllowedPrincipalObjectId -or
-    @($ManagementApiAllowedPrincipalObjectId).Count -eq 0) {
-    $signedInUserResult = Invoke-AzureCli -Arguments @(
-        'ad', 'signed-in-user', 'show', '--query', '{ id: id }',
-        '--only-show-errors', '--output', 'json'
-    ) -AllowFailure
-    $signedInUser = if ($signedInUserResult.ExitCode -eq 0 -and
-        -not [string]::IsNullOrWhiteSpace($signedInUserResult.Output)) {
-        $signedInUserResult.Output | ConvertFrom-Json
-    }
-    else {
-        $null
-    }
-    $signedInUserId = [guid]::Empty
-    if ([guid]::TryParse([string]$signedInUser.id, [ref]$signedInUserId)) {
-        $ManagementApiAllowedPrincipalObjectId = @($signedInUserId)
-        Write-Host "Management API access restricted to signed-in Entra user '$signedInUserId'." -ForegroundColor Green
-    }
-    elseif ($script:NonInteractive) {
-        throw 'ManagementApiAllowedPrincipalObjectId must be supplied explicitly for noninteractive execution.'
-    }
-    else {
-        $allowedPrincipalId = Read-RequiredInstallerValue `
-            -Name 'ManagementApiAllowedPrincipalObjectId' `
-            -Prompt 'Management API allowed Entra principal object ID'
-        $parsedAllowedPrincipalId = [guid]::Empty
-        if (-not [guid]::TryParse($allowedPrincipalId, [ref]$parsedAllowedPrincipalId)) {
-            throw 'ManagementApiAllowedPrincipalObjectId must be a valid GUID.'
-        }
-        $ManagementApiAllowedPrincipalObjectId = @($parsedAllowedPrincipalId)
-    }
-}
 # Role-specific principal lists override the bootstrap principals for the corresponding role.
 $script:ManagementApiRoleAssignments = [ordered]@{
     'HybridDeviceTagger.Reader' = if ($null -ne $ManagementApiReaderPrincipalObjectId) {
@@ -3574,7 +3756,6 @@ $requiredInputValidation = @(
     @{ Name = 'PrivateEndpointSubnetName'; Value = $PrivateEndpointSubnetName; MaximumLength = 80 },
     @{ Name = 'VirtualNetworkResourceGroupName'; Value = $VirtualNetworkResourceGroupName; MaximumLength = 90 },
     @{ Name = 'KeyVaultResourceGroupName'; Value = $KeyVaultResourceGroupName; MaximumLength = 90 },
-    @{ Name = 'ActiveDirectoryServer'; Value = $ActiveDirectoryServer; MaximumLength = 253 },
     @{ Name = 'ADServiceAccount'; Value = $ADServiceAccount; MaximumLength = 256 }
 )
 foreach ($validation in $requiredInputValidation) {
@@ -3583,7 +3764,11 @@ foreach ($validation in $requiredInputValidation) {
         throw "$($validation.Name) must contain 1-$($validation.MaximumLength) characters."
     }
 }
-if ($SkipActiveDirectoryDirectoryChecks -and
+if (-not $script:DeferredActiveDirectoryValidation -and
+    ([string]::IsNullOrWhiteSpace($ActiveDirectoryServer) -or $ActiveDirectoryServer.Length -gt 253)) {
+    throw 'ActiveDirectoryServer must contain 1-253 characters.'
+}
+if ($SkipActiveDirectoryDirectoryChecks -and -not $script:DeferredActiveDirectoryValidation -and
     [string]::IsNullOrWhiteSpace($ActiveDirectoryBindUserDistinguishedName)) {
     throw 'ActiveDirectoryBindUserDistinguishedName must be supplied when Active Directory directory checks are skipped.'
 }
@@ -3612,6 +3797,12 @@ foreach ($tag in $Tags.GetEnumerator()) {
     }
 }
 
+foreach ($obsoleteSchedule in 'TaggingSchedule', 'RotationSchedule') {
+    if ($PSBoundParameters.ContainsKey($obsoleteSchedule)) {
+        Write-Warning "$obsoleteSchedule is obsolete and ignored. Use TaggingIntervalMinutes and PasswordRotationDays, or change the intervals in the configuration portal."
+    }
+}
+
 Write-Step 'Checking local prerequisites'
 if (-not (Test-Path $templatePath)) { throw "Bicep template not found: $templatePath" }
 if (-not (Test-Path -LiteralPath $FunctionPackagePath -PathType Leaf)) {
@@ -3634,9 +3825,9 @@ if ($ActiveDirectoryTrustedCertificatePath) {
     }
     Write-Host "Using Active Directory trust anchor $($script:TrustedCertificate.Thumbprint)."
 }
-$script:EffectiveAllowLdapFallback = $false
+$script:EffectiveAllowLdapFallback = $script:DeferredActiveDirectoryValidation
 
-if (-not $SkipActiveDirectoryDirectoryChecks) {
+if (-not $SkipActiveDirectoryDirectoryChecks -and -not $script:DeferredActiveDirectoryValidation) {
     Write-Step 'Validating existing Active Directory service account through secure LDAP'
     $resolvedServiceAccountDn = Resolve-ADServiceAccountDistinguishedName
     if ([string]::IsNullOrWhiteSpace($resolvedServiceAccountDn)) {
@@ -3780,7 +3971,10 @@ Write-Step 'Validating existing app-owned resources and global names'
 Assert-ExistingOwnedResource
 
 Write-Step 'Validating Active Directory forest, account, read access, and LDAP TLS certificate'
-if ($SkipActiveDirectoryDirectoryChecks) {
+if ($script:DeferredActiveDirectoryValidation) {
+    Write-Warning 'Local forest, account, and LDAP TLS checks were not performed because AD DNS is unavailable on this computer. The Function must resolve and reach AD from its VNet and validate the credential before storing it. If needed, correct the forest domain with Set-HybridDeviceTaggerActiveDirectoryConfiguration and initialize the credential afterwards.'
+}
+elseif ($SkipActiveDirectoryDirectoryChecks) {
     if (-not $script:TrustedCertificate) {
         throw 'Skipping Active Directory directory checks requires an explicit trusted certificate.'
     }
@@ -3915,6 +4109,9 @@ try {
     Write-Step 'Configuring management API application roles'
     Set-ManagementApiAuthorization
 
+    Write-Step 'Configuring configuration portal sign-in'
+    $configurationPortalUrl = Set-ConfigurationPortalSignIn
+
     Write-Step 'Deploying Azure infrastructure'
     $deploymentName = "hybrid-device-tagger-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
     try {
@@ -3986,8 +4183,10 @@ try {
 
     Write-Host "Installation completed for Function App '$FunctionAppName'." -ForegroundColor Green
     Write-Host ''
+    Write-Host "Configuration portal (Function App Owners and Contributors): $configurationPortalUrl" -ForegroundColor Cyan
+    Write-Host ''
     Write-Host 'No tagging rules were created during installation.' -ForegroundColor Yellow
-    Write-Host 'Add the first rule through the HybridDeviceTagger management module:'
+    Write-Host "Add the first rule in the configuration portal ($configurationPortalUrl) or through the HybridDeviceTagger management module:"
     Write-Host "  Import-Module '$scriptRoot\HybridDeviceTagger.Management'"
     Write-Host "  Connect-HybridDeviceTagger -ApiBaseUri 'https://$FunctionAppName.azurewebsites.net/api/management' -ClientId '$ManagementApiClientId'"
     Write-Host '  Get-Help Add-HybridDeviceTaggerRule -Examples'

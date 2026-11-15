@@ -26,6 +26,60 @@ public sealed class PasswordRotationServiceTests
     }
 
     [Fact]
+    public async Task RotateIfDueAsync_UsesRuntimeRotationInterval()
+    {
+        var store = new StubCredentialStore(CreateCredential("current", Now.AddDays(-10)), Now);
+        var passwordClient = new StubPasswordClient("current");
+        var schedule = new Mock<IOperationScheduleStore>();
+        schedule.Setup(value => value.GetAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new OperationScheduleSnapshot(15, 7, 29, "\"v\"", null, "blob"));
+        var service = CreateService(store, passwordClient, schedule.Object);
+
+        var result = await service.RotateIfDueAsync(CancellationToken.None);
+
+        Assert.Equal(PasswordRotationOutcome.Rotated, result.Outcome);
+        Assert.Equal(1, passwordClient.ChangeCount);
+    }
+
+    [Fact]
+    public async Task RotateNowAsync_DefersUntilMinimumPasswordAgeElapsed()
+    {
+        var store = new StubCredentialStore(CreateCredential("current", Now.AddDays(-10)), Now);
+        var passwordClient = new StubPasswordClient("current")
+        {
+            Window = new PasswordChangeWindow(Now.AddMinutes(-17), TimeSpan.FromDays(1), "domain")
+        };
+        var service = CreateService(store, passwordClient);
+
+        var result = await service.RotateNowAsync(CancellationToken.None);
+
+        Assert.Equal(PasswordRotationOutcome.DeferredMinimumPasswordAge, result.Outcome);
+        Assert.Equal(Now.AddMinutes(-17).AddDays(1), result.EarliestChangeUtc);
+        Assert.Equal(0, store.StageCount);
+        Assert.Equal(0, passwordClient.ChangeCount);
+    }
+
+    [Fact]
+    public async Task RotateNowAsync_ExplainsPolicyRejectionAndKeepsCurrentPassword()
+    {
+        var store = new StubCredentialStore(CreateCredential("current", Now.AddDays(-10)), Now);
+        var passwordClient = new StubPasswordClient("current") { RejectChangeByPolicy = true };
+        var service = CreateService(store, passwordClient);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.RotateNowAsync(CancellationToken.None));
+
+        Assert.Contains("password policy", exception.Message, StringComparison.Ordinal);
+        Assert.Equal("current", store.Current.Password);
+    }
+
+    [Theory]
+    [InlineData("-864000000000", 1.0)]
+    [InlineData("0", 0.0)]
+    [InlineData("bad", null)]
+    public void ParseInterval_ConvertsActiveDirectoryAges(string value, double? days) =>
+        Assert.Equal(days is null ? null : TimeSpan.FromDays(days.Value), LdapActiveDirectoryPasswordClient.ParseInterval(value));
+
+    [Fact]
     public async Task RotateNowAsync_RotatesRecentPassword()
     {
         var store = new StubCredentialStore(CreateCredential("current", Now.AddDays(-10)), Now);
@@ -191,7 +245,8 @@ public sealed class PasswordRotationServiceTests
 
     private static PasswordRotationService CreateService(
         StubCredentialStore store,
-        StubPasswordClient passwordClient) =>
+        StubPasswordClient passwordClient,
+        IOperationScheduleStore? scheduleStore = null) =>
         new(
             store,
             passwordClient,
@@ -203,7 +258,8 @@ public sealed class PasswordRotationServiceTests
                 SecretExpiryDays = 35
             }),
             new FixedTimeProvider(Now),
-            NullLogger<PasswordRotationService>.Instance);
+            NullLogger<PasswordRotationService>.Instance,
+            scheduleStore);
 
     private static StoredDirectoryCredential CreateCredential(
         string password,
@@ -238,6 +294,15 @@ public sealed class PasswordRotationServiceTests
 
         public bool SecureConnectionAvailable { get; init; } = true;
 
+        public PasswordChangeWindow? Window { get; init; }
+
+        public bool RejectChangeByPolicy { get; init; }
+
+        public Task<PasswordChangeWindow?> GetPasswordChangeWindowAsync(
+            StoredDirectoryCredential credential,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(Window);
+
         public int ChangeCount { get; private set; }
 
         public Task<bool> CanBindAsync(
@@ -257,10 +322,19 @@ public sealed class PasswordRotationServiceTests
             CancellationToken cancellationToken)
         {
             Assert.Equal(ActivePassword, currentCredential.Password);
+            if (RejectChangeByPolicy)
+            {
+                throw new ActiveDirectoryLdapException("Constraint Violation", 19, new InvalidOperationException());
+            }
             ActivePassword = newPassword;
             ChangeCount++;
             return Task.CompletedTask;
         }
+
+        public Task<ActiveDirectoryAccessValidationResult> ValidateAccessAsync(
+            StoredDirectoryCredential credential,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 
     private sealed class StubCredentialStore : IActiveDirectoryCredentialStore
@@ -306,5 +380,11 @@ public sealed class PasswordRotationServiceTests
             Current = new StoredDirectoryCredential(Current.Username, password, _now);
             return Task.CompletedTask;
         }
+
+        public Task<StoredDirectoryCredential> ReplaceCurrentAsync(string password, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task ClearNextAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
     }
 }

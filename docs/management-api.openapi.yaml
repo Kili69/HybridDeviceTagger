@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
   title: HybridDeviceTagger Management API
-  version: 1.0.0
-  description: REST API for authentication discovery, tagging configuration, operational actions, run status, and trace retrieval.
+  version: 1.3.0
+  description: REST API for authentication discovery, forest-domain and tagging configuration, operational actions, run status, trace retrieval, and the Owner/Contributor-only configuration portal (activity log, service account, LDAP validation, trust anchors).
 servers:
   - url: https://func-hybriddevicetagger.azurewebsites.net/api/management
 security:
@@ -21,6 +21,66 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuthenticationMetadata'
+  /active-directory:
+    get:
+      operationId: getActiveDirectoryConfiguration
+      summary: Read the effective Active Directory forest DNS domain
+      description: Requires Reader, RuleAdministrator, PasswordRotationAdministrator, or effective Function App Owner/Contributor access. Does not contact AD.
+      responses:
+        '200':
+          description: Effective domain and version
+          headers:
+            ETag:
+              description: Stored configuration version, omitted before the first change
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActiveDirectoryConfiguration'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      operationId: setActiveDirectoryConfiguration
+      summary: Correct the Active Directory forest DNS domain
+      description: Requires effective Function App Owner/Contributor access; application roles are not accepted because the domain selects the servers that receive the service-account password. Validates DNS syntax only, so broken AD connectivity does not prevent repairs. New forest connections read the persisted override without a restart.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [domain]
+              properties:
+                domain:
+                  type: string
+                  maxLength: 253
+                  example: contoso.com
+      responses:
+        '200':
+          description: Stored domain and version
+          headers:
+            ETag:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActiveDirectoryConfiguration'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          description: Request body exceeds 65,536 bytes
   /tagging-rules:
     get:
       operationId: getTaggingConfiguration
@@ -266,6 +326,304 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+  /portal/session:
+    get:
+      operationId: getPortalSession
+      summary: Confirm configuration-portal access
+      description: Requires effective Owner or Contributor on the Function App; application roles are not accepted. Records a portal sign-in activity.
+      responses:
+        '200':
+          description: Signed-in user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: string
+                  activityLogAvailable:
+                    type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdministratorRequired'
+  /portal/activity:
+    get:
+      operationId: getPortalActivity
+      summary: Read the activity log, newest first
+      description: Requires effective Owner or Contributor on the Function App. Reads from Log Analytics; new records appear after the ingestion delay.
+      parameters:
+        - name: hours
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 720, default: 24 }
+        - name: category
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string, enum: [Configuration, Tagging, Password, Access] }
+        - name: outcome
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string, enum: [Succeeded, Failed, Denied] }
+        - name: take
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+      responses:
+        '200':
+          description: Matching activities
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hours: { type: integer }
+                  records:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ActivityRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdministratorRequired'
+        '503':
+          description: No Application Insights resource is configured for activity queries
+  /portal/active-directory:
+    get:
+      operationId: getPortalActiveDirectory
+      summary: Read the effective forest domain and service account
+      description: Requires effective Owner or Contributor on the Function App.
+      responses:
+        '200':
+          description: Effective configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  domain: { type: string }
+                  username: { type: string }
+                  distinguishedName: { type: string, description: Empty when resolved from the UPN }
+                  accountSource: { type: string, enum: [appSetting, blob] }
+                  source: { type: string, enum: [appSetting, blob] }
+                  eTag: { type: string, nullable: true }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdministratorRequired'
+  /portal/active-directory/validate:
+    post:
+      operationId: validatePortalActiveDirectoryAccess
+      summary: Validate LDAP access with the stored credential
+      description: Requires effective Owner or Contributor on the Function App. Reports every domain-controller attempt, including certificate validation failures. Never returns the password.
+      responses:
+        '200':
+          description: Validation result; inspect succeeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LdapAccessValidation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdministratorRequired'
+        '409':
+          description: No credential has been stored yet
+  /portal/active-directory/account:
+    put:
+      operationId: changePortalActiveDirectoryAccount
+      summary: Change the service account or replace its password
+      description: Requires effective Owner or Contributor on the Function App. Validates a TLS-protected bind with the supplied credential before storing it, holds the password-rotation lock, and invalidates the staged rotation password.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, maxLength: 256, example: svc-tagger@contoso.com }
+                password: { type: string, format: password, maxLength: 256 }
+                distinguishedName: { type: string, maxLength: 1024, description: Optional; empty resolves it from the UPN }
+      responses:
+        '200':
+          description: Stored service account
+        '400':
+          description: Invalid input or the credential cannot bind; attempts contain per-server diagnostics
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdministratorRequired'
+        '409':
+          description: A password rotation is running or the configuration changed concurrently
+        '413':
+          description: Request body exceeds 65,536 bytes
+  /portal/certificates:
+    get:
+      operationId: getPortalCertificates
+      summary: List the LDAP trust anchors
+      description: Requires effective Owner or Contributor on the Function App.
+      responses:
+        '200':
+          description: Trust anchors and version
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrustedCertificates'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdministratorRequired'
+    post:
+      operationId: addPortalCertificate
+      summary: Add an LDAP trust anchor
+      description: Requires effective Owner or Contributor on the Function App. Accepts one public PEM or Base64 DER certificate; private keys, expired certificates, and duplicates are rejected.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CertificateUpload'
+      responses:
+        '200':
+          description: Updated trust anchors
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrustedCertificates'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdministratorRequired'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /portal/certificates/{thumbprint}:
+    parameters:
+      - name: thumbprint
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      operationId: replacePortalCertificate
+      summary: Replace an LDAP trust anchor
+      description: Requires effective Owner or Contributor on the Function App.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CertificateUpload'
+      responses:
+        '200':
+          description: Updated trust anchors
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrustedCertificates'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdministratorRequired'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      operationId: removePortalCertificate
+      summary: Remove an LDAP trust anchor
+      description: Requires effective Owner or Contributor on the Function App. The last trust anchor cannot be removed (HTTP 400).
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '200':
+          description: Updated trust anchors
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrustedCertificates'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdministratorRequired'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /portal/directory/{kind}:
+    get:
+      operationId: searchPortalDirectory
+      summary: Search Entra security groups or administrative units by display-name prefix
+      description: Requires effective Owner or Contributor on the Function App. Returns up to 25 objects; dynamic, mail-enabled, or synchronized groups and dynamic administrative units are marked not assignable.
+      parameters:
+        - name: kind
+          in: path
+          required: true
+          schema: { type: string, enum: [groups, administrative-units] }
+        - name: search
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        '200':
+          description: Matching objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DirectoryObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdministratorRequired'
+  /portal/directory/resolve:
+    post:
+      operationId: resolvePortalDirectory
+      summary: Resolve group and administrative-unit IDs to display names
+      description: Requires effective Owner or Contributor on the Function App. At most 200 IDs; deleted objects are omitted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                groupIds: { type: array, items: { type: string, format: uuid } }
+                administrativeUnitIds: { type: array, items: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Existing objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DirectoryObject'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/AdministratorRequired'
 components:
   parameters:
     IfMatch:
@@ -281,7 +639,7 @@ components:
       openIdConnectUrl: https://login.microsoftonline.com/{tenantId}/v2.0/.well-known/openid-configuration
   responses:
     BadRequest:
-      description: Invalid request or tagging configuration
+      description: Invalid request or configuration
     Unauthorized:
       description: A valid Microsoft Entra token for this API is required
     Forbidden:
@@ -292,7 +650,87 @@ components:
       description: Another request changed the configuration concurrently
     OperationConflict:
       description: The requested operation is already running
+    AdministratorRequired:
+      description: The configuration portal requires effective Owner or Contributor on the Function App
   schemas:
+    DirectoryObject:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        displayName: { type: string }
+        description: { type: string, nullable: true }
+        assignable: { type: boolean }
+        note: { type: string, nullable: true }
+    ActivityRecord:
+      type: object
+      properties:
+        timestampUtc: { type: string, format: date-time }
+        category: { type: string, enum: [Configuration, Tagging, Password, Access] }
+        action: { type: string }
+        outcome: { type: string, enum: [Succeeded, Failed, Denied] }
+        actor: { type: string }
+        target: { type: string }
+        details: { type: string }
+    LdapAccessValidation:
+      type: object
+      properties:
+        succeeded: { type: boolean }
+        invalidCredentials: { type: boolean }
+        error: { type: string, nullable: true }
+        attempts:
+          type: array
+          items:
+            type: object
+            properties:
+              server: { type: string }
+              port: { type: integer }
+              transport: { type: string, enum: [Ldaps, StartTls] }
+              succeeded: { type: boolean }
+              resultCode: { type: integer, nullable: true, description: LDAP result code; -2 for a rejected server certificate }
+              error: { type: string, nullable: true }
+    CertificateUpload:
+      type: object
+      required: [certificate]
+      properties:
+        certificate:
+          type: string
+          description: One public certificate as PEM or Base64-encoded DER
+    TrustedCertificates:
+      type: object
+      properties:
+        certificates:
+          type: array
+          items:
+            type: object
+            properties:
+              thumbprint: { type: string }
+              subject: { type: string }
+              issuer: { type: string }
+              notBeforeUtc: { type: string, format: date-time }
+              notAfterUtc: { type: string, format: date-time }
+              isCertificateAuthority: { type: boolean }
+              addedBy: { type: string }
+              addedUtc: { type: string, format: date-time, nullable: true }
+        eTag: { type: string, nullable: true }
+        lastModifiedUtc: { type: string, format: date-time, nullable: true }
+        source: { type: string, enum: [blob, package, operatingSystem] }
+    ActiveDirectoryConfiguration:
+      type: object
+      required: [domain, source]
+      properties:
+        domain:
+          type: string
+          description: Effective forest DNS name
+        eTag:
+          type: string
+          nullable: true
+        lastModifiedUtc:
+          type: string
+          format: date-time
+          nullable: true
+        source:
+          type: string
+          enum: [appSetting, blob]
     AuthenticationMetadata:
       type: object
       required:

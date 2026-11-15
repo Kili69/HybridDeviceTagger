@@ -42,19 +42,43 @@ public class DeviceTaggerFunction
     /// <summary>The structured logger for invocation-level events.</summary>
     private readonly ILogger<DeviceTaggerFunction> _logger;
 
+    /// <summary>Records run outcomes in the activity log.</summary>
+    private readonly IActivityLog _activityLog;
+
+    /// <summary>The fixed timer rate, equal to the shortest configurable tagging interval.</summary>
+    internal const string TimerSchedule = "0 */5 * * * *";
+
+    /// <summary>Tolerance for timer jitter, so a run started just after a tick does not skip a whole tick.</summary>
+    private static readonly TimeSpan DueTolerance = TimeSpan.FromMinutes(1);
+
+    /// <summary>Supplies the configured tagging interval; null runs on every tick.</summary>
+    private readonly IOperationScheduleStore? _scheduleStore;
+
+    /// <summary>Supplies the current time for the interval check.</summary>
+    private readonly TimeProvider _timeProvider;
+
     /// <summary>Initializes a new instance of the <see cref="DeviceTaggerFunction"/> class.</summary>
     /// <param name="deviceTaggingService">The device-tagging orchestrator.</param>
     /// <param name="runTraceStore">The latest-run diagnostic trace store.</param>
     /// <param name="statusStore">The latest-run status store.</param>
     /// <param name="operationLock">The cross-instance operation lock.</param>
     /// <param name="logger">The structured logger.</param>
+    /// <param name="activityLog">The optional activity log.</param>
+    /// <param name="scheduleStore">The optional runtime interval store; without it every timer tick runs.</param>
+    /// <param name="timeProvider">The optional time source.</param>
     public DeviceTaggerFunction(
         DeviceTaggingService deviceTaggingService,
         IRunTraceStore runTraceStore,
         IOperationStatusStore statusStore,
         IOperationLock operationLock,
-        ILogger<DeviceTaggerFunction> logger)
+        ILogger<DeviceTaggerFunction> logger,
+        IActivityLog? activityLog = null,
+        IOperationScheduleStore? scheduleStore = null,
+        TimeProvider? timeProvider = null)
     {
+        _scheduleStore = scheduleStore;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _activityLog = activityLog ?? NullActivityLog.Instance;
         _deviceTaggingService = deviceTaggingService;
         _runTraceStore = runTraceStore;
         _statusStore = statusStore;
@@ -62,17 +86,41 @@ public class DeviceTaggerFunction
         _logger = logger;
     }
 
-    /// <summary>Tags eligible devices and logs aggregate counts without directory credentials.</summary>
+    /// <summary>Tags eligible devices when the configured interval has elapsed.</summary>
+    /// <remarks>
+    /// The timer ticks every five minutes; the configurable interval decides whether a tick runs.
+    /// </remarks>
     /// <param name="timer">Information about the timer invocation.</param>
     /// <param name="context">The Functions invocation context used for log correlation.</param>
     /// <param name="cancellationToken">Cancels the invocation.</param>
     /// <returns>A task representing the asynchronous invocation.</returns>
     [Function("DeviceTaggerFunction")]
     public async Task RunAsync(
-        [TimerTrigger("%TaggingSchedule%")] TimerInfo timer,
+        [TimerTrigger(TimerSchedule)] TimerInfo timer,
         FunctionContext context,
         CancellationToken cancellationToken)
-        => await RunOperationAsync(context.InvocationId, timer.IsPastDue, false, cancellationToken);
+    {
+        if (await IsDueAsync(cancellationToken))
+        {
+            await RunOperationAsync(context.InvocationId, timer.IsPastDue, false, cancellationToken);
+        }
+    }
+
+    /// <summary>Returns whether the configured interval has elapsed since the last run started.</summary>
+    /// <param name="cancellationToken">Cancels the storage reads.</param>
+    /// <returns><see langword="true"/> when no run is recorded or the interval has elapsed.</returns>
+    internal async Task<bool> IsDueAsync(CancellationToken cancellationToken)
+    {
+        if (_scheduleStore is null)
+        {
+            return true;
+        }
+
+        var schedule = await _scheduleStore.GetAsync(cancellationToken);
+        var last = await _statusStore.GetAsync(OperationNames.DeviceTagging, cancellationToken);
+        return last is null ||
+            _timeProvider.GetUtcNow() >= last.StartedAtUtc + TimeSpan.FromMinutes(schedule.TaggingIntervalMinutes) - DueTolerance;
+    }
 
     /// <summary>Runs device tagging requested through the management API.</summary>
     /// <param name="request">The queued run request.</param>
@@ -221,6 +269,16 @@ public class DeviceTaggerFunction
                 result.MembershipsAdded,
                 result.MembershipsRemoved,
                 result.RemovedFromScope);
+            _activityLog.Record(new ActivityEntry(
+                ActivityCategories.Tagging,
+                "TaggingRunCompleted",
+                ActivityOutcomes.Succeeded,
+                "System",
+                $"Invocation {invocationId}",
+                $"Discovered: {result.Discovered}, updated: {result.Updated}, unchanged: {result.Unchanged}, " +
+                $"not found: {result.NotFound}, not hybrid joined: {result.NotHybridJoined}, " +
+                $"memberships added: {result.MembershipsAdded}, removed: {result.MembershipsRemoved}, " +
+                $"removed from scope: {result.RemovedFromScope}" + FormatChangedDevices(result.ChangedDeviceNames)));
             return result;
         }
         catch (Exception exception)
@@ -242,8 +300,30 @@ public class DeviceTaggerFunction
                 exception,
                 "Device tagging failed. Invocation ID: {InvocationId}",
                 invocationId);
+            _activityLog.Record(new ActivityEntry(
+                ActivityCategories.Tagging,
+                "TaggingRunCompleted",
+                ActivityOutcomes.Failed,
+                "System",
+                $"Invocation {invocationId}",
+                exception.Message));
             throw;
         }
+    }
+
+    /// <summary>Lists the changed Entra devices for the activity log, limited to 50 names.</summary>
+    /// <param name="names">The changed device names.</param>
+    /// <returns>The suffix, or an empty string when no device changed.</returns>
+    private static string FormatChangedDevices(IReadOnlyList<string>? names)
+    {
+        if (names is null || names.Count == 0)
+        {
+            return string.Empty;
+        }
+        var listed = string.Join(", ", names.Take(50));
+        return names.Count > 50
+            ? $"; changed Entra devices: {listed} and {names.Count - 50} more"
+            : $"; changed Entra devices: {listed}";
     }
 
     /// <summary>Writes run status without letting status-store failures fail the run itself.</summary>

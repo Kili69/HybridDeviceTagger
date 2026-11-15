@@ -48,6 +48,17 @@ public sealed partial class TaggingOptions : IValidatableObject
     /// <summary>The maximum number of Entra groups, and separately administrative units, per rule.</summary>
     internal const int MaximumMembershipTargetCount = 50;
 
+    /// <summary>The shortest tagging interval in minutes; the tagging timer ticks at this rate.</summary>
+    public const int MinimumIntervalMinutes = 5;
+
+    /// <summary>The longest tagging interval in minutes.</summary>
+    public const int MaximumIntervalMinutes = 1440;
+
+    /// <summary>Gets the initial minutes between two scheduled tagging runs.</summary>
+    /// <remarks>The configuration portal can override this value at runtime.</remarks>
+    [Range(MinimumIntervalMinutes, MaximumIntervalMinutes)]
+    public int IntervalMinutes { get; init; } = 15;
+
     /// <summary>Gets the ordered OU tagging rules.</summary>
     [Required]
     public List<TaggingRuleOptions> Rules { get; init; } = [];

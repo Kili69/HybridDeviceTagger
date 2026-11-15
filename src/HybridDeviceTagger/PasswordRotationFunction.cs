@@ -39,17 +39,26 @@ public sealed class PasswordRotationFunction
     /// <summary>The structured logger for invocation-level events.</summary>
     private readonly ILogger<PasswordRotationFunction> _logger;
 
+    /// <summary>Records rotation outcomes in the activity log.</summary>
+    private readonly IActivityLog _activityLog;
+
+    /// <summary>The fixed hourly check; the configurable rotation interval decides whether a change is due.</summary>
+    internal const string TimerSchedule = "0 0 * * * *";
+
     /// <summary>Initializes a new instance of the <see cref="PasswordRotationFunction"/> class.</summary>
     /// <param name="rotationService">The password-rotation orchestrator.</param>
     /// <param name="statusStore">The latest-run status store.</param>
     /// <param name="operationLock">The cross-instance operation lock.</param>
     /// <param name="logger">The structured logger.</param>
+    /// <param name="activityLog">The optional activity log.</param>
     public PasswordRotationFunction(
         PasswordRotationService rotationService,
         IOperationStatusStore statusStore,
         IOperationLock operationLock,
-        ILogger<PasswordRotationFunction> logger)
+        ILogger<PasswordRotationFunction> logger,
+        IActivityLog? activityLog = null)
     {
+        _activityLog = activityLog ?? NullActivityLog.Instance;
         _rotationService = rotationService;
         _statusStore = statusStore;
         _operationLock = operationLock;
@@ -63,7 +72,7 @@ public sealed class PasswordRotationFunction
     /// <returns>A task representing the asynchronous invocation.</returns>
     [Function("PasswordRotationFunction")]
     public async Task RunAsync(
-        [TimerTrigger("%PasswordRotationSchedule%")] TimerInfo timer,
+        [TimerTrigger(TimerSchedule)] TimerInfo timer,
         FunctionContext context,
         CancellationToken cancellationToken)
         => await RunOperationAsync(context.InvocationId, timer.IsPastDue, false, cancellationToken);
@@ -171,7 +180,8 @@ public sealed class PasswordRotationFunction
                 new Dictionary<string, object?>
                 {
                     ["outcome"] = result.Outcome.ToString(),
-                    ["currentPasswordAgeDays"] = result.CurrentPasswordAgeDays
+                    ["currentPasswordAgeDays"] = result.CurrentPasswordAgeDays,
+                    ["earliestChangeUtc"] = result.EarliestChangeUtc
                 },
                 result.Outcome is PasswordRotationOutcome.Rotated or
                     PasswordRotationOutcome.RecoveredFromNext,
@@ -181,6 +191,22 @@ public sealed class PasswordRotationFunction
                 invocationId,
                 result.Outcome,
                 result.CurrentPasswordAgeDays);
+            // Daily checks that find the password not yet due are not audited to keep the log meaningful.
+            if (force || result.Outcome != PasswordRotationOutcome.NotDue)
+            {
+                _activityLog.Record(new ActivityEntry(
+                    ActivityCategories.Password,
+                    $"PasswordRotation{result.Outcome}",
+                    result.Outcome is PasswordRotationOutcome.DeferredNoSecureConnection or PasswordRotationOutcome.DeferredMinimumPasswordAge
+                        ? ActivityOutcomes.Failed
+                        : ActivityOutcomes.Succeeded,
+                    "System",
+                    $"Invocation {invocationId}",
+                    $"Forced: {force}, password age before run: {result.CurrentPasswordAgeDays?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "unknown"} days" +
+                    (result.EarliestChangeUtc is { } earliest
+                        ? $", minimum password age not reached; earliest change {earliest:u}"
+                        : string.Empty)));
+            }
             return result;
         }
         catch (Exception exception)
@@ -194,6 +220,13 @@ public sealed class PasswordRotationFunction
                 exception,
                 "Password rotation check failed. Invocation ID: {InvocationId}",
                 invocationId);
+            _activityLog.Record(new ActivityEntry(
+                ActivityCategories.Password,
+                "PasswordRotation",
+                ActivityOutcomes.Failed,
+                "System",
+                $"Invocation {invocationId}",
+                exception.Message));
             throw;
         }
     }

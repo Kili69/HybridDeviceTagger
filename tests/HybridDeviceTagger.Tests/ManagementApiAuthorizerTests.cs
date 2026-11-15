@@ -22,6 +22,9 @@ public sealed class ManagementApiAuthorizerTests
     [InlineData(
         "b24988ac-6180-42a0-ab88-20f7382dd24c",
         ManagementApiRoles.PasswordRotationAdministrator)]
+    [InlineData(
+        "b24988ac-6180-42a0-ab88-20f7382dd24c",
+        ManagementApiRoles.TaggingOperator)]
     public async Task AuthorizeAsync_AcceptsOwnerAndContributor(
         string roleDefinitionId,
         string requiredRole)
@@ -32,7 +35,8 @@ public sealed class ManagementApiAuthorizerTests
               "value": [
                 {
                   "properties": {
-                    "roleDefinitionId": "/subscriptions/test/providers/Microsoft.Authorization/roleDefinitions/{{roleDefinitionId}}"
+                    "roleDefinitionId": "/subscriptions/test/providers/Microsoft.Authorization/roleDefinitions/{{roleDefinitionId}}",
+                    "scope": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-test"
                   }
                 }
               ]
@@ -63,7 +67,8 @@ public sealed class ManagementApiAuthorizerTests
               "value": [
                 {
                   "properties": {
-                    "roleDefinitionId": "/subscriptions/test/providers/Microsoft.Authorization/roleDefinitions/acdd72a7-3385-48ef-bd42-f606fba81ae7"
+                    "roleDefinitionId": "/subscriptions/test/providers/Microsoft.Authorization/roleDefinitions/acdd72a7-3385-48ef-bd42-f606fba81ae7",
+                    "scope": "/"
                   }
                 }
               ]
@@ -79,6 +84,44 @@ public sealed class ManagementApiAuthorizerTests
         Assert.Equal(EasyAuthAuthorizationResult.Forbidden, result);
     }
 
+    [Theory]
+    [InlineData("/", true)]
+    [InlineData("/providers/Microsoft.Management/managementGroups/root", true)]
+    [InlineData("/subscriptions/11111111-1111-1111-1111-111111111111", true)]
+    [InlineData("/SUBSCRIPTIONS/11111111-1111-1111-1111-111111111111/resourceGroups/RG-TEST/", true)]
+    [InlineData(FunctionAppResourceId, true)]
+    [InlineData(FunctionAppResourceId + "/slots/staging", false)]
+    [InlineData("/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-test2", false)]
+    [InlineData("/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-test/providers/Microsoft.Storage/storageAccounts/data", false)]
+    [InlineData(null, false)]
+    public async Task AuthorizeAsync_AcceptsOnlyAssignmentsCoveringTheFunctionApp(string? scope, bool expected)
+    {
+        var scopeJson = scope is null ? "null" : $"\"{scope}\"";
+        var handler = new StubHttpMessageHandler(_ => JsonResponse(
+            $$"""
+            {
+              "value": [
+                {
+                  "properties": {
+                    "roleDefinitionId": "/subscriptions/test/providers/Microsoft.Authorization/roleDefinitions/8e3af657-a8ff-443c-a75c-2fe8c4bcb635",
+                    "scope": {{scopeJson}}
+                  }
+                }
+              ]
+            }
+            """));
+        var authorizer = CreateAuthorizer(handler);
+
+        var result = await authorizer.AuthorizeAsync(
+            AuthenticatedRequest(Guid.Parse("22222222-2222-2222-2222-222222222222")),
+            [ManagementApiRoles.RuleAdministrator],
+            CancellationToken.None);
+
+        Assert.Equal(
+            expected ? EasyAuthAuthorizationResult.Authorized : EasyAuthAuthorizationResult.Forbidden,
+            result);
+    }
+
     [Fact]
     public async Task AuthorizeAsync_DoesNotUseAzureRbacForOtherManagementRoles()
     {
@@ -88,7 +131,7 @@ public sealed class ManagementApiAuthorizerTests
 
         var result = await authorizer.AuthorizeAsync(
             AuthenticatedRequest(Guid.Parse("22222222-2222-2222-2222-222222222222")),
-            [ManagementApiRoles.TaggingOperator],
+            [ManagementApiRoles.Reader],
             CancellationToken.None);
 
         Assert.Equal(EasyAuthAuthorizationResult.Forbidden, result);

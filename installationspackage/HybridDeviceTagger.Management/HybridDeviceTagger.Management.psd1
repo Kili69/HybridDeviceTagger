@@ -38,6 +38,8 @@ SPDX-License-Identifier: Apache-2.0
         'Get-HybridDeviceTaggerTrace'
         'Add-HybridDeviceTaggerRule'
         'Remove-HybridDeviceTaggerRule'
+        'Get-HybridDeviceTaggerActiveDirectoryConfiguration'
+        'Set-HybridDeviceTaggerActiveDirectoryConfiguration'
         'Initialize-HybridDeviceTaggerActiveDirectoryCredential'
         'Invoke-HybridDeviceTagging'
         'Invoke-HybridDeviceTaggerPasswordRotation'

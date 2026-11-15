@@ -45,6 +45,9 @@ public sealed class PasswordRotationService
     /// <summary>The structured logger; passwords are never logged.</summary>
     private readonly ILogger<PasswordRotationService> _logger;
 
+    /// <summary>Supplies the runtime rotation interval; null uses the application setting.</summary>
+    private readonly IOperationScheduleStore? _scheduleStore;
+
     /// <summary>Initializes a new instance of the <see cref="PasswordRotationService"/> class.</summary>
     /// <param name="credentialStore">The active and staged credential store.</param>
     /// <param name="passwordClient">The directory password client.</param>
@@ -52,14 +55,17 @@ public sealed class PasswordRotationService
     /// <param name="options">The rotation policy.</param>
     /// <param name="timeProvider">The UTC time source.</param>
     /// <param name="logger">The structured logger.</param>
+    /// <param name="scheduleStore">The optional runtime rotation interval.</param>
     public PasswordRotationService(
         IActiveDirectoryCredentialStore credentialStore,
         IActiveDirectoryPasswordClient passwordClient,
         IPasswordGenerator passwordGenerator,
         IOptions<PasswordRotationOptions> options,
         TimeProvider timeProvider,
-        ILogger<PasswordRotationService> logger)
+        ILogger<PasswordRotationService> logger,
+        IOperationScheduleStore? scheduleStore = null)
     {
+        _scheduleStore = scheduleStore;
         _credentialStore = credentialStore;
         _passwordClient = passwordClient;
         _passwordGenerator = passwordGenerator;
@@ -120,7 +126,10 @@ public sealed class PasswordRotationService
         }
 
         var ageDays = GetAgeDays(current.CreatedOn);
-        if (!force && ageDays is not null && ageDays < _options.RotateAfterDays)
+        var rotateAfterDays = _scheduleStore is null
+            ? _options.RotateAfterDays
+            : (await _scheduleStore.GetAsync(cancellationToken)).PasswordRotationDays;
+        if (!force && ageDays is not null && ageDays < rotateAfterDays)
         {
             return new PasswordRotationResult(PasswordRotationOutcome.NotDue, ageDays);
         }
@@ -134,9 +143,36 @@ public sealed class PasswordRotationService
                 ageDays);
         }
 
+        var window = await TryGetChangeWindowAsync(current, cancellationToken);
+        if (window is not null && window.EarliestChangeUtc > _timeProvider.GetUtcNow())
+        {
+            _logger.LogInformation(
+                "Password rotation deferred until {EarliestChangeUtc} because the {PolicySource} minimum password age of {MinimumAge} has not elapsed",
+                window.EarliestChangeUtc,
+                window.PolicySource,
+                window.MinimumAge);
+            return new PasswordRotationResult(
+                PasswordRotationOutcome.DeferredMinimumPasswordAge,
+                ageDays,
+                window.EarliestChangeUtc);
+        }
+
         var newPassword = _passwordGenerator.Generate(_options.PasswordLength);
         var staged = await _credentialStore.StageNextAsync(newPassword, cancellationToken);
-        await _passwordClient.ChangePasswordAsync(current, newPassword, cancellationToken);
+        try
+        {
+            await _passwordClient.ChangePasswordAsync(current, newPassword, cancellationToken);
+        }
+        catch (ActiveDirectoryLdapException exception) when (exception.ResultCode == 19)
+        {
+            // 0000052D: the domain password policy rejected a self-service change. The current
+            // password is unchanged and remains valid.
+            throw new InvalidOperationException(
+                "Active Directory rejected the password change because of its password policy " +
+                "(minimum password age, password history, or complexity). The current password remains valid. " +
+                $"Details: {exception.Message}",
+                exception);
+        }
 
         if (!await _passwordClient.CanBindSecurelyAsync(staged, cancellationToken))
         {
@@ -148,6 +184,25 @@ public sealed class PasswordRotationService
         await _credentialStore.PromoteAsync(newPassword, cancellationToken);
         _logger.LogInformation("The Active Directory service account password was rotated.");
         return new PasswordRotationResult(PasswordRotationOutcome.Rotated, ageDays);
+    }
+
+    /// <summary>Reads the minimum-password-age window without letting a lookup failure block rotation.</summary>
+    /// <param name="current">The current credential.</param>
+    /// <param name="cancellationToken">Cancels the lookup.</param>
+    /// <returns>The window, or null when it cannot be determined.</returns>
+    private async Task<PasswordChangeWindow?> TryGetChangeWindowAsync(
+        StoredDirectoryCredential current,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _passwordClient.GetPasswordChangeWindowAsync(current, cancellationToken);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _logger.LogWarning(exception, "The minimum password age could not be read; attempting the change anyway");
+            return null;
+        }
     }
 
     /// <summary>Recovers an interrupted rotation by validating and promoting the staged secret.</summary>

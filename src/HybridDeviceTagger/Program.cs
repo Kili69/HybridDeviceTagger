@@ -57,7 +57,15 @@ var telemetry = builder.Services.AddOpenTelemetry()
     .UseFunctionsWorkerDefaults();
 if (!string.IsNullOrWhiteSpace(builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]))
 {
-    telemetry.UseAzureMonitorExporter();
+    // Application Insights accepts only Entra-authenticated ingestion, so the connection string
+    // alone cannot be used to forge telemetry such as activity-log entries.
+    telemetry.UseAzureMonitorExporter(options =>
+    {
+        if (string.Equals(builder.Configuration["APPLICATIONINSIGHTS_AUTHENTICATION_STRING"], "Authorization=AAD", StringComparison.OrdinalIgnoreCase))
+        {
+            options.Credential = new DefaultAzureCredential();
+        }
+    });
 }
 
 // Validate all external configuration before either timer function can run. This turns missing
@@ -98,6 +106,12 @@ builder.Services
     .ValidateDataAnnotations()
     .ValidateOnStart();
 
+builder.Services
+    .AddOptions<MonitoringOptions>()
+    .BindConfiguration(MonitoringOptions.SectionName)
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
 // DefaultAzureCredential uses managed identity in Azure and the developer credential chain
 // locally; no Azure credential is stored in application configuration.
 builder.Services.AddSingleton<TokenCredential>(_ => new DefaultAzureCredential());
@@ -122,7 +136,21 @@ builder.Services.AddSingleton<IActiveDirectoryPasswordClient, LdapActiveDirector
 builder.Services.AddSingleton<IActiveDirectoryCredentialInitializer, ActiveDirectoryCredentialInitializer>();
 builder.Services.AddSingleton<IPasswordGenerator, SecurePasswordGenerator>();
 builder.Services.AddTransient<PasswordRotationService>();
-builder.Services.AddHttpClient<IManagementApiAuthorizer, ManagementApiAuthorizer>();
+// A singleton keeps the short-lived Owner/Contributor lookup cache across requests.
+builder.Services.AddHttpClient(nameof(ManagementApiAuthorizer));
+builder.Services.AddSingleton<IManagementApiAuthorizer>(serviceProvider =>
+    new ManagementApiAuthorizer(
+        serviceProvider.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(ManagementApiAuthorizer)),
+        serviceProvider.GetRequiredService<TokenCredential>(),
+        serviceProvider.GetRequiredService<
+            Microsoft.Extensions.Options.IOptions<ManagementAuthorizationOptions>>()));
+builder.Services.AddSingleton<IActivityLog, LoggerActivityLog>();
+builder.Services.AddHttpClient<IActivityLogReader, LogAnalyticsActivityLogReader>();
+builder.Services.AddSingleton<IActiveDirectoryAccountService, ActiveDirectoryAccountService>();
+builder.Services.AddScoped<IEntraDirectorySearch>(serviceProvider =>
+    new GraphEntraDirectorySearch(
+        serviceProvider.GetRequiredService<IHttpClientFactory>().CreateClient("MicrosoftGraph"),
+        serviceProvider.GetRequiredService<TokenCredential>()));
 builder.Services.AddHttpClient("MicrosoftGraph", client =>
 {
     client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/");
@@ -207,6 +235,26 @@ builder.Services.AddSingleton(serviceProvider =>
 });
 builder.Services.AddSingleton<IOperationRequestQueue, StorageOperationRequestQueue>();
 builder.Services.AddSingleton<OptionsTaggingRuleProvider>();
+builder.Services.AddSingleton<IActiveDirectoryConfigurationStore>(serviceProvider =>
+    new BlobActiveDirectoryConfigurationStore(
+        serviceProvider.GetRequiredService<BlobServiceClient>()
+            .GetBlobContainerClient("run-traces")
+            .GetBlobClient(BlobActiveDirectoryConfigurationStore.BlobName),
+        serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ActiveDirectoryOptions>>()));
+builder.Services.AddSingleton<ITrustedCertificateStore>(serviceProvider =>
+    new BlobTrustedCertificateStore(
+        serviceProvider.GetRequiredService<BlobServiceClient>()
+            .GetBlobContainerClient("run-traces")
+            .GetBlobClient(BlobTrustedCertificateStore.BlobName),
+        serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ActiveDirectoryOptions>>(),
+        serviceProvider.GetRequiredService<TimeProvider>()));
+builder.Services.AddSingleton<IOperationScheduleStore>(serviceProvider =>
+    new BlobOperationScheduleStore(
+        serviceProvider.GetRequiredService<BlobServiceClient>()
+            .GetBlobContainerClient("run-traces")
+            .GetBlobClient(BlobOperationScheduleStore.BlobName),
+        serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<TaggingOptions>>(),
+        serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<PasswordRotationOptions>>()));
 builder.Services.AddSingleton<BlobTaggingConfigurationStore>(serviceProvider =>
     new BlobTaggingConfigurationStore(
         serviceProvider.GetRequiredService<BlobServiceClient>()

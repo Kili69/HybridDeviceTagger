@@ -34,4 +34,15 @@ public sealed class ManagementApiOptions
 
     /// <summary>Gets the delegated token scope consumed by REST clients.</summary>
     public string TokenScope => $"api://{ClientId}/.default";
+
+    /// <summary>Gets or sets the Microsoft Entra tenant ID used by the configuration portal sign-in.</summary>
+    [RegularExpression("^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")]
+    public string? TenantId { get; set; }
+
+    /// <summary>Gets or sets the Microsoft Entra sign-in host for the cloud environment.</summary>
+    [RegularExpression("^https://[A-Za-z0-9.-]+/?$")]
+    public string AuthorityHost { get; set; } = "https://login.microsoftonline.com";
+
+    /// <summary>Gets the delegated scope the configuration portal requests.</summary>
+    public string PortalScope => $"api://{ClientId}/access_as_user";
 }
