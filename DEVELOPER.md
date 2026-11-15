@@ -36,7 +36,8 @@ The application separates trigger, management API, orchestration, directory, Gra
 |-- scripts/
 |   |-- Assert-CommitMetadata.ps1      Changelog and file-header commit guard
 |   |-- Build-InstallationPackage.ps1  Test, publish, stamp, and archive an installation package
-|   `-- Get-ProductVersion.ps1         Tag-based product version calculation
+|   |-- Get-ProductVersion.ps1         Tag-based product version calculation
+|   `-- Update-ReadmeVersion.ps1       README version badge update and verification
 |-- src/
 |   `-- HybridDeviceTagger/            Azure Functions application
 |-- tests/
@@ -64,7 +65,7 @@ The product version has the format `<YYYY><MM>.<counter>` and is never stored in
 
 PowerShell sources carry `# Project-Version: source`, and the module manifest contains `ModuleVersion = '0.0'`. `scripts/Build-InstallationPackage.ps1` runs the tests (unless `-SkipTests`), publishes the Function with the product version to `installationspackage/function/HybridDeviceTagger.zip`, writes `version.json`, stages `artifacts/HybridDeviceTagger-<version>/` with the version stamped into the scripts and the manifest (plus a `Prerelease` label outside `main`) and `LICENSE`, and creates `artifacts/HybridDeviceTagger-<version>.zip`. `-Release` additionally requires `main`, a clean working tree, and a `## [<version>] - <yyyy-MM-dd>` section in `CHANGELOG.md`, and creates the annotated tag `v<version>`, which is then pushed with `git push origin v<version>`. The CI workflow checks out the full history (`fetch-depth: 0`), builds the package, and uploads the ZIP.
 
-`scripts/Assert-CommitMetadata.ps1`, run by the `.githooks/pre-commit` hook, requires a `CHANGELOG.md` entry below `## [Unreleased]` (or a release section) for every change and the version marker and author header in changed production files.
+`scripts/Assert-CommitMetadata.ps1`, run by the `.githooks/pre-commit` hook, requires a `CHANGELOG.md` entry below `## [Unreleased]` (or a release section) for every change, the version marker and author header in changed production files, and a README version badge that matches `Get-ProductVersion.ps1 -NextCommit`. The `pre-commit` and `pre-merge-commit` hooks first update the staged badge with `scripts/Update-ReadmeVersion.ps1 -Staged`; `-Release` verifies that the badge shows the release version.
 
 ### Runtime Architecture
 
@@ -649,7 +650,7 @@ dotnet build HybridDeviceTagger.sln --configuration Release -p:ProductVersion=20
 
 PowerShell-Quellen tragen `# Project-Version: source`, das Modul-Manifest `ModuleVersion = '0.0'`. Beides ersetzt erst der Paket-Build; außerhalb von `main` erhält das Modul zusätzlich ein Prerelease-Label.
 
-Vor jedem Commit muss die Änderung unter `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) beschrieben werden. Das eingecheckte Prüfskript validiert den Changelog-Eintrag sowie Versionsmarkierung und Autorzeile geänderter Produktionsdateien. Der Repository-Hook wird einmalig pro Clone aktiviert:
+Vor jedem Commit muss die Änderung unter `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) beschrieben werden. Das eingecheckte Prüfskript validiert den Changelog-Eintrag, Versionsmarkierung und Autorzeile geänderter Produktionsdateien sowie das Versions-Badge der README, das die Hooks vorher automatisch auf die Version des neuen Commits setzen. Die Repository-Hooks werden einmalig pro Clone aktiviert:
 
 ```powershell
 git config core.hooksPath .githooks

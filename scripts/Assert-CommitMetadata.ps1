@@ -16,7 +16,9 @@ commit no longer changes a version number. Instead, this check enforces:
 - every changed production PowerShell file carries the source version marker
   "# Project-Version: source" and the author line, which the package build replaces with the
   product version;
-- every changed production C# and Bicep file carries the author line.
+- every changed production C# and Bicep file carries the author line;
+- the version badge in README.md shows the version of the new commit
+  (Update-ReadmeVersion.ps1, called by the pre-commit hook, updates it).
 
 .PARAMETER Staged
 Checks the staged changes instead of the working tree.
@@ -94,6 +96,14 @@ try {
         if ($otherChanges.Count -gt 0 -and $unreleasedEntries.Count -eq 0 -and -not $latestRelease) {
             $failures.Add('Add an entry below "## [Unreleased]" or a "## [<YYYY><MM>.<counter>] - <yyyy-MM-dd>" release section.')
         }
+    }
+
+    try {
+        $badgeArguments = @{ Verify = $true; Staged = [bool]$Staged }
+        & (Join-Path $PSScriptRoot 'Update-ReadmeVersion.ps1') @badgeArguments | Out-Null
+    }
+    catch {
+        $failures.Add($_.Exception.Message)
     }
 
     foreach ($file in $changedFiles) {

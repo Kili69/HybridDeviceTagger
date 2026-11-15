@@ -19,7 +19,8 @@ The script:
    into every PowerShell file and the module manifest, adds version.json and LICENSE, and
    compresses the folder to <OutputPath>/HybridDeviceTagger-<version>.zip.
 
-With Release, the build additionally requires the main branch, a clean working tree, and a
+With Release, the build additionally requires the main branch, a clean working tree, a README
+version badge showing the release version, and a
 CHANGELOG.md section for the version, and creates the annotated Git tag v<version> afterwards.
 Push the tag with git push origin v<version>.
 
@@ -131,6 +132,7 @@ function Assert-ReleasePrecondition {
     if (-not (Select-String -LiteralPath (Join-Path $repositoryRoot 'CHANGELOG.md') -Pattern $changelogPattern -Quiet)) {
         throw "CHANGELOG.md needs a '## [$($Version.CoreVersion)] - <yyyy-MM-dd>' section. Move the Unreleased entries into it and commit."
     }
+    & (Join-Path $PSScriptRoot 'Update-ReadmeVersion.ps1') -Verify -Version $Version.CoreVersion | Out-Null
 }
 
 <#
@@ -168,7 +170,7 @@ try {
 
     if (-not $SkipTests) {
         Write-Step 'Running unit tests'
-        foreach ($testScript in 'InstallerAuthorization.Tests.ps1', 'InstallerDirectory.Tests.ps1', 'ManagementModule.Tests.ps1') {
+        foreach ($testScript in 'InstallerAuthorization.Tests.ps1', 'InstallerDirectory.Tests.ps1', 'ManagementModule.Tests.ps1', 'ReadmeVersion.Tests.ps1') {
             Invoke-Checked -FilePath 'pwsh' -Arguments @(
                 '-NoProfile', '-File', (Join-Path $repositoryRoot "tests\$testScript"))
         }

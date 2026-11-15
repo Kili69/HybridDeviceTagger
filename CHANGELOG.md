@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The README version badge shows the version of every commit on every branch; the commit hooks update it and the commit guard and release build verify it.
+
 ## [202611.1] - 2026-11-15
 
 First official release.

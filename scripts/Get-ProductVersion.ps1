@@ -29,6 +29,10 @@ Overrides the detected branch name.
 .PARAMETER Detailed
 Returns an object with all version components instead of the product version string.
 
+.PARAMETER NextCommit
+Calculates the version of a new commit on top of HEAD. A release tag on HEAD is ignored because
+the new commit does not carry it; the pre-commit hook uses this for the README version badge.
+
 .OUTPUTS
 System.String, or a PSCustomObject when Detailed is specified.
 
@@ -66,7 +70,9 @@ param(
 
     [string]$Branch,
 
-    [switch]$Detailed
+    [switch]$Detailed,
+
+    [switch]$NextCommit
 )
 
 Set-StrictMode -Version Latest
@@ -125,8 +131,10 @@ function ConvertTo-VersionSuffix {
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
-$headTags = @(Invoke-Git -Arguments @('tag', '--points-at', 'HEAD') |
-    Where-Object { $_ -match $releaseTagPattern })
+$headTags = @(if (-not $NextCommit) {
+    Invoke-Git -Arguments @('tag', '--points-at', 'HEAD') |
+        Where-Object { $_ -match $releaseTagPattern }
+})
 if ($headTags.Count -gt 0) {
     # Prefer the newest release tag when HEAD carries several.
     $releaseTag = $headTags |

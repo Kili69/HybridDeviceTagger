@@ -2,7 +2,7 @@
 
 <p align="center"><img src="./assets/kili-logo.png" alt="HybridDeviceTagger logo" width="180"></p>
 <p align="center"><strong>OU-basierte Kennzeichnung hybrider Geräte in Microsoft Entra ID</strong></p>
-<p align="center"><a href="https://github.com/Kili69/HybridDeviceTagger/actions/workflows/ci.yml"><img src="https://github.com/Kili69/HybridDeviceTagger/actions/workflows/ci.yml/badge.svg" alt="CI"></a> <a href="#versionierung-und-release"><img src="https://img.shields.io/badge/version-YYYYMM.counter-0A66C2" alt="Version YYYYMM.counter"></a> <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-2C3E50" alt="Apache License 2.0"></a> <img src="https://img.shields.io/badge/platform-Azure%20Functions-0078D4?logo=microsoftazure" alt="Azure Functions"> <img src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white" alt=".NET 8"> <img src="https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 7.2 or newer"></p>
+<p align="center"><a href="https://github.com/Kili69/HybridDeviceTagger/actions/workflows/ci.yml"><img src="https://github.com/Kili69/HybridDeviceTagger/actions/workflows/ci.yml/badge.svg" alt="CI"></a> <a href="#versionierung-und-release"><img src="https://img.shields.io/badge/version-202611.2--dev-0A66C2" alt="Version 202611.2-dev"></a> <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-2C3E50" alt="Apache License 2.0"></a> <img src="https://img.shields.io/badge/platform-Azure%20Functions-0078D4?logo=microsoftazure" alt="Azure Functions"> <img src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white" alt=".NET 8"> <img src="https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 7.2 or newer"></p>
 
 ---
 
@@ -579,13 +579,13 @@ Das Skript führt die Tests aus, veröffentlicht die Function mit der berechnete
    git push origin v<Version>
    ```
 
-`-Release` verlangt den Branch `main`, ein sauberes Arbeitsverzeichnis und den passenden Changelog-Abschnitt und legt danach den annotierten Tag `v<Version>` an.
+`-Release` verlangt den Branch `main`, ein sauberes Arbeitsverzeichnis, das Versions-Badge der Release-Version in der README und den passenden Changelog-Abschnitt und legt danach den annotierten Tag `v<Version>` an.
 
 Wird zu diesem Tag ein GitHub Release veröffentlicht, das nicht als Vorabversion markiert ist, baut der Workflow [.github/workflows/publish-powershell-module.yml](.github/workflows/publish-powershell-module.yml) das Paket und veröffentlicht das gestempelte Modul aus `artifacts` in der PowerShell Gallery. Der Release-Tag muss `v<YYYY><MM>.<counter>` des ausgecheckten Commits entsprechen.
 
 ### Commit-Konventionen
 
-Jeder Commit beschreibt seine Änderungen unter `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Geänderte PowerShell-Dateien müssen die Versionsmarkierung und die Autorzeile enthalten, geänderte C#- und Bicep-Dateien die Autorzeile. Der Repository-Hook wird einmalig pro Clone aktiviert:
+Jeder Commit beschreibt seine Änderungen unter `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Geänderte PowerShell-Dateien müssen die Versionsmarkierung und die Autorzeile enthalten, geänderte C#- und Bicep-Dateien die Autorzeile. Das Versions-Badge in der README zeigt immer die Version des jeweiligen Commits, zum Beispiel `202611.2-dev` auf `dev` und `202611.2` für den Release-Commit auf `main`. Die Hooks `pre-commit` und `pre-merge-commit` setzen es über [scripts/Update-ReadmeVersion.ps1](scripts/Update-ReadmeVersion.ps1) (Version aus `Get-ProductVersion.ps1 -NextCommit`) automatisch im gestagten Stand; die Commit-Prüfung lehnt ein abweichendes Badge ab, und `-Release` verlangt die Release-Version. Ohne aktivierten Hook vor dem Commit `./scripts/Update-ReadmeVersion.ps1 -Staged` ausführen. Nach einem Fast-Forward-Merge zeigt `main` bis zum nächsten Commit noch die Version des Quellbranches. Die Repository-Hooks werden einmalig pro Clone aktiviert:
 
 ```powershell
 git config core.hooksPath .githooks
