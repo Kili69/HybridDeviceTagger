@@ -1,6 +1,20 @@
 /*
  * Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
- * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ * Copyright 2026 Andreas Lucas
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 using System.ComponentModel.DataAnnotations;
@@ -13,22 +27,26 @@ public sealed class ActiveDirectoryOptions : IValidatableObject
     /// <summary>Gets the configuration section name.</summary>
     public const string SectionName = "ActiveDirectory";
 
-    /// <summary>Gets the DNS name of the domain controller.</summary>
+    /// <summary>Gets the Active Directory DNS domain used for domain-controller discovery.</summary>
     [Required]
     [StringLength(253, MinimumLength = 1)]
-    public string Server { get; init; } = string.Empty;
+    public string Domain { get; init; } = string.Empty;
 
-    /// <summary>Gets the LDAPS port.</summary>
+    /// <summary>Gets an optional domain-controller DNS name that bypasses DNS SRV discovery.</summary>
+    [StringLength(253)]
+    public string? Server { get; init; }
+
+    /// <summary>Gets the LDAPS port tried before StartTLS.</summary>
     [Range(1, 65535)]
     public int Port { get; init; } = 636;
 
     /// <summary>Gets a value indicating whether TLS is enabled for LDAP.</summary>
     public bool UseSsl { get; init; } = true;
 
-    /// <summary>Gets a value indicating whether read operations may fall back to signed and sealed LDAP Negotiate authentication.</summary>
-    public bool AllowLdapFallback { get; init; }
+    /// <summary>Gets a value indicating whether LDAPS may fall back to LDAP with StartTLS.</summary>
+    public bool AllowLdapFallback { get; init; } = true;
 
-    /// <summary>Gets the port used for signed and sealed LDAP fallback connections.</summary>
+    /// <summary>Gets the port used for LDAP with StartTLS.</summary>
     [Range(1, 65535)]
     public int LdapFallbackPort { get; init; } = 389;
 
@@ -52,15 +70,14 @@ public sealed class ActiveDirectoryOptions : IValidatableObject
 
     /// <inheritdoc />
     /// <remarks>
-    /// LDAPS remains mandatory as the primary transport because password operations require it.
-    /// A configured fallback must use a separate endpoint port.
+    /// Both LDAPS and StartTLS protect credentials and password operations with TLS.
     /// </remarks>
     public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
     {
         if (!UseSsl)
         {
             yield return new ValidationResult(
-                "UseSsl must be enabled for LDAP credential and password operations.",
+                "UseSsl must be enabled so LDAP credential and password operations use LDAPS or StartTLS.",
                 [nameof(UseSsl)]);
         }
 

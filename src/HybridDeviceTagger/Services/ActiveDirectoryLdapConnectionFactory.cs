@@ -1,6 +1,20 @@
 /*
  * Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
- * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ * Copyright 2026 Andreas Lucas
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 using System.DirectoryServices.Protocols;
@@ -12,187 +26,296 @@ using HybridDeviceTagger.Models;
 using HybridDeviceTagger.Options;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using NovellLdapConnection = Novell.Directory.Ldap.LdapConnection;
+using NovellLdapConnectionOptions = Novell.Directory.Ldap.LdapConnectionOptions;
+using NovellLdapException = Novell.Directory.Ldap.LdapException;
 
 namespace HybridDeviceTagger.Services;
 
 /// <summary>Creates authenticated LDAP v3 connections using the configured LDAPS endpoint.</summary>
 public sealed class ActiveDirectoryLdapConnectionFactory
 {
-    /// <summary>The validated LDAP endpoint, port, and fallback settings.</summary>
+    /// <summary>The validated Active Directory connection settings.</summary>
     private readonly ActiveDirectoryOptions _options;
 
-    /// <summary>
-    /// The optional private trust anchors loaded once at construction; empty when the platform trust
-    /// store is used.
-    /// </summary>
+    /// <summary>The packaged LDAP server trust anchors, or an empty list to use the OS root store.</summary>
     private readonly IReadOnlyList<X509Certificate2> _trustedCertificates;
 
-    /// <summary>The structured logger; it never receives credentials.</summary>
+    /// <summary>Resolves domain controllers through DNS SRV records.</summary>
+    private readonly IActiveDirectoryServerResolver _serverResolver;
+
+    /// <summary>Writes connection diagnostics without credentials.</summary>
     private readonly ILogger<ActiveDirectoryLdapConnectionFactory> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="ActiveDirectoryLdapConnectionFactory"/> class.</summary>
     /// <param name="options">The validated Active Directory connection settings.</param>
+    /// <param name="serverResolver">The DNS SRV domain-controller resolver.</param>
     /// <param name="logger">The structured logger.</param>
-    /// <exception cref="IOException">The configured trusted certificate file cannot be read.</exception>
-    /// <exception cref="CryptographicException">
-    /// The configured trusted certificate file does not contain a valid certificate.
-    /// </exception>
     public ActiveDirectoryLdapConnectionFactory(
         IOptions<ActiveDirectoryOptions> options,
+        IActiveDirectoryServerResolver serverResolver,
         ILogger<ActiveDirectoryLdapConnectionFactory> logger)
     {
         _options = options.Value;
         _trustedCertificates = LoadTrustedCertificates(_options.TrustedCertificatePath);
+        _serverResolver = serverResolver;
         _logger = logger;
     }
 
     /// <summary>Creates and binds a connection, disposing it if the bind fails.</summary>
-    /// <param name="credential">The directory credential used for the bind.</param>
-    /// <param name="server">The optional domain DNS name; the configured server is used when omitted.</param>
-    /// <returns>An authenticated connection owned by the caller.</returns>
     /// <remarks>
-    /// LDAPS is always attempted first. Only when <see cref="ActiveDirectoryOptions.AllowLdapFallback"/>
-    /// is enabled and LDAPS is unreachable does the factory retry with signed and sealed Negotiate
-    /// authentication on the fallback port. Password changes must use
-    /// <see cref="CreateSecureBoundConnection"/> instead.
+    /// A configured server is used directly; otherwise domain controllers are discovered through DNS
+    /// SRV. Every server is tried over LDAPS first. Only when no LDAPS endpoint is reachable and
+    /// <see cref="ActiveDirectoryOptions.AllowLdapFallback"/> is enabled are the servers retried with
+    /// LDAP upgraded through StartTLS. Bind failures other than connectivity errors stop the search.
     /// </remarks>
-    /// <exception cref="LdapException">The connection or bind failed on every permitted transport.</exception>
-    public LdapConnection CreateBoundConnection(
+    /// <param name="credential">The directory credential used for the bind.</param>
+    /// <param name="server">The optional AD DNS domain; the configured domain is used when omitted.</param>
+    /// <param name="cancellationToken">Cancels connection and bind operations.</param>
+    /// <returns>An authenticated connection owned by the caller.</returns>
+    /// <exception cref="ActiveDirectoryLdapException">No secure endpoint could be bound.</exception>
+    internal async Task<IActiveDirectoryLdapConnection> CreateBoundConnectionAsync(
         StoredDirectoryCredential credential,
-        string? server = null)
+        string? server,
+        CancellationToken cancellationToken)
     {
-        var targetServer = server ?? _options.Server;
-        _logger.LogInformation(
-            "Connecting to Active Directory server {Server} on LDAPS port {Port}",
-            targetServer,
-            _options.Port);
-        try
+        var targetDomain = server ?? _options.Domain;
+        var servers = string.IsNullOrWhiteSpace(_options.Server)
+            ? await _serverResolver.ResolveAsync(targetDomain, cancellationToken)
+            : [_options.Server!];
+
+        ActiveDirectoryLdapException? lastException = null;
+        foreach (var targetServer in servers)
         {
-            return CreateBoundConnection(credential, targetServer, _options.Port, useSsl: true);
-        }
-        catch (LdapException exception) when (
-            _options.AllowLdapFallback && IsConnectionUnavailable(exception))
-        {
-            _logger.LogWarning(
-                exception,
-                "LDAPS connection to {Server}:{LdapsPort} failed. Falling back to signed and sealed LDAP Negotiate authentication on port {LdapPort}",
-                targetServer,
-                _options.Port,
-                _options.LdapFallbackPort);
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                return CreateBoundConnection(
+                _logger.LogInformation(
+                    "Connecting to discovered Active Directory server {Server} on LDAPS port {Port}",
+                    targetServer,
+                    _options.Port);
+                return await CreateBoundConnectionAsync(
+                    credential,
+                    targetServer,
+                    _options.Port,
+                    ActiveDirectoryLdapTransport.Ldaps,
+                    cancellationToken);
+            }
+            catch (ActiveDirectoryLdapException exception) when (IsConnectionUnavailable(exception))
+            {
+                lastException = exception;
+                _logger.LogWarning(
+                    exception,
+                    "LDAPS connection to discovered server {Server}:{Port} failed",
+                    targetServer,
+                    _options.Port);
+            }
+        }
+
+        if (!_options.AllowLdapFallback)
+        {
+            throw lastException ?? new ActiveDirectoryLdapException(
+                $"No LDAPS endpoint was available for '{targetDomain}'.",
+                81,
+                new InvalidOperationException("DNS discovery returned no usable LDAPS endpoint."));
+        }
+
+        foreach (var targetServer in servers)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                _logger.LogInformation(
+                    "Connecting to discovered Active Directory server {Server} with StartTLS on LDAP port {Port}",
+                    targetServer,
+                    _options.LdapFallbackPort);
+                return await CreateBoundConnectionAsync(
                     credential,
                     targetServer,
                     _options.LdapFallbackPort,
-                    useSsl: false);
+                    ActiveDirectoryLdapTransport.StartTls,
+                    cancellationToken);
             }
-            catch (LdapException fallbackException)
+            catch (ActiveDirectoryLdapException exception) when (IsConnectionUnavailable(exception))
             {
-                _logger.LogError(
-                    fallbackException,
-                    "LDAP fallback connection to {Server}:{Port} failed",
+                lastException = exception;
+                _logger.LogWarning(
+                    exception,
+                    "LDAP StartTLS connection to discovered server {Server}:{Port} failed",
                     targetServer,
                     _options.LdapFallbackPort);
-                throw;
             }
         }
+
+        throw lastException ?? new ActiveDirectoryLdapException(
+            $"No secure LDAP endpoint was available for '{targetDomain}'.",
+            81,
+            new InvalidOperationException("DNS discovery returned no usable secure LDAP endpoint."));
     }
 
-    /// <summary>Creates an LDAPS connection without allowing an LDAP fallback.</summary>
+    /// <summary>Creates a TLS-protected LDAP connection.</summary>
     /// <param name="credential">The directory credential used for the bind.</param>
+    /// <param name="cancellationToken">Cancels connection and bind operations.</param>
     /// <returns>An authenticated secure connection owned by the caller.</returns>
-    /// <remarks>Password changes require this method because Active Directory only accepts them over TLS.</remarks>
-    /// <exception cref="LdapException">The LDAPS connection or bind failed.</exception>
-    public LdapConnection CreateSecureBoundConnection(StoredDirectoryCredential credential) =>
-        CreateBoundConnection(credential, _options.Server, _options.Port, useSsl: true);
+    internal Task<IActiveDirectoryLdapConnection> CreateSecureBoundConnectionAsync(
+        StoredDirectoryCredential credential,
+        CancellationToken cancellationToken) =>
+        CreateBoundConnectionAsync(credential, server: null, cancellationToken);
 
     /// <summary>Creates and binds one LDAP v3 connection using the selected transport mode.</summary>
     /// <param name="credential">The directory credential used for authentication.</param>
     /// <param name="server">The DNS name of the target domain controller or domain.</param>
     /// <param name="port">The LDAPS or LDAP endpoint port.</param>
-    /// <param name="useSsl">
-    /// Selects Basic authentication inside TLS when <see langword="true"/> or signed and sealed
-    /// Negotiate authentication when <see langword="false"/>.
-    /// </param>
+    /// <param name="transport">Selects LDAPS or LDAP upgraded with StartTLS.</param>
+    /// <param name="cancellationToken">Cancels connection and bind operations.</param>
     /// <returns>A bound connection that must be disposed by the caller.</returns>
-    /// <exception cref="LdapException">The connection or bind failed; the connection is disposed.</exception>
-    private LdapConnection CreateBoundConnection(
+    private Task<IActiveDirectoryLdapConnection> CreateBoundConnectionAsync(
         StoredDirectoryCredential credential,
         string server,
         int port,
-        bool useSsl)
+        ActiveDirectoryLdapTransport transport,
+        CancellationToken cancellationToken)
+    {
+        if (UsesNovellClient(transport, OperatingSystem.IsWindows()))
+        {
+            return CreateNovellConnectionAsync(
+                credential,
+                server,
+                port,
+                transport,
+                cancellationToken);
+        }
+
+        return Task.FromResult(CreateSystemConnection(credential, server, port, transport));
+    }
+
+    /// <summary>Determines whether the Novell LDAP client must be used instead of System.DirectoryServices.Protocols.</summary>
+    /// <remarks>
+    /// Outside Windows, System.DirectoryServices.Protocols cannot enforce the custom server-certificate
+    /// validation, so TLS-protected connections use the managed Novell client.
+    /// </remarks>
+    /// <param name="transport">The selected transport mode.</param>
+    /// <param name="isWindows">Whether the process runs on Windows.</param>
+    /// <returns><see langword="true"/> when the Novell client must be used.</returns>
+    internal static bool UsesNovellClient(
+        ActiveDirectoryLdapTransport transport,
+        bool isWindows) =>
+        !isWindows && transport is ActiveDirectoryLdapTransport.Ldaps or
+            ActiveDirectoryLdapTransport.StartTls;
+
+    /// <summary>Creates and binds a connection with System.DirectoryServices.Protocols.</summary>
+    /// <param name="credential">The directory credential used for the simple bind.</param>
+    /// <param name="server">The DNS name of the target domain controller.</param>
+    /// <param name="port">The LDAPS or LDAP endpoint port.</param>
+    /// <param name="transport">Selects LDAPS or LDAP upgraded with StartTLS.</param>
+    /// <returns>A bound connection that must be disposed by the caller.</returns>
+    /// <exception cref="ActiveDirectoryLdapException">The TLS negotiation or bind failed.</exception>
+    private IActiveDirectoryLdapConnection CreateSystemConnection(
+        StoredDirectoryCredential credential,
+        string server,
+        int port,
+        ActiveDirectoryLdapTransport transport)
     {
         var identifier = new LdapDirectoryIdentifier(server, port);
         var networkCredential = new NetworkCredential(credential.Username, credential.Password);
-        var authenticationType = useSsl ? AuthType.Basic : AuthType.Negotiate;
-        var connection = new LdapConnection(identifier, networkCredential, authenticationType)
+        var trustedCertificates = _trustedCertificates;
+        var connection = new LdapConnection(identifier, networkCredential, AuthType.Basic)
         {
             Timeout = TimeSpan.FromSeconds(30)
         };
 
         connection.SessionOptions.ProtocolVersion = 3;
-        connection.SessionOptions.SecureSocketLayer = useSsl;
-        // On Linux, OpenLDAP validates against LDAPTLS_CACERT, which the deployment points at the
-        // packaged trust anchor. Windows needs explicit validation for a private trust anchor.
-        if (useSsl && OperatingSystem.IsWindows() && _trustedCertificates.Count > 0)
+        connection.SessionOptions.SecureSocketLayer =
+            transport == ActiveDirectoryLdapTransport.Ldaps;
+        if (OperatingSystem.IsWindows())
         {
             connection.SessionOptions.VerifyServerCertificate = (_, certificate) =>
-            ValidateServerCertificate(server, certificate, _trustedCertificates);
-        }
-        if (!useSsl)
-        {
-            connection.SessionOptions.Signing = true;
-            connection.SessionOptions.Sealing = true;
+            ValidateServerCertificate(server, certificate, trustedCertificates);
         }
 
         try
         {
+            if (transport == ActiveDirectoryLdapTransport.StartTls)
+            {
+                connection.SessionOptions.StartTransportLayerSecurity(null);
+            }
             connection.Bind();
-            return connection;
+            return new SystemDirectoryServicesLdapConnection(connection);
         }
-        catch
+        catch (LdapException exception)
         {
             connection.Dispose();
-            throw;
+            throw new ActiveDirectoryLdapException(
+                "The Active Directory LDAP bind failed.",
+                exception.ErrorCode,
+                exception);
         }
     }
 
-    /// <summary>Identifies connectivity errors for which an authenticated LDAP fallback is safe.</summary>
-    /// <remarks>
-    /// Credential and authorization failures are deliberately excluded so invalid credentials do
-    /// not weaken the transport selected by the caller. The handled codes are 51 (busy),
-    /// 52 (unavailable), 81 (server down), 85 (timeout), and 91 (connect error).
-    /// </remarks>
-    /// <param name="exception">The LDAPS failure to classify.</param>
-    /// <returns><see langword="true"/> when the failure indicates the endpoint was unreachable.</returns>
-    private static bool IsConnectionUnavailable(LdapException exception) =>
-        exception.ErrorCode is 51 or 52 or 81 or 85 or 91;
-
-    /// <summary>Validates the LDAP server certificate against a configured private trust anchor.</summary>
-    /// <remarks>
-    /// The chain must terminate in one of the configured anchors (the machine store is ignored), the
-    /// certificate must allow server authentication, and its DNS name must match the target server.
-    /// Revocation is not checked because private domain PKIs are often unreachable from Azure.
-    /// </remarks>
-    /// <param name="server">The DNS name used to connect.</param>
-    /// <param name="certificate">The certificate presented by the server.</param>
-    /// <param name="trustedCertificates">The private trust anchors.</param>
-    /// <returns><see langword="true"/> when the chain and DNS identity are valid.</returns>
-    internal static bool ValidateServerCertificate(
+    /// <summary>Creates and binds a connection with the managed Novell LDAP client.</summary>
+    /// <param name="credential">The directory credential used for the simple bind.</param>
+    /// <param name="server">The DNS name of the target domain controller.</param>
+    /// <param name="port">The LDAPS or LDAP endpoint port.</param>
+    /// <param name="transport">Selects LDAPS or LDAP upgraded with StartTLS.</param>
+    /// <param name="cancellationToken">Cancels connection, TLS negotiation, and bind operations.</param>
+    /// <returns>A bound connection that must be disposed by the caller.</returns>
+    /// <exception cref="ActiveDirectoryLdapException">The connection, TLS negotiation, or bind failed.</exception>
+    private async Task<IActiveDirectoryLdapConnection> CreateNovellConnectionAsync(
+        StoredDirectoryCredential credential,
         string server,
-        X509Certificate certificate,
-        IReadOnlyCollection<X509Certificate2> trustedCertificates)
+        int port,
+        ActiveDirectoryLdapTransport transport,
+        CancellationToken cancellationToken)
     {
-        using var serverCertificate = new X509Certificate2(
-            certificate.Export(X509ContentType.Cert));
-        using var chain = new X509Chain();
-        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
-        chain.ChainPolicy.CustomTrustStore.AddRange(trustedCertificates.ToArray());
-        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
-        chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
+        var trustedCertificates = _trustedCertificates;
+        var options = CreateNovellOptions(
+            server,
+            trustedCertificates,
+            transport == ActiveDirectoryLdapTransport.Ldaps);
+        var connection = new NovellLdapConnection(options)
+        {
+            ConnectionTimeout = 30_000
+        };
 
-        return chain.Build(serverCertificate) && MatchesDnsName(serverCertificate, server);
+        try
+        {
+            await connection.ConnectAsync(server, port, cancellationToken);
+            if (transport == ActiveDirectoryLdapTransport.StartTls)
+            {
+                await connection.StartTlsAsync(cancellationToken);
+            }
+            await connection.BindAsync(
+                credential.Username,
+                credential.Password,
+                cancellationToken);
+            return new NovellActiveDirectoryLdapConnection(connection);
+        }
+        catch (NovellLdapException exception)
+        {
+            connection.Dispose();
+            throw new ActiveDirectoryLdapException(
+                "The Active Directory TLS-protected LDAP bind failed.",
+                exception.ResultCode,
+                exception);
+        }
+    }
+
+    /// <summary>Creates Novell connection options with strict server-certificate validation.</summary>
+    /// <param name="server">The DNS name the server certificate must match.</param>
+    /// <param name="trustedCertificates">The packaged trust anchors, or an empty collection for the OS root store.</param>
+    /// <param name="useSsl">Whether the connection uses LDAPS from the start.</param>
+    /// <returns>The configured connection options.</returns>
+    private static NovellLdapConnectionOptions CreateNovellOptions(
+        string server,
+        IReadOnlyCollection<X509Certificate2> trustedCertificates,
+        bool useSsl)
+    {
+        var options = new NovellLdapConnectionOptions()
+            .ConfigureRemoteCertificateValidationCallback(
+                (_, certificate, _, _) =>
+                    certificate is not null &&
+                    ValidateServerCertificate(server, certificate, trustedCertificates));
+        return useSsl ? options.UseSsl() : options;
     }
 
     /// <summary>Loads the optional packaged DER or PEM trust anchors.</summary>
@@ -233,13 +356,83 @@ public sealed class ActiveDirectoryLdapConnectionFactory
         return [.. certificates.Where(certificate => !certificate.HasPrivateKey)];
     }
 
+    /// <summary>Identifies connectivity errors for which an authenticated LDAP fallback is safe.</summary>
+    /// <remarks>
+    /// Credential and authorization failures are deliberately excluded so invalid credentials do
+    /// not weaken the transport selected by the caller.
+    /// </remarks>
+    /// <param name="exception">The LDAP failure to classify.</param>
+    /// <returns><see langword="true"/> for busy, unavailable, server-down, timeout, and connect errors.</returns>
+    private static bool IsConnectionUnavailable(ActiveDirectoryLdapException exception) =>
+        exception.ResultCode is 51 or 52 or 81 or 85 or 91;
+
+    /// <summary>Validates the LDAP server certificate against a configured private trust anchor.</summary>
+    /// <remarks>
+    /// The certificate must match <paramref name="server"/>, chain to a trusted root, and carry the
+    /// server-authentication EKU. Chains with intermediates are additionally checked online for
+    /// revocation; a self-signed trust anchor presented directly is accepted without revocation.
+    /// </remarks>
+    /// <param name="server">The DNS name that was connected to.</param>
+    /// <param name="certificate">The certificate presented by the server.</param>
+    /// <param name="trustedCertificates">The packaged trust anchors, or an empty collection for the OS root store.</param>
+    /// <returns><see langword="true"/> when the certificate is trusted for the server.</returns>
+    internal static bool ValidateServerCertificate(
+        string server,
+        X509Certificate certificate,
+        IReadOnlyCollection<X509Certificate2> trustedCertificates)
+    {
+        using var serverCertificate = new X509Certificate2(
+            certificate.Export(X509ContentType.Cert));
+        if (!MatchesDnsName(serverCertificate, server))
+        {
+            return false;
+        }
+
+        using var trustChain = CreateCertificateChain(
+            trustedCertificates,
+            X509RevocationMode.NoCheck);
+        if (!trustChain.Build(serverCertificate))
+        {
+            return false;
+        }
+        if (trustChain.ChainElements.Count == 1)
+        {
+            return true;
+        }
+
+        using var revocationChain = CreateCertificateChain(
+            trustedCertificates,
+            X509RevocationMode.Online);
+        return revocationChain.Build(serverCertificate);
+    }
+
+    /// <summary>Creates an X.509 chain policy for LDAP server-certificate validation.</summary>
+    /// <param name="trustedCertificates">The packaged trust anchors, or an empty collection for the OS root store.</param>
+    /// <param name="revocationMode">The revocation checking mode.</param>
+    /// <returns>A chain that requires the server-authentication EKU and must be disposed by the caller.</returns>
+    private static X509Chain CreateCertificateChain(
+        IReadOnlyCollection<X509Certificate2> trustedCertificates,
+        X509RevocationMode revocationMode)
+    {
+        var chain = new X509Chain();
+        // Without a packaged trust anchor, the operating system root store applies, which
+        // supports LDAPS certificates issued by a public CA.
+        if (trustedCertificates.Count > 0)
+        {
+            chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+            chain.ChainPolicy.CustomTrustStore.AddRange(trustedCertificates.ToArray());
+        }
+        chain.ChainPolicy.RevocationMode = revocationMode;
+        chain.ChainPolicy.RevocationFlag = X509RevocationFlag.ExcludeRoot;
+        chain.ChainPolicy.UrlRetrievalTimeout = TimeSpan.FromSeconds(10);
+        chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1"));
+        return chain;
+    }
+
     /// <summary>Checks the certificate DNS identity, including a single-label wildcard.</summary>
     /// <param name="certificate">The server certificate.</param>
-    /// <param name="server">The DNS name used to connect.</param>
-    /// <returns>
-    /// <see langword="true"/> when the names match case-insensitively or a leading <c>*.</c> wildcard
-    /// covers exactly one label of <paramref name="server"/>.
-    /// </returns>
+    /// <param name="server">The DNS name that was connected to.</param>
+    /// <returns><see langword="true"/> when the certificate DNS name matches the server.</returns>
     internal static bool MatchesDnsName(X509Certificate2 certificate, string server)
     {
         var certificateName = certificate.GetNameInfo(X509NameType.DnsName, forIssuer: false);
@@ -261,4 +454,14 @@ public sealed class ActiveDirectoryLdapConnectionFactory
                 string.Join('.', certificateLabels.Skip(1)),
                 StringComparison.OrdinalIgnoreCase);
     }
+}
+
+/// <summary>Selects how an LDAP connection is protected with TLS.</summary>
+internal enum ActiveDirectoryLdapTransport
+{
+    /// <summary>LDAP over TLS from connection establishment (LDAPS).</summary>
+    Ldaps,
+
+    /// <summary>Plain LDAP upgraded to TLS with the StartTLS extended operation before binding.</summary>
+    StartTls
 }

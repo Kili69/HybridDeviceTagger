@@ -1,6 +1,20 @@
 /*
  * Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
- * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ * Copyright 2026 Andreas Lucas
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 // Composition root of the HybridDeviceTagger Azure Functions app (.NET 8 isolated worker, Functions v4).
@@ -28,6 +42,7 @@ using HybridDeviceTagger.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Builder;
 using Microsoft.Azure.Functions.Worker.OpenTelemetry;
+using DnsClient;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using OpenTelemetry;
@@ -77,6 +92,12 @@ builder.Services
     .ValidateDataAnnotations()
     .ValidateOnStart();
 
+builder.Services
+    .AddOptions<ManagementAuthorizationOptions>()
+    .BindConfiguration(ManagementAuthorizationOptions.SectionName)
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
 // DefaultAzureCredential uses managed identity in Azure and the developer credential chain
 // locally; no Azure credential is stored in application configuration.
 builder.Services.AddSingleton<TokenCredential>(_ => new DefaultAzureCredential());
@@ -89,11 +110,19 @@ builder.Services.AddSingleton(serviceProvider =>
     return new SecretClient(new Uri(options.VaultUri), credential);
 });
 builder.Services.AddSingleton<IActiveDirectoryCredentialStore, KeyVaultActiveDirectoryCredentialStore>();
+builder.Services.AddSingleton<ILookupClient>(_ => new LookupClient());
+builder.Services.AddSingleton<IActiveDirectoryServerResolver, ActiveDirectoryServerResolver>();
 builder.Services.AddSingleton<ActiveDirectoryLdapConnectionFactory>();
-builder.Services.AddSingleton<IActiveDirectoryDeviceSource, LdapActiveDirectoryDeviceSource>();
+builder.Services.AddSingleton<LdapActiveDirectoryDeviceSource>();
+builder.Services.AddSingleton<IActiveDirectoryDeviceSource>(serviceProvider =>
+    serviceProvider.GetRequiredService<LdapActiveDirectoryDeviceSource>());
+builder.Services.AddSingleton<IActiveDirectoryRuleValidator>(serviceProvider =>
+    serviceProvider.GetRequiredService<LdapActiveDirectoryDeviceSource>());
 builder.Services.AddSingleton<IActiveDirectoryPasswordClient, LdapActiveDirectoryPasswordClient>();
+builder.Services.AddSingleton<IActiveDirectoryCredentialInitializer, ActiveDirectoryCredentialInitializer>();
 builder.Services.AddSingleton<IPasswordGenerator, SecurePasswordGenerator>();
 builder.Services.AddTransient<PasswordRotationService>();
+builder.Services.AddHttpClient<IManagementApiAuthorizer, ManagementApiAuthorizer>();
 builder.Services.AddHttpClient("MicrosoftGraph", client =>
 {
     client.BaseAddress = new Uri("https://graph.microsoft.com/v1.0/");

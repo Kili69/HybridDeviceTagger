@@ -1,6 +1,20 @@
 /*
  * Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
- * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ * Copyright 2026 Andreas Lucas
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 using Azure;
@@ -14,6 +28,12 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Stores active and staged Active Directory passwords as Azure Key Vault secrets.</summary>
 public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCredentialStore
 {
+    /// <summary>
+    /// Content type of the unusable placeholder secrets that the deployment creates in an existing
+    /// Key Vault so the managed identity can be authorized on the two password secrets only.
+    /// </summary>
+    internal const string PlaceholderContentType = "application/vnd.hybriddevicetagger.placeholder";
+
     /// <summary>The Key Vault client authenticated with the Function App's managed identity.</summary>
     private readonly SecretClient _secretClient;
 
@@ -50,11 +70,50 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
     }
 
     /// <inheritdoc />
-    public async Task<StoredDirectoryCredential> GetCurrentAsync(
-        CancellationToken cancellationToken) =>
-        await GetRequiredSecretAsync(
+    /// <remarks>
+    /// Only a missing secret or a deployment placeholder is replaced. A real password is never
+    /// overwritten, so the endpoint cannot be used to substitute the service-account credential.
+    /// </remarks>
+    public async Task<StoredDirectoryCredential> InitializeCurrentAsync(
+        string password,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var existing = await _secretClient.GetSecretAsync(
+                _keyVaultOptions.CurrentPasswordSecretName,
+                cancellationToken: cancellationToken);
+            if (!IsPlaceholder(existing.Value))
+            {
+                throw new ActiveDirectoryCredentialAlreadyInitializedException();
+            }
+        }
+        catch (RequestFailedException exception) when (exception.Status == 404)
+        {
+        }
+
+        return await SetSecretAsync(
             _keyVaultOptions.CurrentPasswordSecretName,
+            password,
             cancellationToken);
+    }
+
+    /// <inheritdoc />
+    /// <exception cref="InvalidOperationException">The current secret is still a deployment placeholder.</exception>
+    public async Task<StoredDirectoryCredential> GetCurrentAsync(
+        CancellationToken cancellationToken)
+    {
+        var response = await _secretClient.GetSecretAsync(
+            _keyVaultOptions.CurrentPasswordSecretName,
+            cancellationToken: cancellationToken);
+        if (IsPlaceholder(response.Value))
+        {
+            throw new InvalidOperationException(
+                "The Active Directory credential has not been initialized. Initialize it through the management API.");
+        }
+
+        return ToCredential(response.Value);
+    }
 
     /// <inheritdoc />
     public async Task<StoredDirectoryCredential?> GetNextAsync(
@@ -62,9 +121,10 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
     {
         try
         {
-            return await GetRequiredSecretAsync(
+            var response = await _secretClient.GetSecretAsync(
                 _keyVaultOptions.NextPasswordSecretName,
-                cancellationToken);
+                cancellationToken: cancellationToken);
+            return IsPlaceholder(response.Value) ? null : ToCredential(response.Value);
         }
         catch (RequestFailedException exception) when (exception.Status == 404)
         {
@@ -90,22 +150,6 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
             cancellationToken);
     }
 
-    /// <summary>Loads a required secret and converts its value and metadata to a bind credential.</summary>
-    /// <remarks>A missing required secret is allowed to propagate as a Key Vault error.</remarks>
-    /// <param name="secretName">The Key Vault secret name.</param>
-    /// <param name="cancellationToken">Cancels the operation.</param>
-    /// <returns>The credential built from the latest secret version.</returns>
-    /// <exception cref="RequestFailedException">The secret does not exist or cannot be read.</exception>
-    private async Task<StoredDirectoryCredential> GetRequiredSecretAsync(
-        string secretName,
-        CancellationToken cancellationToken)
-    {
-        var response = await _secretClient.GetSecretAsync(
-            secretName,
-            cancellationToken: cancellationToken);
-        return ToCredential(response.Value);
-    }
-
     /// <summary>Creates a new secret version with the configured recovery lifetime.</summary>
     /// <remarks>
     /// The same operation is used to stage <c>next</c> and to promote a validated password to
@@ -126,6 +170,12 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
         var response = await _secretClient.SetSecretAsync(secret, cancellationToken);
         return ToCredential(response.Value);
     }
+
+    /// <summary>Returns whether a secret is an unusable deployment placeholder.</summary>
+    /// <param name="secret">The Key Vault secret.</param>
+    /// <returns><see langword="true"/> when the secret carries the placeholder content type.</returns>
+    internal static bool IsPlaceholder(KeyVaultSecret secret) =>
+        string.Equals(secret.Properties.ContentType, PlaceholderContentType, StringComparison.Ordinal);
 
     /// <summary>Combines a secret password and creation timestamp with the configured bind user.</summary>
     /// <param name="secret">The Key Vault secret.</param>

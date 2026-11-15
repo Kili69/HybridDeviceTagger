@@ -9,30 +9,122 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Add the `installationspackage` directory as the single source of all installation files. It contains the Bicep templates, the installation engine `Install-HybridDeviceTagger.ps1`, the `HybridDeviceTagger.Management` module, and the new guided installer `Install.ps1`.
-- Add `Install.ps1`, which checks the prerequisites, asks for every installation parameter with validation and defaults, saves the answers without secrets in `installation-settings.json`, asks for the service-account password once, and runs validation, optional What-If, and installation in sequence.
+- Add `Install.ps1`, which checks the prerequisites, asks for every installation parameter with validation and defaults (including a new or existing Key Vault and an optional management API client ID), saves the answers without secrets in `installation-settings.json`, asks for the service-account password once, passes it as `ADServiceAccountCredential`, and runs validation, optional What-If, and installation in sequence.
 - Add `scripts/Build-InstallationPackage.ps1`, which tests and publishes the Function, adds it as `installationspackage/function/HybridDeviceTagger.zip`, stamps the version into all package scripts, and creates `artifacts/HybridDeviceTagger-<version>.zip`. `-Release` builds from a clean `main` and creates the release tag.
 - Add `scripts/Get-ProductVersion.ps1` and `Directory.Build.targets`, which derive the product version `<YYYY><MM>.<counter>` from the release tags of the month and append the branch name outside `main`. Assemblies use `<YYYY>.<M>.<counter>.0` because .NET version parts are limited to 65535.
 - Document all production source code, including private members, PowerShell helper functions, and Bicep resources.
 - Add a README header with the project logo, status and platform badges, a support link, and an in-page navigation, aligned with the other Kili69 projects.
+- Add tests for Key Vault placeholder handling, distributed lease locking, and queued management actions.
 
 ### Changed
 
-- Rename `Deployment` to `installationspackage`.
-- The installation engine uses the prebuilt Function package when present, so a release installation no longer requires the .NET SDK. Without it, the engine still builds from source.
+- Rename `Deployment` to `installationspackage`. The installation engine reads the prebuilt Function from `function/HybridDeviceTagger.zip`.
 - The installation engine exits with code 1 after a compactly reported failure so callers and CI runners detect it.
 - Replace the version bump in `Directory.Build.props` with tag-based versioning. `scripts/Assert-CommitMetadata.ps1` now requires a changelog entry and the `# Project-Version: source` marker that the package build replaces.
 - Version the OpenAPI contract independently as `1.0.0`.
-
+- The PowerShell Gallery workflow builds the release package and publishes the version-stamped module; the release tag must be `v<YYYY><MM>.<counter>`. The CI workflow builds the installation package and uploads it as an artifact.
+- Use the Apache 2.0 license header for all new source files and the `andreas.lucas@outlook.com` author address in every PowerShell header.
 - Load the Active Directory LDAPS trust anchor only from the immutable Function package so storage or API access can no longer substitute a certificate and capture the service-account password during the LDAPS bind. Without a packaged certificate, the operating system trust store applies.
-- Assign `Key Vault Secrets Officer` to the Function managed identity on the current and staged password secrets only instead of the whole Key Vault. The installer creates a missing staged secret with an unusable placeholder and removes the superseded vault-wide assignment.
+- Assign `Key Vault Secrets Officer` to the Function managed identity on the current and staged password secrets only when an existing Key Vault is used. The deployment creates missing secrets as marked, unusable placeholders; credential initialization replaces only a missing secret or a placeholder, never a real password, and placeholders are never used as credentials. The installer removes the superseded vault-wide assignment. A Key Vault created by the installer is dedicated to HybridDeviceTagger and keeps the vault-scoped assignment.
 - Serialize device tagging and password rotation across all instances and Flex Consumption scale groups with renewable Blob leases, and default `maximumInstanceCount` to `1`. A timer run that cannot acquire the lease is skipped with a warning.
 - Run management-API actions asynchronously: the action endpoints return HTTP `202` with the invocation ID and status URI and enqueue the run in a private Storage queue processed by queue-triggered functions. Failed requested runs are not retried. Operation status adds the `Queued` state.
 - Add `-Wait` and `-TimeoutSeconds` to `Invoke-HybridDeviceTagging` and `Invoke-HybridDeviceTaggerPasswordRotation`.
-- Grant the managed identity `Storage Blob Data Contributor` and `Storage Queue Data Contributor` instead of `Storage Blob Data Owner`; the installer removes the superseded assignment. A Queue private endpoint is added, which requires private DNS for `privatelink.queue.core.windows.net`.
+- Grant the managed identity `Storage Blob Data Contributor` and `Storage Queue Data Contributor` instead of `Storage Blob Data Owner`; the installer removes the superseded assignment. A Queue private endpoint and a Queue private DNS zone (created or reused like the Blob zone) are added, and custom-DNS validation also checks the Queue endpoint.
 
 ### Removed
 
 - Remove the runtime trusted-certificate store, its three management API endpoints, the `Get-`, `Add-`, and `Remove-HybridDeviceTaggerTrustedCertificate` cmdlets, the `HybridDeviceTagger.CertificateAdministrator` application role, and the installer parameter `ManagementApiCertificateAdministratorPrincipalObjectId`. The installer unassigns and removes the retired role. Replace trust anchors by rerunning the installer with `-ActiveDirectoryTrustedCertificatePath`.
+- Remove `scripts/New-InstallationPackage.ps1`, which is replaced by `scripts/Build-InstallationPackage.ps1`.
+
+## [0.1.20261008.1] - 2026-10-08
+
+### Security
+
+- Upgrade xUnit from 2.5.3 to 2.9.3, removing transitive vulnerable versions of `System.Net.Http` and `System.Text.RegularExpressions` from the test dependency graph.
+
+## [0.1.20261006.2] - 2026-10-06
+
+### Changed
+
+- Make `ADServiceAccount` and `ADServiceAccountCredential` mutually exclusive installer parameters, report conflicts with actionable usage guidance, and derive the bind UPN from the credential when it is supplied.
+- Install the application without requesting an initial tagging ruleset and display deployment-specific management-module guidance for adding the first rule after deployment.
+- Invoke the Windows Azure CLI Python entry point directly so Microsoft Graph URLs containing multiple query parameters are not split by `az.cmd`, and pass JSON request bodies without obsolete batch-shell escaping.
+- Compare management API application-role member types without relying on scalar-sensitive PowerShell `.Count` behavior.
+- Suppress inherited confirmation prompts for transcript and temporary package operations so `-Confirm` produces only the installer-level approval prompt.
+- Extract the Function App package through the .NET ZIP API so package directories such as `.azurefunctions` do not trigger nested confirmation prompts.
+- Create or reuse the Blob Storage private DNS zone and attach it to the Storage private endpoint so Flex Consumption package deployment works while Storage public network access remains disabled.
+- Reuse the management API client ID stored in an existing Function App so noninteractive retries can resume after a partial deployment without requiring an additional parameter.
+- Route Function content traffic through VNet integration and fail before code upload with actionable conditional-forwarder guidance when a custom VNet DNS server cannot resolve the private Storage endpoint.
+- Ignore CNAME and other non-address DNS response records during private-endpoint validation so PowerShell StrictMode does not reject valid multi-record responses.
+- Expose a least-privilege delegated management API scope and preauthorize Microsoft Azure CLI for installer token acquisition without a separate consent login.
+- Support LDAP-fallback deployments without a packaged LDAPS trust certificate and report nontransient credential-initialization HTTP failures immediately with their server response.
+- Extract HTTP status and error details defensively across PowerShell REST error shapes so StrictMode does not hide Function API failures.
+- Stop before Azure deployment when only the Windows installer can use signed-and-sealed LDAP fallback, because the Linux Flex Consumption runtime requires trusted LDAPS.
+- Resolve and validate the existing AD service account through the configured LDAPS endpoint instead of ADWS so valid runtime credentials are not rejected by unrelated ADWS authentication behavior.
+- Defer required distinguished-name validation until after automatic LDAPS account resolution while continuing to require it when directory checks are explicitly skipped.
+- Discover domain controllers inside the Function through Active Directory DNS SRV records, prefer LDAPS, and securely fall back to LDAP with StartTLS instead of requiring a static server or Windows-only Negotiate fallback.
+- Try each DNS-SRV-discovered domain controller in order when installer validation encounters an unavailable LDAPS or StartTLS endpoint.
+- Use the packaged Novell LDAP client for installer LDAPS, StartTLS, bind, and search operations so private trust anchors work consistently without native Windows Schannel failures.
+- Report a missing or mismatched LDAP trust anchor explicitly instead of exposing the LDAP client's remote-certificate callback error.
+- Version the embedded installer certificate validator type so a long-running PowerShell session cannot retain an older implementation without the Novell TLS callback.
+- Translate Active Directory LDAP bind diagnostic codes into actionable account-state errors such as expired passwords, disabled accounts, required password changes, and lockouts.
+- Ignore AD subordinate-partition referrals after reading results from an explicitly selected naming context instead of following them to unvalidated LDAP targets.
+- Apply bounded Azure CLI execution times, including a five-minute Bicep validation timeout that terminates the stalled process tree with an actionable error.
+- Compile Bicep locally for every run and avoid redundant full-provider ARM validation before What-If or deployment; `-ValidateOnly` uses bounded template-level ARM validation.
+- Skip Microsoft Graph application PATCH requests when the delegated management scope and Azure CLI preauthorization are already configured, allowing idempotent retries without application-owner write access.
+- Pass a locally compiled ARM JSON template to Validate, What-If, and Create so Azure CLI never re-enters the hanging internal Bicep compilation path before submitting to ARM.
+- Submit ARM creation with template-level validation and `--no-wait`, then poll the named deployment with regular progress output instead of blocking inside Azure CLI provider prevalidation.
+- Submit compiled templates directly through the ARM Deployments REST API with a protected Azure CLI token, bypassing the repeatedly hanging `az deployment group create` client path while retaining named-deployment polling.
+- Verify supplied deployment parameters against the locally compiled ARM template before submission so mixed installer/template versions fail locally with actionable package guidance.
+- Handle plain rule hashtables safely in `Add-HybridDeviceTaggerRule` instead of indexing an empty `Rules`-key match under strict mode.
+- Add `-Force` for fully noninteractive installations that skip central approval, disable installer prompts, and fail when required information or consent is missing.
+
+## [0.1.20261006.1] - 2026-10-06
+
+### Added
+
+- Add server-side Active Directory forest validation for rule base DNs before rule persistence.
+- Add online CRL and OCSP validation for CA-issued LDAPS certificates in the installer and runtime, with fail-closed handling when revocation status cannot be confirmed.
+
+### Changed
+
+- Validate Linux LDAPS endpoints before native OpenLDAP binds while retaining explicit self-signed trust-anchor support.
+- Expand management API, installer, operational, OpenAPI, and developer documentation for forest validation and certificate-revocation requirements.
+
+### Security
+
+- Reject rules that target a naming context outside the configured Active Directory forest.
+- Reject revoked CA-issued LDAPS certificates and certificates whose revocation status is unavailable.
+
+## [0.1.20261005.3] - 2026-10-05
+
+### Added
+
+- Add a complete PowerShell management-module reference covering installation, authorization, command usage, security, concurrency, errors, and implementation details.
+- Add automatic, version-validated publishing of release modules from `main` to PowerShell Gallery by using the protected `HYBRIDDEVICETAGGER_PSMODUL` repository secret.
+- Add comprehensive comment-based and inline implementation documentation for public and private PowerShell module functions.
+
+### Changed
+
+- Reorganize installation guidance into script-based, pipeline-based, and shared-configuration sections with secure unattended deployment examples.
+- Expand the Zero Trust introduction and document post-installation module installation and updates through PowerShell Gallery.
+- Enrich the PowerShell module manifest with Gallery tags, help, icon, and release-notes metadata.
+
+## [0.1.20261005.2] - 2026-10-05
+
+### Added
+
+- Add Apache License 2.0 licensing, package metadata, SPDX source headers, and license inclusion in installation archives.
+- Add runtime authorization that grants Function App `Owner` and `Contributor` principals rule and password administration through direct, transitive-group, or inherited Azure RBAC assignments.
+- Add focused authorization tests and a Kili project logo with project, version, branch, platform, license, and support badges.
+
+### Changed
+
+- Replace the Microsoft contact addresses with `andreas.lucas@outlook.com` throughout the repository.
+- Consolidate code and developer documentation in `DEVELOPER.md`, simplify its runtime architecture diagram, and remove the superseded standalone code-documentation file.
+- Reformat `README.md` for GitHub with consistent headings, navigation, installation permissions, and complete rule-management examples.
+- Disable Enterprise Application assignment enforcement so authenticated Function App Owners and Contributors can reach the API authorization layer while unauthorized principals continue to receive HTTP `403`.
+- Migrate the active repository to `Kili69/HybridDeviceTagger` while preserving the complete source history, branches, and tags.
 
 ## [0.1.20261005.1] - 2026-10-05
 
@@ -44,6 +136,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Rename `CODE_DOCUMENTATION.md` to `DEVELOPER.md` and update its repository reference.
 - License the entire project under the Apache License 2.0 and publish the license in package metadata.
 - Document the repository structure and the responsibilities of its main directories in the developer guide.
+
+## [0.1.20260917.1] - 2026-09-17
+
+### Added
+
+- Add authenticated, one-time initialization of the Active Directory service-account credential through the Function management API and managed identity.
+- Add an SDK-independent installation-package builder that nests the prebuilt Function application in the deployment package.
+- Add PowerShell management support for initializing the AD credential and importing one or multiple tagging rules.
+
+### Changed
+
+- Allow the installer to create a private Key Vault or use an existing vault and prepare the AD service account with a separate provisioning credential.
+- Remove direct Key Vault secret writes and Key Vault data-role requirements from the installation user.
+- Expand installer, deployment, management API, OpenAPI, PowerShell module, and test coverage for secure credential initialization.
+- Reorganize the German README and document all exported PowerShell management functions.
 
 ## [0.1.20260911.1] - 2026-09-11
 
@@ -258,27 +365,3 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Initial .NET 8 isolated Azure Functions implementation for Active Directory to Entra device tagging.
-
-[unreleased]: https://github.com/Kili69/HybridDeviceTagger/compare/9188b02ca008e5993910fd782beedda9f6c40a3b...HEAD
-[0.1.20261005.1]: https://github.com/Kili69/HybridDeviceTagger/compare/9188b02ca008e5993910fd782beedda9f6c40a3b...HEAD
-[0.1.20260911.1]: https://github.com/Kili69/HybridDeviceTagger/compare/96cd5c7a43a6140e45ffda3a907632b58ab3fe1f...9188b02ca008e5993910fd782beedda9f6c40a3b
-[0.1.20260905.16]: https://github.com/Kili69/HybridDeviceTagger/compare/7836d5a34839bf6832d5c7ae0a83c369c9630df2...96cd5c7a43a6140e45ffda3a907632b58ab3fe1f
-[0.1.20260905.15]: https://github.com/Kili69/HybridDeviceTagger/compare/485a6d9f35b8c0e6b4724867b054726b0f53cab6...7836d5a34839bf6832d5c7ae0a83c369c9630df2
-[0.1.20260905.14]: https://github.com/Kili69/HybridDeviceTagger/compare/3c3534971ac08d7044f1149321df72d626c61405...485a6d9f35b8c0e6b4724867b054726b0f53cab6
-[0.1.20260905.13]: https://github.com/Kili69/HybridDeviceTagger/compare/e0bd235fe2c5ae0904583a20faed5a2cf565ea84...3c3534971ac08d7044f1149321df72d626c61405
-[0.1.20260905.12]: https://github.com/Kili69/HybridDeviceTagger/compare/8b0eb7f1461837f614c48b85e04cefa0b3f4ed90...e0bd235fe2c5ae0904583a20faed5a2cf565ea84
-[0.1.20260905.11]: https://github.com/Kili69/HybridDeviceTagger/compare/872e1bdc8321a9202f25c8275ee879b4f21c4a13...8b0eb7f1461837f614c48b85e04cefa0b3f4ed90
-[0.1.20260905.10]: https://github.com/Kili69/HybridDeviceTagger/compare/12297b58d3da428e0a7dbe17cff5bf510dc723fe...872e1bdc8321a9202f25c8275ee879b4f21c4a13
-[0.1.20260905.9]: https://github.com/Kili69/HybridDeviceTagger/compare/88ab584ea7517c7e2215554ccc04ceb5bb3286c8...12297b58d3da428e0a7dbe17cff5bf510dc723fe
-[0.1.20260905.8]: https://github.com/Kili69/HybridDeviceTagger/compare/84ed6b65ae593b757f12dc5df565d04b096acf9f...88ab584ea7517c7e2215554ccc04ceb5bb3286c8
-[0.1.20260905.7]: https://github.com/Kili69/HybridDeviceTagger/compare/ce0de3fc74916f23a85e913948fe2f502ca06391...84ed6b65ae593b757f12dc5df565d04b096acf9f
-[0.1.20260905.6]: https://github.com/Kili69/HybridDeviceTagger/compare/b876b27a88438e8681961cbd922470c38f08b801...ce0de3fc74916f23a85e913948fe2f502ca06391
-[0.1.20260905.5]: https://github.com/Kili69/HybridDeviceTagger/compare/fbc3166e7c5bb18269ffd0350c05ef48c84edb0b...b876b27a88438e8681961cbd922470c38f08b801
-[0.1.20260905.4]: https://github.com/Kili69/HybridDeviceTagger/compare/237b9602ba8a0235256776eb80f2e5da829cd6a7...fbc3166e7c5bb18269ffd0350c05ef48c84edb0b
-[0.1.20260905.3]: https://github.com/Kili69/HybridDeviceTagger/compare/866482e87981a187e3cce39e0a0dc25625cfa086...237b9602ba8a0235256776eb80f2e5da829cd6a7
-[0.1.20260905.2]: https://github.com/Kili69/HybridDeviceTagger/compare/285e462332d713e40e9291c59c6fbfd4c46a5efd...866482e87981a187e3cce39e0a0dc25625cfa086
-[0.1.20260905.1]: https://github.com/Kili69/HybridDeviceTagger/compare/270e2d0fe518accc54be9b1a490f214e60d2fcf0...285e462332d713e40e9291c59c6fbfd4c46a5efd
-[0.1.20260904.3]: https://github.com/Kili69/HybridDeviceTagger/compare/4587d3a...270e2d0fe518accc54be9b1a490f214e60d2fcf0
-[0.1.20260904.1]: https://github.com/Kili69/HybridDeviceTagger/compare/968e6fe2a9efd81b61db5840d4f83995170175fe...4587d3a
-[0.1.20260903.2]: https://github.com/Kili69/HybridDeviceTagger/compare/a6f224e...968e6fe2a9efd81b61db5840d4f83995170175fe
-[0.1.20260903.1]: https://github.com/Kili69/HybridDeviceTagger/commit/a6f224e

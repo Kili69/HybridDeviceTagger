@@ -77,6 +77,28 @@ public sealed class ManagementApiFunctionTests
     }
 
     [Fact]
+    public async Task ReplaceTaggingConfigurationAsync_RejectsDomainOutsideForest()
+    {
+        var configurationStore = new FakeTaggingConfigurationStore();
+        var function = CreateFunction(
+            configurationStore,
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            ruleValidator: new RejectingActiveDirectoryRuleValidator());
+        var request = AuthenticatedRequest(ManagementApiRoles.RuleAdministrator);
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes(
+            """[{"name":"External","description":"Blocked","baseDn":"OU=Servers,DC=attacker,DC=example","extensionAttributes":{"extensionAttribute1":"Managed"},"entraGroupIds":[],"administrativeUnitIds":[]}]"""));
+
+        var result = await function.ReplaceTaggingConfigurationAsync(
+            request,
+            CancellationToken.None);
+
+        var badRequest = Assert.IsType<BadRequestObjectResult>(result);
+        Assert.Contains("invalid", badRequest.Value?.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Null(configurationStore.LastExpectedETag);
+    }
+
+    [Fact]
     public async Task GetDeviceTaggingStatusAsync_ReturnsNotFoundBeforeFirstRun()
     {
         var function = CreateFunction(new FakeTaggingConfigurationStore(), new FakeStatusStore(), new FakeTraceReader());
@@ -116,6 +138,64 @@ public sealed class ManagementApiFunctionTests
             CancellationToken.None);
 
         Assert.IsType<UnauthorizedObjectResult>(result);
+    }
+
+    [Fact]
+    public async Task InitializeActiveDirectoryCredentialAsync_StoresPasswordWithoutReturningIt()
+    {
+        var initializer = new FakeCredentialInitializer();
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            credentialInitializer: initializer);
+        var request = AuthenticatedRequest(ManagementApiRoles.PasswordRotationAdministrator);
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes("""{"password":"Initial!Password1"}"""));
+
+        var result = await function.InitializeActiveDirectoryCredentialAsync(request, CancellationToken.None);
+
+        var ok = Assert.IsType<OkObjectResult>(result);
+        Assert.Equal("Initial!Password1", initializer.Password);
+        Assert.DoesNotContain("Initial!Password1", JsonSerializer.Serialize(ok.Value), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InitializeActiveDirectoryCredentialAsync_RejectsReaderRole()
+    {
+        var initializer = new FakeCredentialInitializer();
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            credentialInitializer: initializer);
+        var request = AuthenticatedRequest(ManagementApiRoles.Reader);
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes("""{"password":"Initial!Password1"}"""));
+
+        var result = await function.InitializeActiveDirectoryCredentialAsync(request, CancellationToken.None);
+
+        var forbidden = Assert.IsType<ObjectResult>(result);
+        Assert.Equal(StatusCodes.Status403Forbidden, forbidden.StatusCode);
+        Assert.Null(initializer.Password);
+    }
+
+    [Fact]
+    public async Task InitializeActiveDirectoryCredentialAsync_ReturnsConflictWhenAlreadyInitialized()
+    {
+        var initializer = new FakeCredentialInitializer
+        {
+            Exception = new ActiveDirectoryCredentialAlreadyInitializedException()
+        };
+        var function = CreateFunction(
+            new FakeTaggingConfigurationStore(),
+            new FakeStatusStore(),
+            new FakeTraceReader(),
+            credentialInitializer: initializer);
+        var request = AuthenticatedRequest(ManagementApiRoles.PasswordRotationAdministrator);
+        request.Body = new MemoryStream(Encoding.UTF8.GetBytes("""{"password":"Initial!Password1"}"""));
+
+        var result = await function.InitializeActiveDirectoryCredentialAsync(request, CancellationToken.None);
+
+        Assert.IsType<ConflictObjectResult>(result);
     }
 
     [Fact]
@@ -203,14 +283,38 @@ public sealed class ManagementApiFunctionTests
         IOperationStatusStore statusStore,
         IRunTraceReader traceReader,
         IOperationLock? operationLock = null,
-        IOperationRequestQueue? requestQueue = null) =>
+        IOperationRequestQueue? requestQueue = null,
+        IActiveDirectoryCredentialInitializer? credentialInitializer = null,
+        IManagementApiAuthorizer? authorizer = null,
+        IActiveDirectoryRuleValidator? ruleValidator = null) =>
         new(
-            new TaggingConfigurationService(configurationStore),
+            new TaggingConfigurationService(
+                configurationStore,
+                ruleValidator ?? new AllowAllActiveDirectoryRuleValidator()),
             statusStore,
             traceReader,
             operationLock ?? new FakeOperationLock(),
             requestQueue ?? new FakeRequestQueue(),
-            TimeProvider.System);
+            TimeProvider.System,
+            credentialInitializer ?? new FakeCredentialInitializer(),
+            authorizer ?? new ApplicationRoleAuthorizer());
+
+    private sealed class AllowAllActiveDirectoryRuleValidator : IActiveDirectoryRuleValidator
+    {
+        public Task ValidateRulesAsync(
+            IReadOnlyList<TaggingRuleOptions> rules,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+    }
+
+    private sealed class RejectingActiveDirectoryRuleValidator : IActiveDirectoryRuleValidator
+    {
+        public Task ValidateRulesAsync(
+            IReadOnlyList<TaggingRuleOptions> rules,
+            CancellationToken cancellationToken) =>
+            throw new TaggingConfigurationValidationException(
+                ["The rule targets a domain outside the configured forest."]);
+    }
 
     private static HttpRequest AuthenticatedRequest(params string[] roles)
     {
@@ -220,6 +324,17 @@ public sealed class ManagementApiFunctionTests
         request.Headers["X-MS-CLIENT-PRINCIPAL"] = Convert.ToBase64String(
             Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { auth_typ = "aad", claims })));
         return request;
+    }
+
+    private sealed class ApplicationRoleAuthorizer : IManagementApiAuthorizer
+    {
+        public Task<EasyAuthAuthorizationResult> AuthorizeAsync(
+            HttpRequest request,
+            IReadOnlyCollection<string> requiredRoles,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(EasyAuthPrincipalValidator.Authorize(
+                request,
+                [.. requiredRoles]));
     }
 
     private sealed class FakeTaggingConfigurationStore : ITaggingConfigurationStore
@@ -313,6 +428,19 @@ public sealed class ManagementApiFunctionTests
         {
             Requests.Add((operation, request));
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeCredentialInitializer : IActiveDirectoryCredentialInitializer
+    {
+        public string? Password { get; private set; }
+
+        public Exception? Exception { get; init; }
+
+        public Task InitializeAsync(string password, CancellationToken cancellationToken)
+        {
+            Password = password;
+            return Exception is null ? Task.CompletedTask : Task.FromException(Exception);
         }
     }
 

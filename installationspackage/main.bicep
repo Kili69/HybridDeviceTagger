@@ -1,6 +1,20 @@
 /*
  * Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
- * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ * Copyright 2026 Andreas Lucas
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 targetScope = 'resourceGroup'
@@ -31,8 +45,17 @@ param virtualNetworkResourceGroupName string
 @description('Subscription containing the existing virtual network.')
 param virtualNetworkSubscriptionId string = subscription().subscriptionId
 
+@description('Optional resource ID of an existing Blob Storage private DNS zone linked to the virtual network.')
+param storagePrivateDnsZoneResourceId string = ''
+
+@description('Optional resource ID of an existing Queue Storage private DNS zone linked to the virtual network.')
+param storageQueuePrivateDnsZoneResourceId string = ''
+
 @description('Name of the existing Key Vault.')
 param keyVaultName string
+
+@description('Create the Key Vault in this deployment instead of referencing an existing vault.')
+param createKeyVault bool = false
 
 @description('Resource group containing the existing Key Vault.')
 param keyVaultResourceGroupName string
@@ -40,13 +63,19 @@ param keyVaultResourceGroupName string
 @description('Subscription containing the existing Key Vault.')
 param keyVaultSubscriptionId string = subscription().subscriptionId
 
-@description('Forest DNS name used for discovery, or the DNS name of a specific domain controller when discovery is unavailable.')
-param activeDirectoryServer string
+@description('Optional resource ID of an existing Key Vault private DNS zone linked to the virtual network.')
+param keyVaultPrivateDnsZoneResourceId string = ''
 
-@description('Allow read and bind operations to fall back to unencrypted LDAP when LDAPS is unavailable.')
-param allowLdapFallback bool = false
+@description('Password secrets that do not exist yet in an existing Key Vault. They are created as unusable placeholders so that the managed identity can be authorized on the two password secrets only. List only missing secrets.')
+param keyVaultPlaceholderSecretNames string[] = []
 
-@description('Port used for unencrypted LDAP fallback.')
+@description('Active Directory forest DNS name used by the Function for DNS SRV domain-controller discovery.')
+param activeDirectoryDomain string
+
+@description('Allow LDAPS to fall back to LDAP upgraded with StartTLS.')
+param allowLdapFallback bool = true
+
+@description('Port used for LDAP upgraded with StartTLS.')
 @minValue(1)
 @maxValue(65535)
 param ldapFallbackPort int = 389
@@ -93,55 +122,168 @@ param instanceMemoryMB int = 2048
 @description('Tags applied to newly created resources.')
 param tags object = {}
 
-@description('Name of the Flex Consumption (FC1) App Service plan.')
+@description('Name of the Flex Consumption hosting plan.')
 var servicePlanName = '${functionAppName}-plan'
 @description('Name of the Log Analytics workspace that stores Application Insights telemetry.')
 var logAnalyticsWorkspaceName = '${functionAppName}-law'
-@description('Name of the workspace-based Application Insights component.')
+@description('Name of the Application Insights component.')
 var applicationInsightsName = '${functionAppName}-appi'
-@description('Deterministic, deployment-specific blob container name for Flex Consumption deployment packages.')
+@description('Deterministic, deployment-specific blob container name for Function App packages.')
 var deploymentContainerName = 'app-package-${uniqueString(resourceGroup().id, functionAppName)}'
-@description('Name of the private endpoint for the storage Blob service.')
+@description('Name of the Blob Storage private endpoint.')
 var storagePrivateEndpointName = 'pe-${storageAccountName}-blob'
-@description('Name of the private endpoint for the storage Queue service.')
+@description('Blob Storage private DNS zone name for the current Azure cloud.')
+var storagePrivateDnsZoneName = 'privatelink.blob.${environment().suffixes.storage}'
+@description('Creates the Blob Storage private DNS zone when no existing zone is supplied.')
+var createStoragePrivateDnsZone = empty(storagePrivateDnsZoneResourceId)
+@description('Resource ID of the supplied or newly created Blob Storage private DNS zone.')
+var effectiveStoragePrivateDnsZoneResourceId = empty(storagePrivateDnsZoneResourceId)
+  ? resourceId('Microsoft.Network/privateDnsZones', storagePrivateDnsZoneName)
+  : storagePrivateDnsZoneResourceId
+@description('Name of the Queue Storage private endpoint.')
 var storageQueuePrivateEndpointName = 'pe-${storageAccountName}-queue'
-@description('Key Vault Secrets Officer role definition ID in the Key Vault subscription, which may differ from the deployment subscription.')
-var keyVaultSecretsOfficerRoleDefinitionId = '/subscriptions/${keyVaultSubscriptionId}/providers/Microsoft.Authorization/roleDefinitions/b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
-@description('Storage Blob Data Contributor role definition ID.')
-var storageBlobDataContributorRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
-@description('Storage Queue Data Contributor role definition ID.')
-var storageQueueDataContributorRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
+@description('Queue Storage private DNS zone name for the current Azure cloud.')
+var storageQueuePrivateDnsZoneName = 'privatelink.queue.${environment().suffixes.storage}'
+@description('Creates the Queue Storage private DNS zone when no existing zone is supplied.')
+var createStorageQueuePrivateDnsZone = empty(storageQueuePrivateDnsZoneResourceId)
+@description('Resource ID of the supplied or newly created Queue Storage private DNS zone.')
+var effectiveStorageQueuePrivateDnsZoneResourceId = empty(storageQueuePrivateDnsZoneResourceId)
+  ? resourceId('Microsoft.Network/privateDnsZones', storageQueuePrivateDnsZoneName)
+  : storageQueuePrivateDnsZoneResourceId
 @description('Storage queues that receive manually requested device-tagging and password-rotation runs from the management API.')
 var requestQueueNames = [
   'device-tagging-requests'
   'password-rotation-requests'
 ]
+@description('Name of the private endpoint of a newly created Key Vault.')
+var keyVaultPrivateEndpointName = 'pe-${keyVaultName}'
+@description('Key Vault private DNS zone name.')
+var keyVaultPrivateDnsZoneName = 'privatelink.vaultcore.azure.net'
+@description('Creates the Key Vault private DNS zone only for a new vault without a supplied existing zone.')
+var createKeyVaultPrivateDnsZone = createKeyVault && empty(keyVaultPrivateDnsZoneResourceId)
+@description('Resource ID of the supplied or newly created Key Vault private DNS zone.')
+var effectiveKeyVaultPrivateDnsZoneResourceId = empty(keyVaultPrivateDnsZoneResourceId)
+  ? resourceId('Microsoft.Network/privateDnsZones', keyVaultPrivateDnsZoneName)
+  : keyVaultPrivateDnsZoneResourceId
+@description('Data-plane URI of the selected Key Vault.')
+var keyVaultUri = 'https://${keyVaultName}${environment().suffixes.keyvaultDns}'
+@description('Key Vault Secrets Officer role definition in the Key Vault subscription.')
+var keyVaultSecretsOfficerRoleDefinitionId = '/subscriptions/${keyVaultSubscriptionId}/providers/Microsoft.Authorization/roleDefinitions/b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
+@description('Storage Blob Data Contributor role definition.')
+var storageBlobDataContributorRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'ba92f5b4-2d11-453d-a403-e96b0029c9fe')
+@description('Storage Queue Data Contributor role definition.')
+var storageQueueDataContributorRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '974c5e8b-45b9-4653-ba55-5f855dd0fb88')
+@description('Reader role definition.')
+var readerRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'acdd72a7-3385-48ef-bd42-f606fba81ae7')
 
-@description('Existing virtual network that hosts the integration and private endpoint subnets; referenced, never modified.')
+@description('Existing virtual network, which is referenced but not modified.')
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-05-01' existing = {
   name: virtualNetworkName
   scope: resourceGroup(virtualNetworkSubscriptionId, virtualNetworkResourceGroupName)
 }
 
-@description('Existing subnet delegated to Microsoft.App/environments for Function App VNet integration.')
+@description('Existing subnet used for Flex Consumption VNet integration.')
 resource integrationSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existing = {
   name: subnetName
   parent: virtualNetwork
 }
 
-@description('Existing subnet that hosts the storage private endpoints.')
+@description('Existing subnet that hosts the Storage and Key Vault private endpoints.')
 resource privateEndpointSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-05-01' existing = {
   name: privateEndpointSubnetName
   parent: virtualNetwork
 }
 
-@description('Existing Key Vault that stores the current and staged Active Directory passwords; referenced, never modified.')
-resource keyVault 'Microsoft.KeyVault/vaults@2024-11-01' existing = {
+@description('Private Key Vault with RBAC authorization, soft delete, and purge protection, created only when createKeyVault is true.')
+resource keyVault 'Microsoft.KeyVault/vaults@2024-11-01' = if (createKeyVault) {
   name: keyVaultName
-  scope: resourceGroup(keyVaultSubscriptionId, keyVaultResourceGroupName)
+  location: location
+  tags: tags
+  properties: {
+    accessPolicies: []
+    enablePurgeProtection: true
+    enableRbacAuthorization: true
+    enableSoftDelete: true
+    enabledForDeployment: false
+    enabledForDiskEncryption: false
+    enabledForTemplateDeployment: false
+    networkAcls: {
+      bypass: 'None'
+      defaultAction: 'Deny'
+      ipRules: []
+      virtualNetworkRules: []
+    }
+    publicNetworkAccess: 'Disabled'
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    softDeleteRetentionInDays: 90
+    tenantId: subscription().tenantId
+  }
 }
 
-@description('Function storage account for host storage, deployment packages, the membership ledger, run traces, and run-request queues. Public network access is disabled.')
+@description('Key Vault private DNS zone, created for a new vault when no existing zone is supplied.')
+resource keyVaultPrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (createKeyVaultPrivateDnsZone) {
+  name: keyVaultPrivateDnsZoneName
+  location: 'global'
+  tags: tags
+}
+
+@description('Links the created Key Vault private DNS zone to the virtual network.')
+resource keyVaultPrivateDnsVnetLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (createKeyVaultPrivateDnsZone) {
+  name: '${functionAppName}-keyvault-link'
+  parent: keyVaultPrivateDnsZone
+  location: 'global'
+  tags: tags
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: virtualNetwork.id
+    }
+  }
+}
+
+@description('Private endpoint of a newly created Key Vault.')
+resource keyVaultPrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = if (createKeyVault) {
+  name: keyVaultPrivateEndpointName
+  location: location
+  tags: tags
+  properties: {
+    privateLinkServiceConnections: [
+      {
+        name: '${keyVaultPrivateEndpointName}-connection'
+        properties: {
+          groupIds: [
+            'vault'
+          ]
+          privateLinkServiceId: keyVault.id
+        }
+      }
+    ]
+    subnet: {
+      id: privateEndpointSubnet.id
+    }
+  }
+}
+
+@description('Registers the Key Vault private endpoint address in the Key Vault private DNS zone.')
+resource keyVaultPrivateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = if (createKeyVault) {
+  name: 'default'
+  parent: keyVaultPrivateEndpoint
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'keyVaultPrivateDnsZone'
+        properties: {
+          privateDnsZoneId: effectiveKeyVaultPrivateDnsZoneResourceId
+        }
+      }
+    ]
+  }
+}
+
+@description('Private StorageV2 account for Functions host storage, deployment packages, the membership ledger, run traces, and run-request queues. Public network access is disabled.')
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
   location: location
@@ -160,13 +302,13 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
-@description('Blob service of the Function storage account.')
+@description('Blob service of the storage account.')
 resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
   name: 'default'
   parent: storageAccount
 }
 
-@description('Private container that stores the Flex Consumption deployment package.')
+@description('Private blob container that holds Function App deployment packages.')
 resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   name: deploymentContainerName
   parent: blobService
@@ -175,7 +317,7 @@ resource deploymentContainer 'Microsoft.Storage/storageAccounts/blobServices/con
   }
 }
 
-@description('Private container that records the Entra group and administrative-unit memberships owned by HybridDeviceTagger.')
+@description('Private blob container for the ledger of group and administrative-unit memberships owned by HybridDeviceTagger.')
 resource membershipLedgerContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   name: 'membership-ledger'
   parent: blobService
@@ -184,7 +326,7 @@ resource membershipLedgerContainer 'Microsoft.Storage/storageAccounts/blobServic
   }
 }
 
-@description('Private container that stores device-tagging run traces.')
+@description('Private blob container for device-tagging run traces.')
 resource runTraceContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   name: 'run-traces'
   parent: blobService
@@ -193,19 +335,7 @@ resource runTraceContainer 'Microsoft.Storage/storageAccounts/blobServices/conta
   }
 }
 
-@description('Queue service of the Function storage account.')
-resource queueService 'Microsoft.Storage/storageAccounts/queueServices@2023-05-01' = {
-  name: 'default'
-  parent: storageAccount
-}
-
-@description('Queues that carry manually requested operation runs.')
-resource requestQueues 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-05-01' = [for queueName in requestQueueNames: {
-  name: queueName
-  parent: queueService
-}]
-
-@description('Private endpoint that exposes the storage Blob service in the private endpoint subnet.')
+@description('Private endpoint for the storage Blob service.')
 resource storagePrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
   name: storagePrivateEndpointName
   location: location
@@ -228,7 +358,59 @@ resource storagePrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' 
   }
 }
 
-@description('Private endpoint that exposes the storage Queue service in the private endpoint subnet.')
+@description('Blob Storage private DNS zone, created when no existing zone is supplied.')
+resource storagePrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (createStoragePrivateDnsZone) {
+  name: storagePrivateDnsZoneName
+  location: 'global'
+  tags: tags
+}
+
+@description('Links the created Blob Storage private DNS zone to the virtual network.')
+resource storagePrivateDnsVnetLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (createStoragePrivateDnsZone) {
+  name: '${functionAppName}-storage-link'
+  parent: storagePrivateDnsZone
+  location: 'global'
+  tags: tags
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: virtualNetwork.id
+    }
+  }
+}
+
+@description('Registers the Blob private endpoint address in the Blob Storage private DNS zone.')
+resource storagePrivateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+  name: 'default'
+  parent: storagePrivateEndpoint
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'storagePrivateDnsZone'
+        properties: {
+          privateDnsZoneId: effectiveStoragePrivateDnsZoneResourceId
+        }
+      }
+    ]
+  }
+  dependsOn: [
+    storagePrivateDnsZone
+  ]
+}
+
+@description('Queue service of the storage account.')
+resource queueService 'Microsoft.Storage/storageAccounts/queueServices@2023-05-01' = {
+  name: 'default'
+  parent: storageAccount
+}
+
+@description('Private queues that carry management-API run requests to the queue-triggered functions.')
+resource requestQueues 'Microsoft.Storage/storageAccounts/queueServices/queues@2023-05-01' = [for queueName in requestQueueNames: {
+  name: queueName
+  parent: queueService
+}]
+
+@description('Private endpoint for the storage Queue service, used by the queue triggers and the management API.')
 resource storageQueuePrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05-01' = {
   name: storageQueuePrivateEndpointName
   location: location
@@ -251,7 +433,47 @@ resource storageQueuePrivateEndpoint 'Microsoft.Network/privateEndpoints@2024-05
   }
 }
 
-@description('Linux Flex Consumption (FC1) plan that hosts the Function App.')
+@description('Queue Storage private DNS zone, created when no existing zone is supplied.')
+resource storageQueuePrivateDnsZone 'Microsoft.Network/privateDnsZones@2024-06-01' = if (createStorageQueuePrivateDnsZone) {
+  name: storageQueuePrivateDnsZoneName
+  location: 'global'
+  tags: tags
+}
+
+@description('Links the created Queue Storage private DNS zone to the virtual network.')
+resource storageQueuePrivateDnsVnetLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = if (createStorageQueuePrivateDnsZone) {
+  name: '${functionAppName}-storage-queue-link'
+  parent: storageQueuePrivateDnsZone
+  location: 'global'
+  tags: tags
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: virtualNetwork.id
+    }
+  }
+}
+
+@description('Registers the Queue private endpoint address in the Queue Storage private DNS zone.')
+resource storageQueuePrivateDnsZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-05-01' = {
+  name: 'default'
+  parent: storageQueuePrivateEndpoint
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'storageQueuePrivateDnsZone'
+        properties: {
+          privateDnsZoneId: effectiveStorageQueuePrivateDnsZoneResourceId
+        }
+      }
+    ]
+  }
+  dependsOn: [
+    storageQueuePrivateDnsZone
+  ]
+}
+
+@description('Linux Flex Consumption (FC1) hosting plan.')
 resource servicePlan 'Microsoft.Web/serverfarms@2024-04-01' = {
   name: servicePlanName
   location: location
@@ -267,7 +489,7 @@ resource servicePlan 'Microsoft.Web/serverfarms@2024-04-01' = {
   }
 }
 
-@description('Log Analytics workspace with 30-day retention for Function telemetry.')
+@description('Log Analytics workspace with 30-day retention for Application Insights data.')
 resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: logAnalyticsWorkspaceName
   location: location
@@ -285,7 +507,7 @@ resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2023-09
   }
 }
 
-@description('Workspace-based Application Insights component for Function monitoring.')
+@description('Workspace-based Application Insights component for Function App telemetry.')
 resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
   name: applicationInsightsName
   location: location
@@ -301,7 +523,7 @@ resource applicationInsights 'Microsoft.Insights/components@2020-02-02' = {
   }
 }
 
-@description('Linux .NET 8 isolated Function App with a system-assigned identity, VNet integration, identity-based deployment storage, and the HybridDeviceTagger configuration.')
+@description('Linux .NET 8 isolated Function App on Flex Consumption with a system-assigned identity, identity-based storage access, VNet integration that routes all traffic, and the HybridDeviceTagger application settings.')
 resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
   name: functionAppName
   location: location
@@ -357,8 +579,8 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           value: rotationSchedule
         }
         {
-          name: 'ActiveDirectory__Server'
-          value: activeDirectoryServer
+          name: 'ActiveDirectory__Domain'
+          value: activeDirectoryDomain
         }
         {
           name: 'ActiveDirectory__Port'
@@ -404,7 +626,7 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         }
         {
           name: 'KeyVault__VaultUri'
-          value: keyVault.properties.vaultUri
+          value: keyVaultUri
         }
         {
           name: 'KeyVault__CurrentPasswordSecretName'
@@ -431,6 +653,10 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           value: managementApiClientId
         }
         {
+          name: 'ManagementAuthorization__FunctionAppResourceId'
+          value: resourceId('Microsoft.Web/sites', functionAppName)
+        }
+        {
           name: 'Tagging__RulesJson'
           value: '[]'
         }
@@ -442,11 +668,12 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
       scmMinTlsVersion: '1.2'
     }
     virtualNetworkSubnetId: integrationSubnet.id
+    vnetContentShareEnabled: true
     vnetRouteAllEnabled: true
   }
 }
 
-@description('App Service Authentication that requires Entra tokens for the management API audience, except for the anonymous authentication metadata endpoint.')
+@description('App Service Authentication that requires Entra tokens for the management API audience on all paths except /api/management/authentication and returns HTTP 401 for unauthenticated requests.')
 resource functionAppAuthentication 'Microsoft.Web/sites/config@2022-09-01' = {
   name: 'authsettingsV2'
   parent: functionApp
@@ -488,7 +715,7 @@ resource functionAppAuthentication 'Microsoft.Web/sites/config@2022-09-01' = {
   }
 }
 
-@description('Grants the Function App identity Storage Blob Data Contributor on the storage account.')
+@description('Blob read and write access for host storage, deployment packages, ledger, traces, status, and leases.')
 resource storageBlobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storageAccount.id, functionApp.id, storageBlobDataContributorRoleDefinitionId)
   scope: storageAccount
@@ -499,7 +726,7 @@ resource storageBlobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022
   }
 }
 
-@description('Grants the Function App identity Storage Queue Data Contributor on the storage account.')
+@description('Queue read and write access for the run-request queues and the queue triggers.')
 resource storageQueueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(storageAccount.id, functionApp.id, storageQueueDataContributorRoleDefinitionId)
   scope: storageAccount
@@ -510,10 +737,21 @@ resource storageQueueRoleAssignment 'Microsoft.Authorization/roleAssignments@202
   }
 }
 
-// The role is scoped to the two password secrets only; other secrets in a shared vault stay
-// inaccessible to the Function App. Both secrets must exist before deployment.
-@description('Grants the Function App identity Key Vault Secrets Officer on the current and staged password secrets only.')
-module keyVaultRoleAssignment 'key-vault-role-assignment.bicep' = {
+@description('Reader role of the Function identity on its own Function App, used to evaluate management API authorization against Function App role assignments.')
+resource functionAppReaderRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(functionApp.id, readerRoleDefinitionId)
+  scope: functionApp
+  properties: {
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: readerRoleDefinitionId
+  }
+}
+
+// An existing vault may be shared, so the role is scoped to the two password secrets. Missing
+// secrets are created as marked placeholders first.
+@description('Key Vault Secrets Officer role on the two password secrets of an existing, possibly shared vault.')
+module existingKeyVaultRoleAssignment 'key-vault-role-assignment.bicep' = if (!createKeyVault) {
   scope: resourceGroup(keyVaultSubscriptionId, keyVaultResourceGroupName)
   params: {
     keyVaultName: keyVaultName
@@ -521,18 +759,36 @@ module keyVaultRoleAssignment 'key-vault-role-assignment.bicep' = {
       currentPasswordSecretName
       nextPasswordSecretName
     ]
+    placeholderSecretNames: keyVaultPlaceholderSecretNames
     principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
     roleDefinitionId: keyVaultSecretsOfficerRoleDefinitionId
   }
 }
 
+@description('Vault-scoped Key Vault Secrets Officer role on a vault created for HybridDeviceTagger.')
+module newKeyVaultRoleAssignment 'key-vault-role-assignment.bicep' = if (createKeyVault) {
+  scope: resourceGroup(keyVaultSubscriptionId, keyVaultResourceGroupName)
+  params: {
+    keyVaultName: keyVaultName
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: keyVaultSecretsOfficerRoleDefinitionId
+  }
+  dependsOn: [
+    keyVault
+  ]
+}
+
 @description('Name of the deployed Function App.')
 output functionAppName string = functionApp.name
-@description('Object ID of the Function App system-assigned managed identity, used by the installer for Microsoft Graph permissions.')
+@description('Object ID of the Function App system-assigned managed identity.')
 output functionAppPrincipalId string = functionApp.identity.principalId
 @description('Resource ID of the deployed Function App.')
 output functionAppResourceId string = functionApp.id
-@description('Name of the deployment package container.')
+@description('Data-plane URI of the selected Key Vault.')
+output keyVaultUri string = keyVaultUri
+@description('Name of the blob container that holds deployment packages.')
 output deploymentContainerName string = deploymentContainer.name
-@description('Name of the Function storage account.')
+@description('Name of the storage account.')
 output storageAccountName string = storageAccount.name

@@ -210,6 +210,39 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/OperationConflict'
+  /actions/initialize-ad-credential:
+    post:
+      operationId: initializeActiveDirectoryCredential
+      summary: Validate and initialize the Active Directory service-account credential
+      description: Requires HybridDeviceTagger.PasswordRotationAdministrator. The current Key Vault secret must be missing or the unusable placeholder created by the installer; an existing password is never replaced.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - password
+              properties:
+                password:
+                  type: string
+                  format: password
+                  minLength: 1
+                  maxLength: 256
+                  writeOnly: true
+      responses:
+        '200':
+          description: Credential validated against Active Directory and initialized through the Function managed identity
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          description: Request body exceeds 65,536 bytes
   /traces/device-tagging/latest:
     get:
       operationId: downloadLatestDeviceTaggingTrace
@@ -286,6 +319,10 @@ components:
         baseDn:
           type: string
           maxLength: 2048
+          description: >-
+            Forest-relative OU path or complete DN whose derived DNS domain exactly matches a
+            dnsRoot advertised by the configured Active Directory forest. Foreign domains are
+            rejected before persistence and checked again before LDAP access.
         extensionAttributes:
           type: object
           additionalProperties:

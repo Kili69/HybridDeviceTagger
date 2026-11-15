@@ -9,8 +9,8 @@ Guides an operator through the complete HybridDeviceTagger installation.
 .DESCRIPTION
 Install.ps1 is the interactive entry point of the HybridDeviceTagger installation package. It:
 
-1. checks the local prerequisites (PowerShell 7.2, Azure CLI, the ActiveDirectory module, and an
-   Azure CLI sign-in);
+1. checks the local prerequisites (PowerShell 7.2, Azure CLI, the ActiveDirectory module, the
+   prebuilt Function package, and an Azure CLI sign-in);
 2. asks for every installation parameter, proposing defaults and previously saved answers;
 3. validates the format of every answer and asks again when a value is invalid;
 4. stores the answers without any secret in installation-settings.json so that later runs, for
@@ -20,7 +20,9 @@ Install.ps1 is the interactive entry point of the HybridDeviceTagger installatio
    confirmation.
 
 Passwords are never written to disk. The Active Directory service-account credential is requested
-once per run and passed to the installation engine in memory only.
+once per run and passed to the installation engine in memory only. After deployment, the engine
+sends it once over HTTPS to the Function, which validates it against Active Directory and stores
+it in Key Vault through its managed identity.
 
 Use Install-HybridDeviceTagger.ps1 directly for unattended or pipeline installations.
 
@@ -30,8 +32,7 @@ this script.
 
 .PARAMETER Mode
 Selects the action without asking. Install runs validation, optional What-If, and installation.
-Validate and WhatIf make no changes. PrepareActiveDirectoryAccount creates or resets the AD
-service account and stores its password in Key Vault.
+Validate and WhatIf make no changes.
 
 .PARAMETER UseSavedSettings
 Accepts all saved answers without asking again. Missing answers are still requested.
@@ -47,7 +48,20 @@ Asks for all parameters and the action, then runs it.
 Repeats the read-only validation with the previously saved answers.
 
 .NOTES
-DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+Copyright 2026 Andreas Lucas
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+SPDX-License-Identifier: Apache-2.0
 #>
 
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
@@ -60,7 +74,7 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$SettingsPath = (Join-Path $PSScriptRoot 'installation-settings.json'),
 
-    [ValidateSet('Install', 'Validate', 'WhatIf', 'PrepareActiveDirectoryAccount')]
+    [ValidateSet('Install', 'Validate', 'WhatIf')]
     [string]$Mode,
 
     [switch]$UseSavedSettings
@@ -271,7 +285,7 @@ function Assert-Prerequisite {
     }
     $functionPackage = Join-Path $PSScriptRoot 'function/HybridDeviceTagger.zip'
     if (-not (Test-Path -LiteralPath $functionPackage -PathType Leaf)) {
-        Write-Host '  No prebuilt Function package found; the installer builds the Function from source and needs the .NET 8 SDK.' -ForegroundColor Yellow
+        throw "The prebuilt Function package '$functionPackage' is missing. Use a release package or run scripts/Build-InstallationPackage.ps1 first."
     }
 
     $account = & az account show --only-show-errors --output json 2>$null
@@ -364,14 +378,30 @@ function Read-InstallationSetting {
     $settings.PrivateEndpointSubnetName = Get-Answer -Name PrivateEndpointSubnetName `
         -Prompt 'Private endpoint subnet'
 
-    Write-Section 'Existing Key Vault'
-    $settings.KeyVaultSubscriptionId = Get-Answer -Name KeyVaultSubscriptionId `
-        -Prompt 'Key Vault subscription ID' `
-        -Default $settings.SubscriptionId `
-        -Pattern $guidPattern -ValidationMessage 'Enter a subscription GUID.'
-    $settings.KeyVaultResourceGroupName = Get-Answer -Name KeyVaultResourceGroupName `
-        -Prompt 'Key Vault resource group' `
-        -Default $settings.ResourceGroupName
+    Write-Section 'Key Vault'
+    $savedCreateKeyVault = [bool](Get-SavedValue -Name CreateKeyVault -Fallback $false)
+    $settings.CreateKeyVault = if ($UseSavedSettings -and $null -ne $saved -and $saved.ContainsKey('CreateKeyVault')) {
+        $savedCreateKeyVault
+    }
+    else {
+        Read-YesNo `
+            -Prompt 'Create a new private Key Vault for HybridDeviceTagger? (No uses an existing vault)' `
+            -Default $savedCreateKeyVault
+    }
+    if ($settings.CreateKeyVault) {
+        $settings.KeyVaultSubscriptionId = $settings.SubscriptionId
+        $settings.KeyVaultResourceGroupName = $settings.ResourceGroupName
+    }
+    else {
+        Write-Host '  The existing vault must use Azure RBAC, soft delete, and purge protection.' -ForegroundColor DarkGray
+        $settings.KeyVaultSubscriptionId = Get-Answer -Name KeyVaultSubscriptionId `
+            -Prompt 'Key Vault subscription ID' `
+            -Default $settings.SubscriptionId `
+            -Pattern $guidPattern -ValidationMessage 'Enter a subscription GUID.'
+        $settings.KeyVaultResourceGroupName = Get-Answer -Name KeyVaultResourceGroupName `
+            -Prompt 'Key Vault resource group' `
+            -Default $settings.ResourceGroupName
+    }
     $keyVaultSuffix = ($suffix -replace '[^a-z0-9-]', '-').Trim('-')
     if ($keyVaultSuffix.Length -gt 21) { $keyVaultSuffix = $keyVaultSuffix.Substring(0, 21).TrimEnd('-') }
     $settings.KeyVaultName = Get-Answer -Name KeyVaultName `
@@ -385,17 +415,19 @@ function Read-InstallationSetting {
         -Default (Get-LoggedOnForest) `
         -Pattern $dnsNamePattern -ValidationMessage 'Enter a DNS name, for example contoso.com.'
     $settings.ActiveDirectoryServer = Get-Answer -Name ActiveDirectoryServer `
-        -Prompt 'LDAPS server (domain or domain controller DNS name)' `
-        -Default $settings.ActiveDirectoryForestDomain `
-        -Pattern $dnsNamePattern -ValidationMessage 'Enter a DNS name.'
-    $settings.ADServiceAccount = Get-Answer -Name ADServiceAccount `
+        -Prompt 'Domain controller for installer validation' `
+        -Optional `
+        -Pattern $dnsNamePattern -ValidationMessage 'Enter a DNS name.' `
+        -Help 'Leave empty to discover a domain controller through DNS SRV records. The Function always uses DNS SRV discovery.'
+    $settings.ServiceAccountUpn = Get-Answer -Name ServiceAccountUpn `
         -Prompt 'Service account UPN' `
         -Default "HybridDeviceTagger@$($settings.ActiveDirectoryForestDomain)" `
-        -Pattern '^[^@\s]+@[^@\s]+$' -ValidationMessage 'Enter a user principal name, for example HybridDeviceTagger@contoso.com.'
+        -Pattern '^[^@\s]+@[^@\s]+$' -ValidationMessage 'Enter a user principal name, for example HybridDeviceTagger@contoso.com.' `
+        -Help 'The account must exist, must not have to change its password at next logon, and needs SELF / Change Password.'
     $settings.ActiveDirectoryBindUserDistinguishedName = Get-Answer -Name ActiveDirectoryBindUserDistinguishedName `
         -Prompt 'Service account distinguished name' `
         -Optional `
-        -Help 'Leave empty when the account exists; the installer then resolves it. Required to create a new account.'
+        -Help 'Leave empty to resolve it from the UPN.'
     $settings.ActiveDirectoryTrustedCertificatePath = Get-Answer -Name ActiveDirectoryTrustedCertificatePath `
         -Prompt 'Path to the LDAPS root CA certificate (.cer/.pem)' `
         -Optional `
@@ -407,8 +439,9 @@ function Read-InstallationSetting {
     Write-Section 'Management API'
     $settings.ManagementApiClientId = Get-Answer -Name ManagementApiClientId `
         -Prompt 'Application (client) ID of the management API app registration' `
+        -Optional `
         -Pattern $guidPattern -ValidationMessage 'Enter the application (client) ID GUID.' `
-        -Help 'The single-tenant app registration must exist and use the Application ID URI api://<client-id>.'
+        -Help 'Leave empty to let the installer create the app registration, or to reuse the one of an existing installation.'
     $settings.ManagementApiAllowedPrincipalObjectId = Get-Answer -Name ManagementApiAllowedPrincipalObjectId `
         -Prompt 'Object ID of the user or group that receives all management API roles' `
         -Default (Get-SignedInUserObjectId) `
@@ -450,14 +483,19 @@ Converts the answers to the parameter set of Install-HybridDeviceTagger.ps1.
 #>
 function ConvertTo-EngineParameter {
     param(
-        [Parameter(Mandatory)][System.Collections.IDictionary]$Settings,
-        [switch]$PrepareActiveDirectoryAccount
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Settings
     )
 
+    # ServiceAccountUpn is only the default user name of the credential prompt; the engine derives
+    # the UPN from ADServiceAccountCredential, which cannot be combined with ADServiceAccount.
     $parameters = @{}
     foreach ($entry in $Settings.GetEnumerator()) {
+        if ($entry.Key -eq 'ServiceAccountUpn') {
+            continue
+        }
         if ($entry.Value -is [bool]) {
-            if ($entry.Value) { $parameters[$entry.Key] = $true }
+            # Passing false explicitly keeps the engine from asking again, for example CreateKeyVault.
+            $parameters[$entry.Key] = [switch]$entry.Value
             continue
         }
         if ([string]::IsNullOrWhiteSpace([string]$entry.Value)) {
@@ -466,12 +504,7 @@ function ConvertTo-EngineParameter {
         $parameters[$entry.Key] = $entry.Value
     }
     $parameters.ManagementApiAllowedPrincipalObjectId = @([guid]$Settings.ManagementApiAllowedPrincipalObjectId)
-    if ($PrepareActiveDirectoryAccount) {
-        $parameters.PrepareActiveDirectoryAccountOnly = $true
-    }
-    elseif ($script:ActiveDirectoryCredential) {
-        $parameters.ActiveDirectoryCredential = $script:ActiveDirectoryCredential
-    }
+    $parameters.ADServiceAccountCredential = $script:ActiveDirectoryCredential
     $parameters
 }
 
@@ -509,9 +542,8 @@ function Read-Mode {
     Write-Host '  1  Install or update (validation, optional What-If, installation)'
     Write-Host '  2  Validate only (no changes)'
     Write-Host '  3  Show Azure What-If only (no changes)'
-    Write-Host '  4  Prepare the Active Directory service account (create or reset, store password in Key Vault)'
-    $choice = Read-Value -Prompt 'Selection' -Default '1' -Pattern '^[1-4]$' -ValidationMessage 'Enter 1, 2, 3, or 4.'
-    @{ '1' = 'Install'; '2' = 'Validate'; '3' = 'WhatIf'; '4' = 'PrepareActiveDirectoryAccount' }[$choice]
+    $choice = Read-Value -Prompt 'Selection' -Default '1' -Pattern '^[1-3]$' -ValidationMessage 'Enter 1, 2, or 3.'
+    @{ '1' = 'Install'; '2' = 'Validate'; '3' = 'WhatIf' }[$choice]
 }
 
 Write-Host 'HybridDeviceTagger guided installation' -ForegroundColor Cyan
@@ -534,24 +566,15 @@ if (-not $Mode) {
     $Mode = Read-Mode
 }
 
-$script:ActiveDirectoryCredential = $null
-if ($Mode -ne 'PrepareActiveDirectoryAccount') {
-    Write-Host "`nThe service-account password is used locally to validate the LDAPS bind and is never stored." -ForegroundColor DarkGray
-    $script:ActiveDirectoryCredential = Get-Credential `
-        -UserName $settings.ADServiceAccount `
-        -Message 'Active Directory service-account password'
-    if ($null -eq $script:ActiveDirectoryCredential) {
-        throw 'Credential entry was canceled.'
-    }
+Write-Host "`nThe service-account password validates the LDAPS bind and is handed to the Function for Key Vault storage; it is never written to disk." -ForegroundColor DarkGray
+$script:ActiveDirectoryCredential = Get-Credential `
+    -UserName $settings.ServiceAccountUpn `
+    -Message 'Active Directory service-account password'
+if ($null -eq $script:ActiveDirectoryCredential) {
+    throw 'Credential entry was canceled.'
 }
 
 switch ($Mode) {
-    'PrepareActiveDirectoryAccount' {
-        $parameters = ConvertTo-EngineParameter -Settings $settings -PrepareActiveDirectoryAccount
-        if (Invoke-Engine -Parameters $parameters -Description 'Preparing the Active Directory service account') {
-            Write-Host "`nRun ./Install.ps1 again and select 'Install or update' to deploy." -ForegroundColor Green
-        }
-    }
     'Validate' {
         $parameters = ConvertTo-EngineParameter -Settings $settings
         $null = Invoke-Engine -Parameters ($parameters + @{ ValidateOnly = $true }) -Description 'Validation'
@@ -576,7 +599,7 @@ switch ($Mode) {
         }
         # The engine displays its change summary and requests the final confirmation itself.
         if (Invoke-Engine -Parameters $parameters -Description 'Installation') {
-            Write-Host "`nNext steps: import ./HybridDeviceTagger.Management, run Connect-HybridDeviceTagger -ApiBaseUri 'https://$($settings.FunctionAppName).azurewebsites.net/api/management', and add tagging rules." -ForegroundColor Green
+            Write-Host "`nNext step: add tagging rules with the HybridDeviceTagger.Management module as shown above." -ForegroundColor Green
         }
     }
 }

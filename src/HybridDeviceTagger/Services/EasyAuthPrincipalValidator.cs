@@ -1,6 +1,20 @@
 /*
  * Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
- * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ * Copyright 2026 Andreas Lucas
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 using System.Text.Json;
@@ -34,30 +48,50 @@ public enum EasyAuthAuthorizationResult
 
 /// <summary>Validates the principal header emitted by App Service Easy Auth.</summary>
 /// <remarks>
-/// The header is trusted because the platform authentication middleware validates the Entra token
-/// and strips any client-supplied copy of the header before the request reaches the worker. The
-/// validator therefore checks structure and roles only; it does not verify tokens itself.
+/// App Service strips client-supplied <c>X-MS-CLIENT-PRINCIPAL</c> headers and injects its own after
+/// validating the token, so the header is trusted only when Easy Auth is enabled in front of the app.
+/// Only principals authenticated by Microsoft Entra (<c>auth_typ</c> <c>aad</c>) are accepted.
 /// </remarks>
 public static class EasyAuthPrincipalValidator
 {
-    /// <summary>The header in which Easy Auth passes the Base64-encoded JSON client principal.</summary>
+    /// <summary>The header containing the Base64-encoded Easy Auth principal JSON.</summary>
     private const string PrincipalHeader = "X-MS-CLIENT-PRINCIPAL";
 
-    /// <summary>The short claim type that carries Entra application roles.</summary>
+    /// <summary>The short Entra object ID claim type.</summary>
+    private const string ObjectIdClaim = "oid";
+
+    /// <summary>The URI form of the Entra object ID claim type.</summary>
+    private const string ObjectIdClaimUri =
+        "http://schemas.microsoft.com/identity/claims/objectidentifier";
+
+    /// <summary>The short application-role claim type.</summary>
     private const string RoleClaim = "roles";
 
-    /// <summary>The WS-Federation role claim type that Easy Auth may emit instead of <see cref="RoleClaim"/>.</summary>
+    /// <summary>The URI form of the role claim type.</summary>
     private const string RoleClaimUri = "http://schemas.microsoft.com/ws/2008/06/identity/claims/role";
 
     /// <summary>Returns whether the request contains a structurally valid Entra principal.</summary>
-    /// <param name="request">The request to inspect.</param>
-    /// <returns><see langword="true"/> when exactly one valid Entra (<c>aad</c>) principal header is present.</returns>
+    /// <param name="request">The HTTP request carrying the Easy Auth principal header.</param>
+    /// <returns><see langword="true"/> when the principal header is valid and contains claims.</returns>
     public static bool IsAuthenticated(HttpRequest request)
         => ReadClaims(request) is not null;
 
+    /// <summary>Gets the authenticated principal's Microsoft Entra object ID.</summary>
+    /// <param name="request">The HTTP request carrying the Easy Auth principal header.</param>
+    /// <param name="objectId">The object ID, or <see cref="Guid.Empty"/> when unavailable.</param>
+    /// <returns><see langword="true"/> when a valid principal contains a GUID object ID claim.</returns>
+    public static bool TryGetObjectId(HttpRequest request, out Guid objectId)
+    {
+        var claim = ReadClaims(request)?.FirstOrDefault(claim =>
+            string.Equals(claim.Type, ObjectIdClaim, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(claim.Type, ObjectIdClaimUri, StringComparison.OrdinalIgnoreCase));
+        return Guid.TryParse(claim?.Value, out objectId);
+    }
+
     /// <summary>Returns whether an Entra principal has at least one required application role.</summary>
-    /// <param name="request">The request to inspect.</param>
-    /// <param name="requiredRoles">Roles of which the principal must hold at least one; compared case-sensitively.</param>
+    /// <remarks>Role values are compared case-sensitively.</remarks>
+    /// <param name="request">The HTTP request carrying the Easy Auth principal header.</param>
+    /// <param name="requiredRoles">The application roles of which the principal needs at least one.</param>
     /// <returns>The authorization outcome.</returns>
     public static EasyAuthAuthorizationResult Authorize(
         HttpRequest request,
@@ -77,13 +111,13 @@ public static class EasyAuthPrincipalValidator
             : EasyAuthAuthorizationResult.Forbidden;
     }
 
-    /// <summary>Decodes and parses the Easy Auth principal header.</summary>
+    /// <summary>Decodes and parses the claims of the Easy Auth principal header.</summary>
     /// <remarks>
-    /// Missing, repeated, malformed, non-Entra, or claim-less headers are all treated as
-    /// unauthenticated rather than throwing, so malformed input cannot cause a server error.
+    /// Malformed Base64 or JSON, a missing or repeated header, a non-Entra provider, and an empty
+    /// claim list are treated as unauthenticated rather than raising errors.
     /// </remarks>
-    /// <param name="request">The request to inspect.</param>
-    /// <returns>The non-empty claim list, or <see langword="null"/> when no valid principal exists.</returns>
+    /// <param name="request">The HTTP request carrying the Easy Auth principal header.</param>
+    /// <returns>The non-empty claim list, or <see langword="null"/> when no valid Entra principal exists.</returns>
     private static IReadOnlyList<(string Type, string Value)>? ReadClaims(HttpRequest request)
     {
         if (!request.Headers.TryGetValue(PrincipalHeader, out var values) || values.Count != 1)

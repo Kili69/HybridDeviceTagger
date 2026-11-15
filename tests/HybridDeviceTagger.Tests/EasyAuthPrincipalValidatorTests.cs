@@ -44,6 +44,21 @@ public sealed class EasyAuthPrincipalValidatorTests
     }
 
     [Theory]
+    [InlineData("oid")]
+    [InlineData("http://schemas.microsoft.com/identity/claims/objectidentifier")]
+    public void TryGetObjectId_AcceptsSupportedObjectIdClaims(string objectIdClaimType)
+    {
+        var expected = Guid.Parse("22222222-2222-2222-2222-222222222222");
+        var request = new DefaultHttpContext().Request;
+        request.Headers["X-MS-CLIENT-PRINCIPAL"] = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes(
+                $$"""{"auth_typ":"aad","claims":[{"typ":"{{objectIdClaimType}}","val":"{{expected:D}}"}]}"""));
+
+        Assert.True(EasyAuthPrincipalValidator.TryGetObjectId(request, out var actual));
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
     [InlineData(null)]
     [InlineData("not-base64")]
     public void IsAuthenticated_RejectsMissingOrInvalidHeader(string? header)

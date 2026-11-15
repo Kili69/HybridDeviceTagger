@@ -1,6 +1,26 @@
 # HybridDeviceTagger Deployment Plan
 
-Status: Validated
+Status: Ready for Validation
+
+## Approved Change: Optional Key Vault Creation
+
+- Interactive installation asks whether to reuse an existing Key Vault or create a new one.
+- Existing-vault mode requests and validates the vault name, resource group, and subscription.
+- New-vault mode creates the vault in the Function App resource group and subscription, with Azure RBAC, soft delete, purge protection, disabled public access, a private endpoint in the configured private-endpoint subnet, and private DNS integration.
+- Storage deployment creates a Blob private endpoint and zone group, reuses an existing `privatelink.blob.core.windows.net` zone linked to the selected VNet, or creates and links the zone in the Function App resource group.
+- Noninteractive installation uses an explicit switch to select new-vault mode; existing-vault mode remains the default.
+- The installer writes and validates the current AD credential only after a newly selected vault has been deployed and the installation identity has access.
+- Bicep, PowerShell, documentation, and generated installation-package contents will be validated without deploying resources.
+
+### Validation Steps
+
+- [x] PowerShell parser and PSScriptAnalyzer validation
+- [x] Bicep compilation and linter diagnostics
+- [x] Conditional Key Vault, private endpoint, DNS, and RBAC template review
+- [x] .NET regression tests
+- [x] Installation-package build and content verification
+- [x] Documentation and whitespace validation
+- [ ] ARM validation and What-if with installation-specific credentials (not run unless explicitly requested)
 
 ## 1. Workload
 
@@ -41,9 +61,8 @@ Status: Validated
 - AD credentials are entered through local PowerShell credential dialogs and are not passed to ARM.
 - Key Vault uses RBAC, soft delete, purge protection, disabled public access, and private networking.
 - `kili@bloedgelaber.de` temporarily has `Key Vault Secrets Officer` on the dedicated vault for bootstrap; remove this assignment after deployment verification.
-- AD account creation or password reset requires separate explicit confirmation. The installer prefers LDAPS and uses the Active Directory PowerShell module over Active Directory Web Services when LDAPS is unavailable and LDAP fallback was approved.
-- Function read and bind fallback uses Negotiate authentication with LDAP signing and sealing on port 389. Automatic password rotation remains deferred until LDAPS is available.
-- `pwdLastSet=-1` prevents password change at first logon.
+- The AD service account must exist before installation; the installer validates it early and never creates it or performs an administrative password reset.
+- The installer and Linux Flex Consumption Function discover domain controllers through AD DNS SRV records, prefer LDAPS, and use LDAP with StartTLS as the secure fallback.
 
 ## 6. Execution Gates
 
@@ -59,6 +78,16 @@ Status: Validated
 - [x] Verify Function App, managed identity, RBAC, settings, package deployment, and health.
 
 ## 7. Validation Proof
+
+Optional Key Vault creation local validation completed: `2026-09-17`.
+
+- `Deployment/main.bicep` compiled through the Bicep MCP compiler with no diagnostics after separating existing- and new-vault role-assignment dependencies.
+- `Deployment/Install-HybridDeviceTagger.ps1` and `scripts/New-InstallationPackage.ps1` passed PowerShell parsing and PSScriptAnalyzer with zero warning- or error-level findings.
+- The complete .NET test suite passed with 89/89 tests.
+- Static review verified Function-mediated Key Vault initialization, private endpoint creation, linked private DNS zone reuse, secret initialization outside ARM, and idempotent continuation after partial deployment.
+- `artifacts/HybridDeviceTagger-0.1.20260905.16.zip` was rebuilt and contains the updated installer, both Bicep files, documentation, and a complete inner Function package.
+- Editor diagnostics and `git diff --check` completed without findings.
+- ARM validation and What-if were not run because this change request did not authorize validation against a concrete Azure deployment context.
 
 Certificate-management release validation completed: `2026-09-05`.
 
@@ -149,7 +178,7 @@ Membership release validation completed: `2026-09-04`.
 - AD DNS resolves `sahdtagger.blob.core.windows.net` through `sahdtagger.privatelink.blob.core.windows.net` to `10.0.3.7`; the Function package deployment then completed successfully.
 - Function App `func-hybriddevicetagger` is running on FC1 with the .NET 8 isolated runtime and the expected VNet integration. Azure discovered `DeviceTaggerFunction` and `PasswordRotationFunction`.
 - Managed identity `19346b5c-09d0-4ac5-a4fd-03b8253f7e01` has `Storage Blob Data Owner`, `Key Vault Secrets Officer`, and Microsoft Graph `Device.ReadWrite.All` at the intended scopes.
-- Temporary `Key Vault Secrets Officer` access for installation user `kili@bloedgelaber.de` was removed after verification.
+- AD credential initialization is performed by the Function managed identity through the Entra-protected management API; the installation user has no Key Vault data role.
 
 Commands and checks executed:
 

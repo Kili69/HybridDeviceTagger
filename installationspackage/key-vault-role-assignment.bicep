@@ -1,6 +1,20 @@
 /*
  * Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
- * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ * Copyright 2026 Andreas Lucas
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 targetScope = 'resourceGroup'
@@ -8,33 +22,74 @@ targetScope = 'resourceGroup'
 @description('Name of the existing Key Vault.')
 param keyVaultName string
 
-@description('Names of the existing secrets to which the role is assigned.')
-param secretNames string[]
+@description('Secrets to which the role is assigned. An empty list assigns the role on the whole vault, which is intended only for a vault dedicated to HybridDeviceTagger.')
+param secretNames string[] = []
 
-@description('Object ID of the Function App managed identity.')
+@description('Missing secrets from secretNames that are created as unusable placeholders so that the secret-scoped role can be assigned. Existing secrets must never be listed, because their value would be replaced.')
+param placeholderSecretNames string[] = []
+
+@description('Random placeholder value. It cannot authenticate to Active Directory.')
+@secure()
+param placeholderValue string = newGuid()
+
+@description('Object ID of the role-assignment principal.')
 param principalId string
+
+@description('Directory object type of the role-assignment principal.')
+@allowed([
+  'ServicePrincipal'
+  'User'
+])
+param principalType string = 'ServicePrincipal'
 
 @description('Fully qualified role definition resource ID.')
 param roleDefinitionId string
 
-@description('Existing Key Vault that contains the password secrets; referenced, never modified.')
+@description('Content type that marks a placeholder secret. The Function replaces only secrets with this marker during credential initialization.')
+var placeholderContentType = 'application/vnd.hybriddevicetagger.placeholder'
+
+@description('Existing Key Vault that contains the password secrets.')
 resource keyVault 'Microsoft.KeyVault/vaults@2024-11-01' existing = {
   name: keyVaultName
 }
 
-@description('Existing secrets used as the role-assignment scopes. Each secret must exist before deployment.')
+@description('Placeholder secrets for missing password secrets, so that the role can be scoped to them before the Function initializes or rotates the password.')
+resource placeholderSecrets 'Microsoft.KeyVault/vaults/secrets@2024-11-01' = [for secretName in placeholderSecretNames: {
+  name: secretName
+  parent: keyVault
+  properties: {
+    value: placeholderValue
+    contentType: placeholderContentType
+  }
+}]
+
+@description('Password secrets used as role-assignment scopes.')
 resource secrets 'Microsoft.KeyVault/vaults/secrets@2024-11-01' existing = [for secretName in secretNames: {
   name: secretName
   parent: keyVault
 }]
 
-@description('Secret-scoped role assignments for the managed identity, one per secret, with deterministic names for idempotent redeployment.')
-resource roleAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for (secretName, index) in secretNames: {
+@description('Secret-scoped role assignments with deterministic names for idempotent redeployment.')
+resource secretRoleAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for (secretName, index) in secretNames: {
   name: guid(secrets[index].id, principalId, roleDefinitionId)
   scope: secrets[index]
   properties: {
     principalId: principalId
-    principalType: 'ServicePrincipal'
+    principalType: principalType
     roleDefinitionId: roleDefinitionId
   }
+  dependsOn: [
+    placeholderSecrets
+  ]
 }]
+
+@description('Vault-scoped role assignment, used only for a vault dedicated to HybridDeviceTagger.')
+resource vaultRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (empty(secretNames)) {
+  name: guid(keyVault.id, principalId, roleDefinitionId)
+  scope: keyVault
+  properties: {
+    principalId: principalId
+    principalType: principalType
+    roleDefinitionId: roleDefinitionId
+  }
+}

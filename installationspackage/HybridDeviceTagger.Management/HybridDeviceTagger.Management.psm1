@@ -3,69 +3,91 @@
 # Author: andreas.lucas@outlook.com (aka Kili)
 
 <#
-DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+Copyright 2026 Andreas Lucas
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+SPDX-License-Identifier: Apache-2.0
+#>
+
+<#
+.SYNOPSIS
+PowerShell client for the Entra-protected HybridDeviceTagger management API.
+
+.DESCRIPTION
+The module maintains one connection per PowerShell module instance. Connect-HybridDeviceTagger
+initializes that connection from the current Azure CLI sign-in. All other exported commands reuse
+the connection and refresh its delegated access token shortly before expiry.
+
+Read commands return structured objects. Write and action commands use PowerShell ShouldProcess;
+destructive or security-sensitive commands additionally use high-impact confirmation. Collection
+updates send the latest API ETag in If-Match so concurrent changes fail instead of being overwritten.
+
+The module does not require direct access to Active Directory, Key Vault, Blob Storage, Microsoft
+Graph, or Azure Resource Manager. Those operations are performed by the Function App after the
+management API has authorized the caller.
+
+.NOTES
+Requires PowerShell 7.2 or later, Azure CLI, an existing az login session, and network access to the
+Function App. Importing the module does not authenticate or make a network request.
+
+The connection and access token exist only in module scope for the current PowerShell process.
+Disconnect by removing the module or closing the PowerShell session.
+
+.LINK
+https://github.com/Kili69/HybridDeviceTagger
 #>
 
 Set-StrictMode -Version Latest
-# Module-scoped connection created by Connect-HybridDeviceTagger and reused by all cmdlets.
+
+# Shared only by commands in this module instance; never persisted and cleared after failed validation.
 $script:Connection = $null
 
 <#
 .SYNOPSIS
-Discovers the Entra token scope of a management API deployment.
+Acquires or refreshes the delegated management API access token.
 
 .DESCRIPTION
-Reads the anonymous /authentication metadata endpoint and requires a scope in the form
-api://<client ID>/.default.
-
-.PARAMETER ApiBaseUri
-Absolute URI of the management API, including the /api/management path.
+Calls Azure CLI for the api://<client-id>/.default scope and stores the token and normalized expiry
+on the module-scoped connection. Both Azure CLI expiry formats are supported. If Azure CLI omits an
+expiry, a conservative five-minute lifetime forces an early refresh on the next request.
 
 .OUTPUTS
-System.String
-#>
-function Get-HybridDeviceTaggerTokenScope {
-    param([Parameter(Mandatory)][uri]$ApiBaseUri)
+None.
 
-    try {
-        $metadata = Invoke-RestMethod `
-            -Method Get `
-            -Uri "$($ApiBaseUri.AbsoluteUri.TrimEnd('/'))/authentication"
-    }
-    catch {
-        throw "Unable to read HybridDeviceTagger authentication metadata: $($_.Exception.Message)"
-    }
-
-    $tokenScope = [string]$metadata.tokenScope
-    if ($tokenScope -notmatch '^api://[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}/\.default$') {
-        throw 'HybridDeviceTagger authentication metadata returned an invalid token scope.'
-    }
-
-    $tokenScope
-}
-
-<#
-.SYNOPSIS
-Acquires a delegated access token for the connected management API through the Azure CLI.
-
-.DESCRIPTION
-Stores the token and its expiry in the module-scoped connection. The expiry is read from expires_on
-or expiresOn; when neither is returned, the token is treated as valid for five minutes.
+.NOTES
+Private module function. It requires an initialized connection and never writes the token to the
+success stream.
 #>
 function Initialize-HybridDeviceTaggerToken {
+    # Fail before accessing the connection when the external authentication dependency is unavailable.
     if (-not (Get-Command az -CommandType Application -ErrorAction SilentlyContinue)) {
         throw 'Azure CLI is required. Install Azure CLI, run az login, and try again.'
     }
 
+    # The .default scope requests the delegated permissions already consented for this API audience.
     $tokenResponse = az account get-access-token `
-        --scope $script:Connection.TokenScope `
+        --scope "api://$($script:Connection.ClientId)/.default" `
         --output json `
         --only-show-errors | ConvertFrom-Json
+
+    # Azure CLI failures and malformed success responses are both unusable authentication results.
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$tokenResponse.accessToken)) {
-        throw "Unable to obtain an Entra access token for $($script:Connection.TokenScope). Run 'az login --scope $($script:Connection.TokenScope)' and try again."
+        throw "Unable to obtain an Entra access token for api://$($script:Connection.ClientId). Run 'az login --scope api://$($script:Connection.ClientId)/.default' and try again."
     }
 
     $script:Connection.AccessToken = [string]$tokenResponse.accessToken
+
+    # Azure CLI versions expose either Unix seconds or a formatted date. Normalize both representations.
     $script:Connection.ExpiresOn = if ($tokenResponse.PSObject.Properties['expires_on']) {
         [DateTimeOffset]::FromUnixTimeSeconds([long]$tokenResponse.expires_on)
     }
@@ -75,22 +97,32 @@ function Initialize-HybridDeviceTaggerToken {
             [Globalization.CultureInfo]::InvariantCulture)
     }
     else {
+        # Unknown expiry is deliberately short-lived and never creates an indefinitely valid session.
         [DateTimeOffset]::UtcNow.AddMinutes(5)
     }
 }
 
 <#
 .SYNOPSIS
-Ensures that a connection exists and that its access token is valid for at least two minutes.
+Ensures that a usable management API connection and access token exist.
 
 .DESCRIPTION
-Throws when Connect-HybridDeviceTagger has not been run. Refreshes a missing or expiring token.
+Rejects commands executed before Connect-HybridDeviceTagger and refreshes the delegated token when
+it is missing or expires within two minutes. The refresh margin prevents expiry during an API call.
+
+.OUTPUTS
+None.
+
+.NOTES
+Private module function.
 #>
 function Assert-HybridDeviceTaggerConnection {
+    # Public operations cannot infer the deployment or token audience without an explicit connection.
     if ($null -eq $script:Connection) {
         throw 'No HybridDeviceTagger API connection exists. Run Connect-HybridDeviceTagger first.'
     }
 
+    # Refresh two minutes early to cover request latency and synchronous management operations.
     if ([string]::IsNullOrWhiteSpace($script:Connection.AccessToken) -or
         $script:Connection.ExpiresOn -le [DateTimeOffset]::UtcNow.AddMinutes(2)) {
         Initialize-HybridDeviceTaggerToken
@@ -99,30 +131,34 @@ function Assert-HybridDeviceTaggerConnection {
 
 <#
 .SYNOPSIS
-Sends an authenticated request to the connected management API.
+Sends one authenticated request to the HybridDeviceTagger management API.
 
 .DESCRIPTION
-Adds the bearer token, an optional If-Match header for optimistic concurrency, and a compact JSON
-body when Body is bound. Request failures are rethrown with the method and path.
+Builds the endpoint URI from the active connection, serializes optional request bodies as JSON, adds
+an optional If-Match header, and translates REST failures into terminating errors with the method and
+relative path.
 
 .PARAMETER Method
-HTTP method: Get, Put, Post, or Delete.
+Specifies the supported HTTP method.
 
 .PARAMETER Path
-Path relative to the management API base URI.
+Specifies the API path relative to the configured base URI.
 
 .PARAMETER Body
-Object serialized as the JSON request body. The body is sent only when this parameter is bound.
+Specifies an optional object serialized as UTF-8 JSON with a maximum depth of 20.
 
 .PARAMETER ETag
-Configuration ETag sent in the If-Match header when not empty.
+Specifies an optional entity tag used for optimistic concurrency through If-Match.
 
 .PARAMETER IncludeResponseHeaders
-Returns the response content together with the response ETag.
+Returns an envelope containing response content and the response ETag.
 
 .OUTPUTS
-The deserialized response, or a PSCustomObject with Content and ETag properties when
-IncludeResponseHeaders is specified.
+The deserialized API response, or an object with Content and ETag when response headers are requested.
+
+.NOTES
+Private module function. API failures remain terminating errors so automation cannot interpret a
+failed operation as success.
 #>
 function Invoke-HybridDeviceTaggerRequest {
     param(
@@ -133,22 +169,27 @@ function Invoke-HybridDeviceTaggerRequest {
         [switch]$IncludeResponseHeaders
     )
 
+    # Authentication state is checked for every request, not only when the connection is created.
     Assert-HybridDeviceTaggerConnection
     $headers = @{ Authorization = "Bearer $($script:Connection.AccessToken)" }
     if (-not [string]::IsNullOrWhiteSpace($ETag)) {
+        # If-Match turns collection writes into optimistic-concurrency operations.
         $headers['If-Match'] = $ETag
     }
 
+    # Normalize the relative path to one separator without changing the configured management base path.
     $parameters = @{
         Method = $Method
         Uri = "$($script:Connection.ApiBaseUri)/$($Path.TrimStart('/'))"
         Headers = $headers
     }
     if ($PSBoundParameters.ContainsKey('Body')) {
+        # Depth 20 preserves nested rules, arrays, and extension-attribute dictionaries.
         $parameters.ContentType = 'application/json; charset=utf-8'
         $parameters.Body = ConvertTo-Json -InputObject $Body -Depth 20 -Compress
     }
     if ($IncludeResponseHeaders) {
+        # Invoke-RestMethod assigns the response headers to this local variable after completion.
         $parameters.ResponseHeadersVariable = 'responseHeaders'
     }
 
@@ -156,10 +197,12 @@ function Invoke-HybridDeviceTaggerRequest {
         $result = Invoke-RestMethod @parameters
     }
     catch {
+        # Add endpoint context and preserve a terminating failure for scripts and deployment pipelines.
         throw "HybridDeviceTagger API request '$Method $Path' failed: $($_.Exception.Message)"
     }
 
     if ($IncludeResponseHeaders) {
+        # Snapshot callers need the resource and its version from the same HTTP response.
         return [pscustomobject]@{
             Content = $result
             ETag = [string]$responseHeaders['ETag']
@@ -170,34 +213,41 @@ function Invoke-HybridDeviceTaggerRequest {
 
 <#
 .SYNOPSIS
-Reads the current tagging-rule configuration together with its ETag.
+Gets the tagging configuration and its current ETag.
 
 .OUTPUTS
-PSCustomObject with Content (the configuration) and ETag properties.
+An object with Content and ETag properties.
+
+.NOTES
+Private module function used immediately before ETag-protected rule changes.
 #>
 function Get-HybridDeviceTaggerConfigurationSnapshot {
+    # Centralized snapshot acquisition ensures every rule mutation receives the current response ETag.
     Invoke-HybridDeviceTaggerRequest -Method Get -Path 'tagging-rules' -IncludeResponseHeaders
 }
 
 <#
 .SYNOPSIS
-Polls an operation status every 10 seconds until the requested invocation finishes.
+Polls the status endpoint until a queued operation has finished.
 
 .DESCRIPTION
-Returns when the state is Succeeded or Failed. Throws when a different invocation has replaced the
-requested one in the status endpoint or when the timeout elapses.
+Polls every 10 seconds. The run belongs to the request only while the status reports the same
+invocation ID; a different ID means a newer run replaced the status, which is reported as an error.
 
 .PARAMETER Operation
-Operation to poll: device-tagging or password-rotation.
+The operation status route, device-tagging or password-rotation.
 
 .PARAMETER InvocationId
-Invocation ID returned when the operation was queued.
+The invocation ID returned when the request was accepted.
 
 .PARAMETER TimeoutSeconds
-Maximum time to wait before failing.
+The maximum polling time.
 
 .OUTPUTS
-System.Management.Automation.PSCustomObject. The final operation status.
+System.Management.Automation.PSCustomObject containing the final operation status.
+
+.NOTES
+Private module function used by the -Wait switch of the action commands.
 #>
 function Wait-HybridDeviceTaggerOperation {
     param(
@@ -228,11 +278,14 @@ Connects the current PowerShell session to the HybridDeviceTagger management API
 
 .DESCRIPTION
 Uses the existing Azure CLI sign-in to acquire a delegated Microsoft Entra access token and stores
-the API URI, REST-discovered token scope, token, and expiry in module scope. All other module cmdlets
-reuse this connection. By default, the command validates it by reading the tagging configuration.
+the API URI, token audience, token, and expiry in module scope. All other module cmdlets reuse this
+connection. By default, the command validates the connection by reading the tagging configuration.
 
 .PARAMETER ApiBaseUri
 Specifies the absolute HTTPS URI of the management API, including the /api/management path.
+
+.PARAMETER ClientId
+Specifies the non-secret Microsoft Entra application client ID used as the access-token audience.
 
 .PARAMETER SkipValidation
 Stores the connection without making the initial tagging-configuration request.
@@ -249,7 +302,7 @@ Connect-HybridDeviceTagger
 Connects to the production management API using the existing Azure CLI sign-in.
 
 .EXAMPLE
-Connect-HybridDeviceTagger -ApiBaseUri 'https://example.azurewebsites.net/api/management' -PassThru
+Connect-HybridDeviceTagger -ApiBaseUri 'https://example.azurewebsites.net/api/management' -ClientId $clientId -PassThru
 
 Connects to another deployment and returns its non-sensitive connection information.
 #>
@@ -258,37 +311,47 @@ function Connect-HybridDeviceTagger {
     param(
         [uri]$ApiBaseUri = 'https://func-hybriddevicetagger.azurewebsites.net/api/management',
 
+        [ValidatePattern('^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')]
+        [string]$ClientId = '5e324803-5aed-4e5d-b49f-a4bfceddcda8',
+
         [switch]$SkipValidation,
 
         [switch]$PassThru
     )
 
+    # Reject relative and unencrypted endpoints before creating authentication state.
     if (-not $ApiBaseUri.IsAbsoluteUri -or $ApiBaseUri.Scheme -ne 'https') {
         throw 'ApiBaseUri must be an absolute HTTPS URI.'
     }
 
+    # Normalize the base URI and initialize the token fields before the first acquisition.
     $script:Connection = [pscustomobject]@{
         PSTypeName = 'HybridDeviceTagger.Management.Connection'
         ApiBaseUri = $ApiBaseUri.AbsoluteUri.TrimEnd('/')
-        TokenScope = Get-HybridDeviceTaggerTokenScope -ApiBaseUri $ApiBaseUri
+        ClientId = $ClientId
         AccessToken = $null
         ExpiresOn = [DateTimeOffset]::MinValue
     }
     try {
+        # Authenticate eagerly so Connect reports authentication problems immediately.
         Initialize-HybridDeviceTaggerToken
         if (-not $SkipValidation) {
+            # This read validates reachability, token audience, Easy Auth, and caller authorization.
             $null = Get-HybridDeviceTaggerConfigurationSnapshot
         }
     }
     catch {
+        # A failed token request or validation read must not leave a partial connection behind.
         $script:Connection = $null
         throw
     }
 
     if ($PassThru) {
+        # Explicit projection guarantees that the access token cannot enter the success pipeline.
         [pscustomobject]@{
             PSTypeName = 'HybridDeviceTagger.Management.ConnectionInfo'
             ApiBaseUri = $script:Connection.ApiBaseUri
+            ClientId = $script:Connection.ClientId
             ExpiresOn = $script:Connection.ExpiresOn
         }
     }
@@ -326,9 +389,13 @@ function Get-HybridDeviceTaggerRule {
         [string]$Name
     )
 
+    # The common snapshot helper also gives this read the same response-shape handling as writes.
     $snapshot = Get-HybridDeviceTaggerConfigurationSnapshot
+
+    # Array coercion provides stable zero-, one-, or many-object pipeline behavior.
     $rules = @($snapshot.Content.rules)
     if ($PSBoundParameters.ContainsKey('Name')) {
+        # Parameter presence controls filtering; ValidateLength already rejects an empty supplied name.
         $rules | Where-Object { $_.name -ieq $Name }
     }
     else {
@@ -356,6 +423,7 @@ function Get-HybridDeviceTaggerLastRunStatus {
     [CmdletBinding()]
     param()
 
+    # Return the persisted API document unchanged so future server fields remain available to callers.
     Invoke-HybridDeviceTaggerRequest -Method Get -Path 'status/device-tagging'
 }
 
@@ -379,6 +447,7 @@ function Get-HybridDeviceTaggerPasswordRotationStatus {
     [CmdletBinding()]
     param()
 
+    # The endpoint exposes operational metadata only and never returns current or staged passwords.
     Invoke-HybridDeviceTaggerRequest -Method Get -Path 'status/password-rotation'
 }
 
@@ -413,10 +482,12 @@ function Get-HybridDeviceTaggerTrace {
     [CmdletBinding()]
     param()
 
+    # JSONL contains one independent JSON object per line, rather than one enclosing JSON array.
     $content = Invoke-HybridDeviceTaggerRequest -Method Get -Path 'traces/device-tagging/latest'
     foreach ($line in $content -split "`r?`n") {
         if (-not [string]::IsNullOrWhiteSpace($line)) {
             $traceEvent = $line | ConvertFrom-Json
+            # Select the concise module view without flattening the object returned to the pipeline.
             $traceEvent.PSObject.TypeNames.Insert(0, 'HybridDeviceTagger.TraceEvent')
             $traceEvent
         }
@@ -425,188 +496,19 @@ function Get-HybridDeviceTaggerTrace {
 
 <#
 .SYNOPSIS
-Replaces the complete HybridDeviceTagger tagging-rule configuration.
+Adds or replaces one or more named HybridDeviceTagger rules.
 
 .DESCRIPTION
-Reads the latest configuration ETag and atomically replaces all rules through the management API.
-Rules omitted from Rule are removed. The API validates the complete configuration before persisting it.
+Accepts either one complete rule or an object with a Rules property. Each rule is sent separately to the
+management API. A rule with the same case-insensitive name is completely replaced; other rules are preserved.
 
 .PARAMETER Rule
-Specifies the complete desired rule set. At least one and at most 100 rules are required.
+Specifies one complete rule object or an object whose Rules property contains up to 100 complete rules.
+Each rule must contain Name, Description, BaseDn, ExtensionAttributes, EntraGroupIds, and
+AdministrativeUnitIds as required by the management API.
 
 .OUTPUTS
 System.Management.Automation.PSCustomObject representing the persisted configuration when applied.
-
-.EXAMPLE
-$rules = @(Get-HybridDeviceTaggerRule)
-Set-HybridDeviceTaggerRuleConfiguration -Rule $rules -WhatIf
-
-Previews replacement of the complete configuration without changing it.
-
-.EXAMPLE
-Set-HybridDeviceTaggerRuleConfiguration -Rule $rules -Confirm
-
-Replaces the complete configuration after confirmation.
-#>
-function Set-HybridDeviceTaggerRuleConfiguration {
-    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
-    param(
-        [Parameter(Mandatory)][ValidateNotNull()][ValidateCount(1, 100)][object[]]$Rule
-    )
-
-    $snapshot = Get-HybridDeviceTaggerConfigurationSnapshot
-    if ($PSCmdlet.ShouldProcess($script:Connection.ApiBaseUri, 'Replace all HybridDeviceTagger tagging rules')) {
-        Invoke-HybridDeviceTaggerRequest `
-            -Method Put `
-            -Path 'tagging-rules' `
-            -Body $Rule `
-            -ETag $snapshot.ETag
-    }
-}
-
-<#
-.SYNOPSIS
-Prompts until a nonempty value is entered.
-
-.PARAMETER Prompt
-Prompt text displayed to the user.
-
-.OUTPUTS
-System.String. The trimmed value.
-#>
-function Read-HybridDeviceTaggerRequiredValue {
-    param([Parameter(Mandatory)][string]$Prompt)
-
-    do {
-        $value = Read-Host $Prompt
-        if (-not [string]::IsNullOrWhiteSpace($value)) {
-            return $value.Trim()
-        }
-
-        Write-Host 'A value is required.' -ForegroundColor Yellow
-    } while ($true)
-}
-
-<#
-.SYNOPSIS
-Prompts for an optional comma-separated list of Entra object IDs.
-
-.DESCRIPTION
-Empty input returns an empty array. Input is requested again until all entries are unique,
-nonempty GUIDs.
-
-.PARAMETER Prompt
-Prompt text displayed to the user.
-
-.OUTPUTS
-System.String[]
-#>
-function Read-HybridDeviceTaggerObjectIds {
-    param([Parameter(Mandatory)][string]$Prompt)
-
-    do {
-        $inputValue = Read-Host "$Prompt (comma-separated, Enter for none)"
-        if ([string]::IsNullOrWhiteSpace($inputValue)) {
-            return @()
-        }
-
-        $objectIds = @($inputValue.Split(',') | ForEach-Object { $_.Trim() })
-        $invalidObjectIds = @($objectIds | Where-Object {
-            $parsedObjectId = [guid]::Empty
-            -not [guid]::TryParse($_, [ref]$parsedObjectId) -or
-                $parsedObjectId -eq [guid]::Empty
-        })
-        if ($invalidObjectIds.Count -eq 0 -and
-            @($objectIds | Select-Object -Unique).Count -eq $objectIds.Count) {
-            return $objectIds
-        }
-
-        Write-Host 'Enter unique, nonempty GUIDs separated by commas.' -ForegroundColor Yellow
-    } while ($true)
-}
-
-<#
-.SYNOPSIS
-Interactively collects a complete tagging rule.
-
-.DESCRIPTION
-Prompts for the name, description, and base DN, then for extensionAttribute1-15 values, Entra group
-IDs, and administrative-unit IDs. Repeats the action prompts until at least one action is configured.
-
-.OUTPUTS
-System.Collections.Specialized.OrderedDictionary in the management API rule format.
-#>
-function Read-HybridDeviceTaggerRule {
-    $name = Read-HybridDeviceTaggerRequiredValue -Prompt 'Rule name'
-    $description = Read-HybridDeviceTaggerRequiredValue -Prompt 'Rule description'
-    $baseDn = Read-HybridDeviceTaggerRequiredValue -Prompt 'Active Directory base DN'
-
-    do {
-        $extensionAttributes = [System.Collections.Generic.Dictionary[string, string]]::new(
-            [StringComparer]::OrdinalIgnoreCase
-        )
-        do {
-            $attributeName = (Read-Host 'Extension attribute name (extensionAttribute1-15, Enter to finish)').Trim()
-            if ([string]::IsNullOrWhiteSpace($attributeName)) {
-                break
-            }
-            if ($attributeName -notmatch '^extensionAttribute(?:[1-9]|1[0-5])$') {
-                Write-Host 'Use extensionAttribute1 through extensionAttribute15.' -ForegroundColor Yellow
-                continue
-            }
-            if ($extensionAttributes.ContainsKey($attributeName)) {
-                Write-Host "Attribute '$attributeName' was already entered." -ForegroundColor Yellow
-                continue
-            }
-
-            $extensionAttributes[$attributeName] = Read-HybridDeviceTaggerRequiredValue `
-                -Prompt "Value for $attributeName"
-        } while ($true)
-
-        $entraGroupIds = @(Read-HybridDeviceTaggerObjectIds -Prompt 'Entra security-group object IDs')
-        $administrativeUnitIds = @(Read-HybridDeviceTaggerObjectIds -Prompt 'Administrative-unit object IDs')
-        if ($extensionAttributes.Count -eq 0 -and
-            $entraGroupIds.Count -eq 0 -and
-            $administrativeUnitIds.Count -eq 0) {
-            Write-Host 'Configure at least one extension attribute, Entra group, or administrative unit.' -ForegroundColor Yellow
-        }
-    } while ($extensionAttributes.Count -eq 0 -and
-        $entraGroupIds.Count -eq 0 -and
-        $administrativeUnitIds.Count -eq 0)
-
-    [ordered]@{
-        name = $name
-        description = $description
-        baseDn = $baseDn
-        extensionAttributes = $extensionAttributes
-        entraGroupIds = $entraGroupIds
-        administrativeUnitIds = $administrativeUnitIds
-    }
-}
-
-<#
-.SYNOPSIS
-Adds or replaces one named HybridDeviceTagger rule.
-
-.DESCRIPTION
-Reads the latest configuration ETag and sends one complete rule to the management API. If a rule with
-the same case-insensitive name exists, that rule is completely replaced. Other rules are preserved.
-Without Rule, the cmdlet interactively collects all rule fields and actions.
-
-.PARAMETER Rule
-Specifies one complete rule object. It must contain Name, Description, BaseDn, ExtensionAttributes,
-EntraGroupIds, and AdministrativeUnitIds as required by the management API.
-
-.PARAMETER Interactive
-Starts guided rule configuration. This is the default when Rule is omitted.
-
-.OUTPUTS
-System.Management.Automation.PSCustomObject representing the persisted configuration when applied.
-
-.EXAMPLE
-Add-HybridDeviceTaggerRule
-
-Interactively collects and persists a complete tagging rule.
 
 .EXAMPLE
 $rule = @{
@@ -625,37 +527,63 @@ Previews adding or replacing the Kiosk devices rule.
 $rule | Add-HybridDeviceTaggerRule
 
 Adds or replaces a complete rule received from the pipeline.
+
+.EXAMPLE
+$configuration = @{ Rules = @($kioskRule, $workstationRule) }
+Add-HybridDeviceTaggerRule -Rule $configuration
+
+Adds or replaces every rule in the Rules property while preserving all other existing rules.
 #>
 function Add-HybridDeviceTaggerRule {
-    [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Interactive')]
+    [CmdletBinding(SupportsShouldProcess)]
     param(
-        [Parameter(Mandatory, ValueFromPipeline, ParameterSetName = 'Rule')]
-        [ValidateNotNull()]
-        [object]$Rule,
-
-        [Parameter(ParameterSetName = 'Interactive')]
-        [switch]$Interactive
+        [Parameter(Mandatory, ValueFromPipeline)][ValidateNotNull()][object]$Rule
     )
 
     process {
-        $effectiveRule = if ($PSCmdlet.ParameterSetName -eq 'Rule') {
-            $Rule
+        # Accept one rule or an exported configuration with a case-insensitive Rules property.
+        $rulesProperty = $null
+        if ($Rule -is [System.Collections.IDictionary]) {
+            # Hashtable keys do not participate in PSObject property lookup, so inspect keys explicitly.
+            $rulesKey = $Rule.Keys |
+                Where-Object { [string]$_ -ieq 'Rules' } |
+                Select-Object -First 1
+            if ($null -ne $rulesKey) {
+                $rulesProperty = $Rule[$rulesKey]
+            }
         }
         else {
-            Read-HybridDeviceTaggerRule
-        }
-        $name = [string]$effectiveRule.name
-        if ([string]::IsNullOrWhiteSpace($name)) {
-            throw 'Rule must contain a non-empty Name property.'
+            # PSCustomObject and deserialized JSON input expose Rules through the property collection.
+            $property = $Rule.PSObject.Properties |
+                Where-Object Name -IEQ 'Rules' |
+                Select-Object -First 1
+            if ($null -ne $property) {
+                $rulesProperty = $property.Value
+            }
         }
 
-        $snapshot = Get-HybridDeviceTaggerConfigurationSnapshot
-        if ($PSCmdlet.ShouldProcess($name, 'Add or replace HybridDeviceTagger tagging rule')) {
-            Invoke-HybridDeviceTaggerRequest `
-                -Method Put `
-                -Path "tagging-rules/$([uri]::EscapeDataString($name))" `
-                -Body $effectiveRule `
-                -ETag $snapshot.ETag
+        # A plain rule becomes a one-item batch; a configuration wrapper contributes its Rules collection.
+        $rules = if ($null -ne $rulesProperty) { @($rulesProperty) } else { @($Rule) }
+        if ($rules.Count -lt 1 -or $rules.Count -gt 100) {
+            throw 'Rules must contain between 1 and 100 rule objects.'
+        }
+
+        foreach ($candidateRule in $rules) {
+            # Only the routing key is checked locally; the API remains authoritative for the full schema.
+            $name = [string]$candidateRule.name
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                throw 'Each rule must contain a non-empty Name property.'
+            }
+
+            # Every successful upsert changes the collection ETag, so refresh for each rule.
+            $snapshot = Get-HybridDeviceTaggerConfigurationSnapshot
+            if ($PSCmdlet.ShouldProcess($name, 'Add or replace HybridDeviceTagger tagging rule')) {
+                Invoke-HybridDeviceTaggerRequest `
+                    -Method Put `
+                    -Path "tagging-rules/$([uri]::EscapeDataString($name))" `
+                    -Body $candidateRule `
+                    -ETag $snapshot.ETag
+            }
         }
     }
 }
@@ -690,8 +618,10 @@ function Remove-HybridDeviceTaggerRule {
         [Parameter(Mandatory, Position = 0)][ValidateLength(1, 128)][string]$Name
     )
 
+    # Couple the delete to the configuration version presented before user confirmation.
     $snapshot = Get-HybridDeviceTaggerConfigurationSnapshot
     if ($PSCmdlet.ShouldProcess($Name, 'Remove HybridDeviceTagger tagging rule')) {
+        # URI escaping keeps valid rule names with spaces or reserved characters in one route segment.
         Invoke-HybridDeviceTaggerRequest `
             -Method Delete `
             -Path "tagging-rules/$([uri]::EscapeDataString($Name))" `
@@ -737,8 +667,10 @@ function Invoke-HybridDeviceTagging {
         [int]$TimeoutSeconds = 1800
     )
 
+    # Validate before ShouldProcess so the confirmation target always refers to an active connection.
     Assert-HybridDeviceTaggerConnection
     if ($PSCmdlet.ShouldProcess($script:Connection.ApiBaseUri, 'Run device tagging immediately')) {
+        # The action endpoint queues the run and returns HTTP 202 with its invocation ID.
         $accepted = Invoke-HybridDeviceTaggerRequest -Method Post -Path 'actions/device-tagging'
         if (-not $Wait) {
             return $accepted
@@ -747,6 +679,55 @@ function Invoke-HybridDeviceTagging {
             -Operation 'device-tagging' `
             -InvocationId ([string]$accepted.invocationId) `
             -TimeoutSeconds $TimeoutSeconds
+    }
+}
+
+<#
+.SYNOPSIS
+Initializes the Active Directory service-account credential through the Function App.
+
+.DESCRIPTION
+Sends the password to the Entra-protected management API. The Function validates the credential
+against Active Directory and stores it in Key Vault through its managed identity. Initialization
+fails when the current credential secret already contains a password; only a missing secret or the
+unusable placeholder created by the installer is replaced.
+
+.PARAMETER Password
+Specifies the initial Active Directory service-account password as a SecureString.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject confirming successful initialization.
+
+.EXAMPLE
+$password = Read-Host 'AD service-account password' -AsSecureString
+Initialize-HybridDeviceTaggerActiveDirectoryCredential -Password $password -Confirm
+
+Validates and stores the initial credential without granting the operator Key Vault data access.
+#>
+function Initialize-HybridDeviceTaggerActiveDirectoryCredential {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory)][ValidateNotNull()][Security.SecureString]$Password
+    )
+
+    # Establish the HTTPS target before asking permission to transmit the credential.
+    Assert-HybridDeviceTaggerConnection
+    if ($PSCmdlet.ShouldProcess(
+        $script:Connection.ApiBaseUri,
+        'Validate and initialize the Active Directory service-account credential')) {
+        # Plain text exists only long enough to serialize the protected HTTPS request.
+        $plainPassword = ConvertFrom-SecureString -SecureString $Password -AsPlainText
+        try {
+            # The Function performs AD validation and Key Vault persistence with its own managed identity.
+            Invoke-HybridDeviceTaggerRequest `
+                -Method Post `
+                -Path 'actions/initialize-ad-credential' `
+                -Body @{ password = $plainPassword }
+        }
+        finally {
+            # Remove the module's remaining reference even when serialization or the request fails.
+            $plainPassword = $null
+        }
     }
 }
 
@@ -789,10 +770,12 @@ function Invoke-HybridDeviceTaggerPasswordRotation {
         [int]$TimeoutSeconds = 600
     )
 
+    # Validate before the high-impact prompt so failures cannot occur after unnecessary confirmation.
     Assert-HybridDeviceTaggerConnection
     if ($PSCmdlet.ShouldProcess(
         $script:Connection.ApiBaseUri,
         'Immediately change the Active Directory service-account password')) {
+        # Server-side safeguards still enforce LDAPS, staging, validation, and secret promotion.
         $accepted = Invoke-HybridDeviceTaggerRequest -Method Post -Path 'actions/password-rotation'
         if (-not $Wait) {
             return $accepted
@@ -804,6 +787,7 @@ function Invoke-HybridDeviceTaggerPasswordRotation {
     }
 }
 
+# Export only the supported management surface; authentication and HTTP helpers remain private.
 Export-ModuleMember -Function @(
     'Connect-HybridDeviceTagger',
     'Get-HybridDeviceTaggerRule',
@@ -812,7 +796,7 @@ Export-ModuleMember -Function @(
     'Get-HybridDeviceTaggerTrace',
     'Add-HybridDeviceTaggerRule',
     'Remove-HybridDeviceTaggerRule',
-    'Set-HybridDeviceTaggerRuleConfiguration',
+    'Initialize-HybridDeviceTaggerActiveDirectoryCredential',
     'Invoke-HybridDeviceTagging',
     'Invoke-HybridDeviceTaggerPasswordRotation'
 )

@@ -1,9 +1,22 @@
 /*
  * Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
- * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ * Copyright 2026 Andreas Lucas
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
-using System.DirectoryServices.Protocols;
 using System.Text;
 using HybridDeviceTagger.Models;
 using HybridDeviceTagger.Options;
@@ -11,13 +24,13 @@ using Microsoft.Extensions.Options;
 
 namespace HybridDeviceTagger.Services;
 
-/// <summary>Validates and changes the service-account password through LDAPS.</summary>
+/// <summary>Validates and changes the service-account password through TLS-protected LDAP.</summary>
 public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPasswordClient
 {
-    /// <summary>Creates bound LDAP connections for bind tests and the password change.</summary>
+    /// <summary>The authenticated LDAP connection factory.</summary>
     private readonly ActiveDirectoryLdapConnectionFactory _connectionFactory;
 
-    /// <summary>Supplies the distinguished name of the account whose password is changed.</summary>
+    /// <summary>The service-account directory settings.</summary>
     private readonly ActiveDirectoryOptions _options;
 
     /// <summary>Initializes a new instance of the <see cref="LdapActiveDirectoryPasswordClient"/> class.</summary>
@@ -53,18 +66,16 @@ public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPassword
             cancellationToken);
     }
 
-    /// <summary>Tests a credential through either the normal bind path or mandatory LDAPS.</summary>
+    /// <summary>Tests a credential through the normal or mandatory TLS-protected bind path.</summary>
     /// <remarks>
     /// LDAP failures become <see langword="false"/> because failed credentials are an expected
     /// input to rotation recovery. Cancellation and non-LDAP failures still propagate.
     /// </remarks>
     /// <param name="credential">The credential to test.</param>
-    /// <param name="requireSecureConnection">
-    /// <see langword="true"/> to require LDAPS; otherwise the configured LDAP fallback may be used.
-    /// </param>
-    /// <param name="cancellationToken">Cancels the operation.</param>
-    /// <returns><see langword="true"/> when the bind succeeds.</returns>
-    private Task<bool> CanBindAsync(
+    /// <param name="requireSecureConnection">Whether only the TLS-protected bind path may be used.</param>
+    /// <param name="cancellationToken">Cancels the bind.</param>
+    /// <returns><see langword="true"/> when the credential binds successfully.</returns>
+    private async Task<bool> CanBindAsync(
         StoredDirectoryCredential credential,
         bool requireSecureConnection,
         CancellationToken cancellationToken)
@@ -73,60 +84,46 @@ public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPassword
         try
         {
             using var connection = requireSecureConnection
-                ? _connectionFactory.CreateSecureBoundConnection(credential)
-                : _connectionFactory.CreateBoundConnection(credential);
-            return Task.FromResult(true);
+                ? await _connectionFactory.CreateSecureBoundConnectionAsync(
+                    credential,
+                    cancellationToken)
+                : await _connectionFactory.CreateBoundConnectionAsync(
+                    credential,
+                    server: null,
+                    cancellationToken);
+            return true;
         }
-        catch (LdapException)
+        catch (ActiveDirectoryLdapException)
         {
-            return Task.FromResult(false);
+            return false;
         }
     }
 
     /// <inheritdoc />
     /// <remarks>
     /// Active Directory receives one atomic modify request that deletes the quoted UTF-16 old
-    /// password and adds the quoted UTF-16 new password. This is a user password change rather than
-    /// an administrative reset, so the account needs no reset permission and AD password policy
-    /// applies. The connection always uses LDAPS because AD rejects <c>unicodePwd</c> changes
-    /// over unencrypted LDAP.
+    /// password and adds the quoted UTF-16 new password.
     /// </remarks>
-    /// <exception cref="LdapException">The secure bind failed.</exception>
-    /// <exception cref="DirectoryOperationException">Active Directory rejected the password change.</exception>
-    public Task ChangePasswordAsync(
+    public async Task ChangePasswordAsync(
         StoredDirectoryCredential currentCredential,
         string newPassword,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        using var connection = _connectionFactory.CreateSecureBoundConnection(currentCredential);
-
-        var deleteOldPassword = new DirectoryAttributeModification
-        {
-            Name = "unicodePwd",
-            Operation = DirectoryAttributeOperation.Delete
-        };
-        deleteOldPassword.Add(ToUnicodePassword(currentCredential.Password));
-
-        var addNewPassword = new DirectoryAttributeModification
-        {
-            Name = "unicodePwd",
-            Operation = DirectoryAttributeOperation.Add
-        };
-        addNewPassword.Add(ToUnicodePassword(newPassword));
-
-        var request = new ModifyRequest(
+        using var connection = await _connectionFactory.CreateSecureBoundConnectionAsync(
+            currentCredential,
+            cancellationToken);
+        await connection.ChangePasswordAsync(
             _options.BindUserDistinguishedName,
-            deleteOldPassword,
-            addNewPassword);
-        connection.SendRequest(request);
-        return Task.CompletedTask;
+            ToUnicodePassword(currentCredential.Password),
+            ToUnicodePassword(newPassword),
+            cancellationToken);
     }
 
     /// <summary>Encodes the quoted UTF-16LE representation required by AD's <c>unicodePwd</c>.</summary>
     /// <remarks>Omitting the surrounding quotes causes Active Directory to reject the syntax.</remarks>
     /// <param name="password">The plain-text password.</param>
-    /// <returns>The encoded attribute value.</returns>
+    /// <returns>The encoded <c>unicodePwd</c> value.</returns>
     private static byte[] ToUnicodePassword(string password) =>
         Encoding.Unicode.GetBytes($"\"{password}\"");
 }

@@ -1,6 +1,20 @@
 /*
  * Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
- * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ * Copyright 2026 Andreas Lucas
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 using HybridDeviceTagger.Models;
@@ -10,6 +24,14 @@ namespace HybridDeviceTagger.Services;
 /// <summary>Provides active and staged Active Directory credentials without exposing storage details.</summary>
 public interface IActiveDirectoryCredentialStore
 {
+    /// <summary>Stores the initial active credential only when no current secret exists.</summary>
+    /// <param name="password">The validated initial password.</param>
+    /// <param name="cancellationToken">Cancels the operation.</param>
+    /// <returns>The initialized active credential including its creation metadata.</returns>
+    Task<StoredDirectoryCredential> InitializeCurrentAsync(
+        string password,
+        CancellationToken cancellationToken);
+
     /// <summary>Gets the credential currently designated as active.</summary>
     /// <param name="cancellationToken">Cancels the operation.</param>
     /// <returns>The active directory credential.</returns>
@@ -34,3 +56,7 @@ public interface IActiveDirectoryCredentialStore
     /// <returns>A task representing the asynchronous promotion.</returns>
     Task PromoteAsync(string password, CancellationToken cancellationToken);
 }
+
+/// <summary>Indicates that the active credential has already been initialized.</summary>
+public sealed class ActiveDirectoryCredentialAlreadyInitializedException()
+    : InvalidOperationException("The Active Directory credential has already been initialized.");

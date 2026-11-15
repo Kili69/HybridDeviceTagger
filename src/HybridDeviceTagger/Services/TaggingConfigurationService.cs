@@ -1,6 +1,20 @@
 /*
  * Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
- * DISCLAIMER: This sample script is not supported under any Microsoft standard support program or service. The sample script is provided AS IS without warranty of any kind. Microsoft further disclaims all implied warranties including, without limitation, any implied warranties of merchantability or of fitness for a particular purpose. The entire risk arising out of the use or performance of the sample scripts and documentation remains with you. In no event shall Microsoft, its authors, or anyone else involved in the creation, production, or delivery of the scripts be liable for any damages whatsoever (including, without limitation, damages for loss of business profits, business interruption, loss of business information, or other pecuniary loss) arising out of the use of or inability to use the sample scripts or documentation, even if Microsoft has been advised of the possibility of such damages.
+ * Copyright 2026 Andreas Lucas
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
  */
 
 using System.ComponentModel.DataAnnotations;
@@ -10,38 +24,47 @@ using HybridDeviceTagger.Options;
 namespace HybridDeviceTagger.Services;
 
 /// <summary>Applies validated atomic tagging-rule mutations.</summary>
+/// <remarks>
+/// Every mutation reads the current snapshot, builds the complete new rule set, validates it locally
+/// and against the Active Directory forest, and writes it conditionally on an ETag. Concurrent
+/// changes therefore fail with <see cref="TaggingConfigurationConflictException"/> instead of being lost.
+/// </remarks>
 public sealed class TaggingConfigurationService
 {
-    /// <summary>Web-default JSON options used to measure the serialized configuration size.</summary>
+    /// <summary>Web JSON defaults used to measure the serialized configuration size.</summary>
     private static readonly JsonSerializerOptions SerializerOptions =
         new(JsonSerializerDefaults.Web);
 
-    /// <summary>The versioned rule store.</summary>
+    /// <summary>Persists the tagging configuration.</summary>
     private readonly ITaggingConfigurationStore _store;
 
+    /// <summary>Validates rule search paths against the Active Directory forest.</summary>
+    private readonly IActiveDirectoryRuleValidator _activeDirectoryRuleValidator;
+
     /// <summary>Initializes the configuration service.</summary>
-    /// <param name="store">The versioned rule store.</param>
-    public TaggingConfigurationService(ITaggingConfigurationStore store)
+    /// <param name="store">Persists the tagging configuration.</param>
+    /// <param name="activeDirectoryRuleValidator">Validates rule search paths against the Active Directory forest.</param>
+    public TaggingConfigurationService(
+        ITaggingConfigurationStore store,
+        IActiveDirectoryRuleValidator activeDirectoryRuleValidator)
     {
         _store = store;
+        _activeDirectoryRuleValidator = activeDirectoryRuleValidator;
     }
 
     /// <summary>Gets the current configuration.</summary>
-    /// <param name="cancellationToken">Cancels the operation.</param>
-    /// <returns>The current snapshot.</returns>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The current configuration snapshot.</returns>
     public Task<TaggingConfigurationSnapshot> GetAsync(CancellationToken cancellationToken) =>
         _store.GetSnapshotAsync(cancellationToken);
 
     /// <summary>Replaces the complete configuration.</summary>
     /// <param name="rules">The complete new rule set.</param>
-    /// <param name="cancellationToken">Cancels the operation.</param>
-    /// <param name="expectedETag">
-    /// The ETag supplied by the caller; when omitted, the ETag of the snapshot read by this method is
-    /// used, so concurrent changes between the read and the write are still detected.
-    /// </param>
-    /// <returns>The stored snapshot.</returns>
-    /// <exception cref="TaggingConfigurationValidationException">The resulting rules are invalid.</exception>
-    /// <exception cref="TaggingConfigurationConflictException">The configuration changed concurrently.</exception>
+    /// <param name="cancellationToken">Cancels validation and storage.</param>
+    /// <param name="expectedETag">The ETag the stored configuration must have; the current ETag is used when omitted.</param>
+    /// <returns>The stored configuration snapshot.</returns>
+    /// <exception cref="TaggingConfigurationValidationException">The rules are invalid.</exception>
+    /// <exception cref="TaggingConfigurationConflictException">The stored configuration changed concurrently.</exception>
     public async Task<TaggingConfigurationSnapshot> ReplaceAsync(
         IReadOnlyList<TaggingRuleOptions> rules,
         CancellationToken cancellationToken,
@@ -49,6 +72,9 @@ public sealed class TaggingConfigurationService
     {
         var current = await _store.GetSnapshotAsync(cancellationToken);
         var normalizedRules = NormalizeAndValidate(rules);
+        await _activeDirectoryRuleValidator.ValidateRulesAsync(
+            normalizedRules,
+            cancellationToken);
         return await _store.ReplaceAsync(
             normalizedRules,
             expectedETag ?? current.ETag,
@@ -56,15 +82,12 @@ public sealed class TaggingConfigurationService
     }
 
     /// <summary>Adds a rule or replaces the rule with the same case-insensitive name.</summary>
-    /// <param name="rule">The complete rule; a replaced rule moves to the end of the ordered list.</param>
-    /// <param name="cancellationToken">Cancels the operation.</param>
-    /// <param name="expectedETag">
-    /// The ETag supplied by the caller; when omitted, the ETag of the snapshot read by this method is
-    /// used, so concurrent changes between the read and the write are still detected.
-    /// </param>
-    /// <returns>The stored snapshot.</returns>
-    /// <exception cref="TaggingConfigurationValidationException">The resulting rules are invalid.</exception>
-    /// <exception cref="TaggingConfigurationConflictException">The configuration changed concurrently.</exception>
+    /// <param name="rule">The rule to add or replace.</param>
+    /// <param name="cancellationToken">Cancels validation and storage.</param>
+    /// <param name="expectedETag">The ETag the stored configuration must have; the current ETag is used when omitted.</param>
+    /// <returns>The stored configuration snapshot.</returns>
+    /// <exception cref="TaggingConfigurationValidationException">The resulting rule set is invalid.</exception>
+    /// <exception cref="TaggingConfigurationConflictException">The stored configuration changed concurrently.</exception>
     public async Task<TaggingConfigurationSnapshot> UpsertAsync(
         TaggingRuleOptions rule,
         CancellationToken cancellationToken,
@@ -75,23 +98,24 @@ public sealed class TaggingConfigurationService
             .Where(existing => !string.Equals(existing.Name, rule.Name, StringComparison.OrdinalIgnoreCase))
             .Append(rule)
             .ToArray();
+        var normalizedRules = NormalizeAndValidate(rules);
+        await _activeDirectoryRuleValidator.ValidateRulesAsync(
+            normalizedRules,
+            cancellationToken);
         return await _store.ReplaceAsync(
-            NormalizeAndValidate(rules),
+            normalizedRules,
             expectedETag ?? current.ETag,
             cancellationToken);
     }
 
     /// <summary>Removes one rule by its case-insensitive name.</summary>
     /// <param name="ruleName">The name of the rule to remove.</param>
-    /// <param name="cancellationToken">Cancels the operation.</param>
-    /// <param name="expectedETag">
-    /// The ETag supplied by the caller; when omitted, the ETag of the snapshot read by this method is
-    /// used, so concurrent changes between the read and the write are still detected.
-    /// </param>
-    /// <returns>The stored snapshot.</returns>
+    /// <param name="cancellationToken">Cancels validation and storage.</param>
+    /// <param name="expectedETag">The ETag the stored configuration must have; the current ETag is used when omitted.</param>
+    /// <returns>The stored configuration snapshot.</returns>
     /// <exception cref="KeyNotFoundException">No rule has the specified name.</exception>
-    /// <exception cref="TaggingConfigurationValidationException">The resulting rules are invalid.</exception>
-    /// <exception cref="TaggingConfigurationConflictException">The configuration changed concurrently.</exception>
+    /// <exception cref="TaggingConfigurationValidationException">The remaining rule set is invalid, for example empty.</exception>
+    /// <exception cref="TaggingConfigurationConflictException">The stored configuration changed concurrently.</exception>
     public async Task<TaggingConfigurationSnapshot> RemoveAsync(
         string ruleName,
         CancellationToken cancellationToken,
@@ -106,21 +130,27 @@ public sealed class TaggingConfigurationService
             throw new KeyNotFoundException($"Tagging rule '{ruleName}' was not found.");
         }
 
+        var normalizedRules = NormalizeAndValidate(rules);
+        await _activeDirectoryRuleValidator.ValidateRulesAsync(
+            normalizedRules,
+            cancellationToken);
         return await _store.ReplaceAsync(
-            NormalizeAndValidate(rules),
+            normalizedRules,
             expectedETag ?? current.ETag,
             cancellationToken);
     }
 
     /// <summary>Normalizes and validates a complete tagging-rule collection.</summary>
     /// <remarks>
-    /// Names, descriptions, and base DNs are trimmed, trailing commas are removed from base DNs, and
-    /// collections are copied so callers cannot mutate the stored rules. All errors are collected
-    /// before throwing so callers can fix every problem at once. At least one rule is required.
+    /// Text values are trimmed, trailing commas are removed from <c>BaseDn</c>, null collections become
+    /// empty, and extension-attribute names become case-insensitive. All errors are collected
+    /// before a single exception is thrown.
     /// </remarks>
     /// <param name="rules">The rules to normalize.</param>
-    /// <returns>The normalized copy of the rules.</returns>
-    /// <exception cref="TaggingConfigurationValidationException">One or more rules are invalid.</exception>
+    /// <returns>The normalized rules.</returns>
+    /// <exception cref="TaggingConfigurationValidationException">
+    /// The collection is empty, contains null or invalid rules, or exceeds the serialized size limit.
+    /// </exception>
     public static IReadOnlyList<TaggingRuleOptions> NormalizeAndValidate(
         IReadOnlyList<TaggingRuleOptions> rules)
     {

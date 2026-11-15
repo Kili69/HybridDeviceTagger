@@ -279,6 +279,11 @@ public sealed class PasswordRotationServiceTests
 
         public int StageCount { get; private set; }
 
+        public Task<StoredDirectoryCredential> InitializeCurrentAsync(
+            string password,
+            CancellationToken cancellationToken) =>
+            throw new ActiveDirectoryCredentialAlreadyInitializedException();
+
         public Task<StoredDirectoryCredential> GetCurrentAsync(
             CancellationToken cancellationToken) =>
             Task.FromResult(Current);
