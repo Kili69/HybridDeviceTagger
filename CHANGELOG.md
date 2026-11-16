@@ -6,10 +6,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Changed
-
-- The README version badge shows the version of every commit on every branch; the commit hooks update it and the commit guard and release build verify it.
-
 ## [202611.1] - 2026-11-15
 
 First official release.
@@ -29,3 +25,7 @@ First official release.
 - Only Function App Owners and Contributors may add new Entra groups or administrative units as rule targets.
 - Owner/Contributor access counts only for role assignments on the Function App or its parent scopes.
 - Application Insights accepts only Entra-authenticated telemetry, so activity log entries cannot be forged.
+
+### Changed
+
+- The README version badge shows the version of every commit on every branch; the commit hooks update it and the commit guard and release build verify it.
