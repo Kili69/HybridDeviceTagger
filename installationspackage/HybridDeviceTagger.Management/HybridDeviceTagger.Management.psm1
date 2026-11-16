@@ -1018,6 +1018,10 @@ Export-ModuleMember -Function @(
     'Remove-HybridDeviceTaggerRule',
     'Get-HybridDeviceTaggerActiveDirectoryConfiguration',
     'Set-HybridDeviceTaggerActiveDirectoryConfiguration',
+    'Set-HybridDeviceTaggerServiceAccount',
+    'Get-HybridDeviceTaggerTrustedCertificate',
+    'Add-HybridDeviceTaggerTrustedCertificate',
+    'Remove-HybridDeviceTaggerTrustedCertificate',
     'Initialize-HybridDeviceTaggerActiveDirectoryCredential',
     'Invoke-HybridDeviceTagging',
     'Invoke-HybridDeviceTaggerPasswordRotation'

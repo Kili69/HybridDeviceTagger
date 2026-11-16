@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The management module exports `Set-HybridDeviceTaggerServiceAccount`, `Get-HybridDeviceTaggerTrustedCertificate`, `Add-HybridDeviceTaggerTrustedCertificate`, and `Remove-HybridDeviceTaggerTrustedCertificate`. In 202611.2 they were listed in the manifest but not exported by the module, so they were unavailable after `Import-Module` and the PowerShell Gallery publication failed.
+
 ## [202611.2] - 2026-11-16
 
 ### Added

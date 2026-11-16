@@ -13,6 +13,13 @@ $ErrorActionPreference = 'Stop'
 $manifest = Join-Path (Split-Path $PSScriptRoot -Parent) 'installationspackage\HybridDeviceTagger.Management\HybridDeviceTagger.Management.psd1'
 $module = Import-Module $manifest -PassThru -Force
 try {
+    # Every manifest export must also be exported by the module script, or Import-Module hides it.
+    $declared = @((Test-ModuleManifest -Path $manifest).ExportedFunctions.Keys)
+    $exported = @(Get-Command -Module $module.Name -CommandType Function | ForEach-Object Name)
+    $missing = @($declared | Where-Object { $exported -notcontains $_ })
+    if ($missing.Count -gt 0) {
+        throw "Manifest functions are not exported by the module: $($missing -join ', ')."
+    }
     & $module {
         function Assert-HybridDeviceTaggerConnection {}
         $script:Connection = [pscustomobject]@{ ApiBaseUri = 'https://test.azurewebsites.net/api/management' }
