@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [202611.2] - 2026-11-16
+
 ### Added
 
 - Management module commands `Set-HybridDeviceTaggerServiceAccount`, `Get-HybridDeviceTaggerTrustedCertificate`, `Add-HybridDeviceTaggerTrustedCertificate`, and `Remove-HybridDeviceTaggerTrustedCertificate` for the post-installation configuration.
