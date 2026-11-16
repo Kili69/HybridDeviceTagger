@@ -27,9 +27,11 @@ public sealed class ActiveDirectoryOptions : IValidatableObject
     /// <summary>Gets the configuration section name.</summary>
     public const string SectionName = "ActiveDirectory";
 
-    /// <summary>Gets the Active Directory DNS domain used for domain-controller discovery.</summary>
-    [Required]
-    [StringLength(253, MinimumLength = 1)]
+    /// <summary>
+    /// Gets the initial Active Directory DNS domain used for domain-controller discovery. Empty until
+    /// the forest is configured after installation through the portal or management module.
+    /// </summary>
+    [StringLength(253)]
     public string Domain { get; init; } = string.Empty;
 
     /// <summary>Gets an optional domain-controller DNS name that bypasses DNS SRV discovery.</summary>
@@ -50,9 +52,11 @@ public sealed class ActiveDirectoryOptions : IValidatableObject
     [Range(1, 65535)]
     public int LdapFallbackPort { get; init; } = 389;
 
-    /// <summary>Gets the user name used for LDAP binds.</summary>
-    [Required]
-    [StringLength(256, MinimumLength = 1)]
+    /// <summary>
+    /// Gets the initial user name used for LDAP binds. Empty until the service account is configured
+    /// after installation through the portal or management module.
+    /// </summary>
+    [StringLength(256)]
     public string BindUsername { get; init; } = string.Empty;
 
     /// <summary>Gets the optional service-account DN; when absent, the Function resolves it from the UPN.</summary>

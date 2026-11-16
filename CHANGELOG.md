@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Management module commands `Set-HybridDeviceTaggerServiceAccount`, `Get-HybridDeviceTaggerTrustedCertificate`, `Add-HybridDeviceTaggerTrustedCertificate`, and `Remove-HybridDeviceTaggerTrustedCertificate` for the post-installation configuration.
+- The Function App root address `https://<function-app>.azurewebsites.net/` redirects to the configuration portal. Only the exact root path is excluded from App Service authentication; the redirect target is fixed and the response contains no data. All routes now carry the `api/` prefix explicitly (`routePrefix` is empty), so existing URLs are unchanged.
+- The installation ends with the configuration portal URL.
+- The README describes the post-installation configuration in four portal steps (upload the root certificate, configure the forest, set the user and password, create rules) with screenshots in `docs/images`.
+
+### Changed
+
+- Installation and configuration are separated: `Install.ps1` and `Install-HybridDeviceTagger.ps1` no longer prompt for the Active Directory forest, domain controller, service account, password, or LDAP trust certificate and no longer require the ActiveDirectory PowerShell module. Configure these values after installation in the configuration portal or with the management module. The AD parameters of the installation engine remain optional for unattended pre-seeding; updates without them keep the existing forest and service account.
+- The Function starts without Active Directory settings. Scheduled tagging and password rotation are skipped until the forest domain and service account are configured; requests that need Active Directory return HTTP 409 with a message that names the missing setting and where to set it.
+- The configuration portal guides the post-installation setup: without a stored service account, the LDAP tab names the next step, labels the account form "Set LDAP user", and disables LDAP validation and password change. The separate "Set initial password" box was removed; the account form sets the first account and password, and its UPN is prefilled with the stored account.
+- Service endpoints on the FC1 integration subnet no longer stop the installation. The installer warns about each endpoint and reports its provisioning state and whether it covers the deployment region.
+- The installation PC no longer needs access to the VNet DNS servers. Unreachable DNS servers only produce a warning; private endpoint DNS is verified from the Function VNet during code deployment.
+
+### Fixed
+
+- Validation and What-If no longer fail when the target resource group does not exist yet but `-CreateResourceGroup` is set; only the ARM steps that require the resource group are skipped. Previously the guided installation could not install into a new resource group.
+- A failed Function code upload caused by an unreachable private storage endpoint is retried and then explains the required VNet DNS forwarding; interactive runs can retry after DNS is fixed.
 ## [202611.1] - 2026-11-15
 
 First official release.

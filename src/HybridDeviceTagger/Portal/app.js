@@ -32,7 +32,6 @@
       edit: 'Bearbeiten', remove: 'Löschen', replace: 'Ersetzen', value: 'Wert',
       forest: 'Gesamtstruktur', domain: 'Forest-DNS-Name', validateTitle: 'LDAP-Zugriff prüfen',
       validateHint: 'Prüft DNS, TLS-Zertifikat und Anmeldung mit dem gespeicherten Kennwort.', validate: 'Jetzt prüfen',
-      initTitle: 'Initiales Kennwort setzen', initHint: 'Nur möglich, solange noch kein Kennwort gespeichert ist.',
       password: 'Kennwort', accountTitle: 'LDAP-Benutzer ändern',
       accountHint: 'Das Kennwort des Kontos wird vor dem Speichern per LDAP geprüft. Mit demselben Namen wird nur das Kennwort ersetzt.',
       username: 'Benutzer (UPN)', distinguishedName: 'Distinguished Name (optional)',
@@ -46,6 +45,10 @@
       confirmRotate: 'Kennwort des LDAP-Benutzers jetzt wechseln?', confirmAccount: 'LDAP-Benutzer auf „{0}“ umstellen?',
       confirmDomain: 'Forest-DNS-Name auf „{0}“ ändern?',
       sourceBlob: 'Quelle: verwaltete Konfiguration', sourceAppSetting: 'Quelle: App-Einstellung',
+      accountNotConfigured: 'Noch kein Servicekonto gespeichert. Nächster Schritt: Root-Zertifikat im Tab „Zertifikate“ hinzufügen, dann Benutzer (UPN) und Kennwort unter „LDAP-Benutzer festlegen“ speichern.',
+      domainNotConfigured: 'Noch keine Forest-Domäne gespeichert. Nächster Schritt: Forest-DNS-Namen eintragen und speichern.',
+      accountTitleNew: 'LDAP-Benutzer festlegen',
+      accountHintNew: 'Legt das Servicekonto erstmals fest. Das Kennwort wird vor dem Speichern per LDAPS/StartTLS geprüft; dafür muss das Root-Zertifikat bereits hinterlegt sein.',
       sourcePackage: 'Quelle: Installationspaket', sourceOs: 'Quelle: Betriebssystem-Zertifikatsspeicher',
       account: 'Benutzer: {0}', accountDn: 'DN: {0}', dnResolved: 'wird aus dem UPN ermittelt',
       validationOk: 'LDAP-Zugriff erfolgreich über {0}.', validationFailed: 'LDAP-Zugriff fehlgeschlagen: {0}',
@@ -84,7 +87,6 @@
       edit: 'Edit', remove: 'Delete', replace: 'Replace', value: 'Value',
       forest: 'Forest', domain: 'Forest DNS name', validateTitle: 'Validate LDAP access',
       validateHint: 'Checks DNS, the TLS certificate, and sign-in with the stored password.', validate: 'Validate now',
-      initTitle: 'Set initial password', initHint: 'Only possible while no password is stored yet.',
       password: 'Password', accountTitle: 'Change LDAP user',
       accountHint: 'The account password is validated through LDAP before it is stored. Using the same name only replaces the password.',
       username: 'User (UPN)', distinguishedName: 'Distinguished name (optional)',
@@ -98,6 +100,10 @@
       confirmRotate: 'Change the LDAP user password now?', confirmAccount: 'Switch the LDAP user to "{0}"?',
       confirmDomain: 'Change the forest DNS name to "{0}"?',
       sourceBlob: 'Source: managed configuration', sourceAppSetting: 'Source: app setting',
+      accountNotConfigured: 'No service account stored yet. Next step: add the root certificate on the Certificates tab, then save the user (UPN) and password under "Set LDAP user".',
+      domainNotConfigured: 'No forest domain stored yet. Next step: enter and save the forest DNS name.',
+      accountTitleNew: 'Set LDAP user',
+      accountHintNew: 'Sets the service account for the first time. The password is validated through LDAPS/StartTLS before it is stored, so the root certificate must already be added.',
       sourcePackage: 'Source: installation package', sourceOs: 'Source: operating-system certificate store',
       account: 'User: {0}', accountDn: 'DN: {0}', dnResolved: 'resolved from the UPN',
       validationOk: 'LDAP access succeeded through {0}.', validationFailed: 'LDAP access failed: {0}',
@@ -620,7 +626,20 @@
     $('accountUsername').value = data.username || '';
     $('accountUsername').dataset.loaded = data.username || '';
     $('accountDn').value = data.distinguishedName || '';
-    $('accountInfo').textContent = `${t('account', data.username)} · ${t('accountDn', data.distinguishedName || t('dnResolved'))} · ${data.accountSource === 'blob' ? t('sourceBlob') : t('sourceAppSetting')}`;
+    const domainMissing = !data.domain;
+    const accountMissing = data.accountSource === 'notConfigured';
+    $('accountInfo').textContent = domainMissing
+      ? t('domainNotConfigured')
+      : accountMissing
+        ? t('accountNotConfigured')
+        : `${t('account', data.username)} · ${t('accountDn', data.distinguishedName || t('dnResolved'))} · ${data.accountSource === 'blob' ? t('sourceBlob') : t('sourceAppSetting')}`;
+    // Without a stored account, only "Set LDAP user" can succeed; the other actions need an account.
+    $('validate').disabled = accountMissing;
+    $('rotate').disabled = accountMissing;
+    $('accountTitle').dataset.i18n = accountMissing ? 'accountTitleNew' : 'accountTitle';
+    $('accountHint').dataset.i18n = accountMissing ? 'accountHintNew' : 'accountHint';
+    $('accountTitle').textContent = t($('accountTitle').dataset.i18n);
+    $('accountHint').textContent = t($('accountHint').dataset.i18n);
     await loadRotationStatus();
   }
 
@@ -678,17 +697,6 @@
       $('validateResult').replaceChildren();
       throw error;
     }
-  }
-
-  async function initializePassword(event) {
-    event.preventDefault();
-    const input = $('initPassword');
-    try {
-      await api('POST', 'actions/initialize-ad-credential', { password: input.value });
-    } finally {
-      input.value = '';
-    }
-    showStatus(t('saved'), 'success');
   }
 
   async function changeAccount(event) {
@@ -857,7 +865,6 @@
     $('ruleForm').addEventListener('submit', (event) => busy(event.submitter || $('ruleForm'), () => saveRule(event)));
     $('domainForm').addEventListener('submit', (event) => busy(event.submitter || $('domainForm'), () => saveDomain(event)));
     $('validate').addEventListener('click', (event) => busy(event.currentTarget, validate));
-    $('initForm').addEventListener('submit', (event) => busy(event.submitter || $('initForm'), () => initializePassword(event)));
     $('accountForm').addEventListener('submit', (event) => busy(event.submitter || $('accountForm'), () => changeAccount(event)));
     // The DN of the previous account must never be submitted with a different user name.
     $('accountUsername').addEventListener('input', () => {

@@ -194,7 +194,8 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
         secret.Properties.ExpiresOn = _timeProvider.GetUtcNow()
             .AddDays(_rotationOptions.SecretExpiryDays);
         var response = await _secretClient.SetSecretAsync(secret, cancellationToken);
-        return await ToCredentialAsync(response.Value, cancellationToken);
+        // Writes precede storing a first service account, so they must not require one.
+        return await ToCredentialAsync(response.Value, cancellationToken, requireConfiguredAccount: false);
     }
 
     /// <summary>Returns whether a secret is an unusable deployment placeholder.</summary>
@@ -206,15 +207,23 @@ public sealed class KeyVaultActiveDirectoryCredentialStore : IActiveDirectoryCre
     /// <summary>Combines a secret password and creation timestamp with the effective bind user.</summary>
     /// <param name="secret">The Key Vault secret.</param>
     /// <param name="cancellationToken">Cancels reading the service-account override.</param>
+    /// <param name="requireConfiguredAccount">
+    /// <see langword="true"/> for credentials used to bind; <see langword="false"/> for write results,
+    /// whose user name may still be empty while a first service account is being stored.
+    /// </param>
     /// <returns>The directory credential.</returns>
+    /// <exception cref="ActiveDirectoryNotConfiguredException">
+    /// A configured account is required but none is stored.
+    /// </exception>
     private async Task<StoredDirectoryCredential> ToCredentialAsync(
         KeyVaultSecret secret,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireConfiguredAccount = true)
     {
         var configuration = await _configurationStore.GetAsync(cancellationToken);
-        return new(
-            configuration.GetServiceAccount(_activeDirectoryOptions).Username,
-            secret.Value,
-            secret.Properties.CreatedOn);
+        var account = requireConfiguredAccount
+            ? configuration.GetConfiguredServiceAccount(_activeDirectoryOptions)
+            : configuration.GetServiceAccount(_activeDirectoryOptions);
+        return new(account.Username, secret.Value, secret.Properties.CreatedOn);
     }
 }

@@ -102,7 +102,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the signed-in user, or 401 or 403.</returns>
     [Function("GetPortalSession")]
     public async Task<IActionResult> GetSessionAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/portal/session")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/portal/session")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -131,7 +131,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the activities, 400 for invalid filters, 503 when no log is configured, or 401 or 403.</returns>
     [Function("GetPortalActivity")]
     public async Task<IActionResult> GetActivityAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/portal/activity")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/portal/activity")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -187,7 +187,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the configuration, or 401 or 403.</returns>
     [Function("GetPortalActiveDirectory")]
     public async Task<IActionResult> GetActiveDirectoryAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/portal/active-directory")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/portal/active-directory")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -207,7 +207,9 @@ public sealed class PortalApiFunction
             snapshot.Domain,
             username,
             distinguishedName,
-            accountSource = string.IsNullOrWhiteSpace(snapshot.BindUsername) ? "appSetting" : "blob",
+            accountSource = !string.IsNullOrWhiteSpace(snapshot.BindUsername) ? "blob"
+                : string.IsNullOrWhiteSpace(username) ? "notConfigured"
+                : "appSetting",
             snapshot.Source,
             snapshot.ETag,
             snapshot.LastModifiedUtc
@@ -220,7 +222,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the result, 409 when no credential is stored, or 401 or 403.</returns>
     [Function("ValidatePortalActiveDirectoryAccess")]
     public async Task<IActionResult> ValidateActiveDirectoryAccessAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/portal/active-directory/validate")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "api/management/portal/active-directory/validate")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -246,6 +248,11 @@ public sealed class PortalApiFunction
             Record(request, ActivityCategories.Password, "LdapAccessValidated", ActivityOutcomes.Failed, null, exception.Message);
             return new ConflictObjectResult(new { error = exception.Message });
         }
+        catch (ActiveDirectoryNotConfiguredException exception)
+        {
+            Record(request, ActivityCategories.Password, "LdapAccessValidated", ActivityOutcomes.Failed, null, exception.Message);
+            return new ConflictObjectResult(new { error = exception.Message });
+        }
     }
 
     /// <summary>Switches the service account, or replaces its password, after an LDAP bind validation.</summary>
@@ -255,7 +262,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the new account, 400, 409, 413, 401, or 403.</returns>
     [Function("ChangePortalActiveDirectoryAccount")]
     public async Task<IActionResult> ChangeActiveDirectoryAccountAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "management/portal/active-directory/account")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "api/management/portal/active-directory/account")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -286,7 +293,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the trust anchors, or 401 or 403.</returns>
     [Function("GetPortalCertificates")]
     public async Task<IActionResult> GetCertificatesAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/portal/certificates")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/portal/certificates")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -305,7 +312,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the trust anchors, or 400, 409, 413, 401, or 403.</returns>
     [Function("AddPortalCertificate")]
     public async Task<IActionResult> AddCertificateAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/portal/certificates")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "api/management/portal/certificates")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -338,7 +345,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the trust anchors, or 400, 404, 409, 413, 401, or 403.</returns>
     [Function("ReplacePortalCertificate")]
     public async Task<IActionResult> ReplaceCertificateAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "management/portal/certificates/{thumbprint}")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "api/management/portal/certificates/{thumbprint}")]
         HttpRequest request,
         string thumbprint,
         CancellationToken cancellationToken)
@@ -369,7 +376,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the trust anchors, or 400, 404, 409, 401, or 403.</returns>
     [Function("RemovePortalCertificate")]
     public async Task<IActionResult> RemoveCertificateAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "management/portal/certificates/{thumbprint}")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "api/management/portal/certificates/{thumbprint}")]
         HttpRequest request,
         string thumbprint,
         CancellationToken cancellationToken)
@@ -398,7 +405,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with up to 25 matches, 400, 404, 401, or 403.</returns>
     [Function("SearchPortalDirectory")]
     public async Task<IActionResult> SearchDirectoryAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/portal/directory/{kind}")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/portal/directory/{kind}")]
         HttpRequest request,
         string kind,
         CancellationToken cancellationToken)
@@ -428,7 +435,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the summaries of existing objects, 400, 413, 401, or 403.</returns>
     [Function("ResolvePortalDirectory")]
     public async Task<IActionResult> ResolveDirectoryAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/portal/directory/resolve")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "api/management/portal/directory/resolve")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -457,7 +464,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the intervals, or 401 or 403.</returns>
     [Function("GetPortalSchedule")]
     public async Task<IActionResult> GetScheduleAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/portal/schedule")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/portal/schedule")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -476,7 +483,7 @@ public sealed class PortalApiFunction
     /// <returns>HTTP 200 with the stored intervals, or 400, 409, 413, 401, or 403.</returns>
     [Function("SetPortalSchedule")]
     public async Task<IActionResult> SetScheduleAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "management/portal/schedule")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "api/management/portal/schedule")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -566,6 +573,10 @@ public sealed class PortalApiFunction
             return new NotFoundObjectResult(new { error = exception.Message });
         }
         catch (OperationAlreadyRunningException exception)
+        {
+            return new ConflictObjectResult(new { error = exception.Message });
+        }
+        catch (ActiveDirectoryNotConfiguredException exception)
         {
             return new ConflictObjectResult(new { error = exception.Message });
         }

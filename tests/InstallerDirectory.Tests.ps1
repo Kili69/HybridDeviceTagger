@@ -82,25 +82,81 @@ if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
         }
     }
 }
-$certificateRequirement = $ast.Find({
-    param($node)
-    $node -is [System.Management.Automation.Language.IfStatementAst] -and
-    $node.Clauses[0].Item1.Extent.Text -eq '[string]::IsNullOrWhiteSpace($ActiveDirectoryTrustedCertificatePath)'
-}, $true)
-if ($null -eq $certificateRequirement) { throw 'The engine must require a root CA certificate even when local DNS is unavailable.' }
-foreach ($ActiveDirectoryTrustedCertificatePath in $null, '', '   ') {
-    $failed = $false
-    try {
-        . ([scriptblock]::Create($certificateRequirement.Extent.Text))
-    }
-    catch {
-        if ($_.Exception.Message -notlike '*Supply -ActiveDirectoryTrustedCertificatePath*') { throw }
-        $failed = $true
-    }
-    if (-not $failed) { throw 'The engine must reject missing or blank root CA paths before Azure deployment.' }
+$installerText = [IO.File]::ReadAllText($path)
+$preseedStart = $installerText.IndexOf('# Active Directory values are optional pre-seeding only')
+$preseedEnd = $installerText.IndexOf('# Phase 1:', $preseedStart)
+if ($preseedStart -lt 0 -or $preseedEnd -lt 0) { throw 'The installer must validate optional Active Directory pre-seeding before Azure access.' }
+$preseedValidation = [scriptblock]::Create(
+    'param($ActiveDirectoryForestDomain, $ADServiceAccount, $ADServiceAccountCredential, $ActiveDirectoryBindUserDistinguishedName, $ActiveDirectoryServer, [switch]$SkipActiveDirectoryDirectoryChecks, $ActiveDirectoryTrustedCertificatePath)' +
+    [Environment]::NewLine + $installerText.Substring($preseedStart, $preseedEnd - $preseedStart) +
+    [Environment]::NewLine + '$script:ConfigureActiveDirectory')
+$testCredential = [pscredential]::new('svc@contoso.com', (ConvertTo-SecureString 'x' -AsPlainText -Force))
+if (& $preseedValidation) { throw 'An installation without Active Directory parameters must not configure Active Directory.' }
+foreach ($case in @(
+    @{ Parameters = @{ ADServiceAccount = 'svc@contoso.com' }; Expected = '*require -ActiveDirectoryForestDomain*' }
+    @{ Parameters = @{ ADServiceAccountCredential = $testCredential }; Expected = '*require -ActiveDirectoryForestDomain*' }
+    @{ Parameters = @{ ActiveDirectoryForestDomain = 'contoso.com'; ADServiceAccountCredential = $testCredential }; Expected = '*requires -ActiveDirectoryTrustedCertificatePath*' }
+)) {
+    $parameters = $case.Parameters
+    $message = ''
+    try { $null = & $preseedValidation @parameters } catch { $message = $_.Exception.Message }
+    if ($message -notlike $case.Expected) { throw "Inconsistent pre-seeding must fail with '$($case.Expected)', received '$message'." }
+}
+if (-not (& $preseedValidation -ActiveDirectoryForestDomain contoso.com -ADServiceAccountCredential $testCredential -ActiveDirectoryTrustedCertificatePath 'C:\Root.cer') -or
+    -not (& $preseedValidation -ActiveDirectoryForestDomain contoso.com)) {
+    throw 'A forest domain alone or with a credential and certificate must pre-seed Active Directory.'
+}
+if ($installerText -match '(?m)^#Requires -Modules ActiveDirectory' -or $installerText -match '(?m)^\s*\$\w+ = Read-Host .*Active Directory') {
+    throw 'The installer must neither require the ActiveDirectory module nor prompt for Active Directory values.'
 }
 $ActiveDirectoryTrustedCertificatePath = 'C:\Certificates\Contoso-Root-CA.cer'
-. ([scriptblock]::Create($certificateRequirement.Extent.Text))
+
+# Validated parameters keep their attributes; adopting missing app settings must not assign ''.
+$adoptStart = $installerText.IndexOf('if (-not $script:ConfigureActiveDirectory) {', $installerText.IndexOf('# Updates without pre-seeded values'))
+$adoptEnd = $installerText.IndexOf('$script:DroppedPackagedCertificate', $adoptStart)
+$adoptSettings = [scriptblock]::Create(
+    'param([ValidatePattern(''^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$'')][string]$ActiveDirectoryForestDomain, [ValidateNotNullOrEmpty()][string]$ADServiceAccount, [ValidateNotNullOrEmpty()][string]$ActiveDirectoryBindUserDistinguishedName)' +
+    [Environment]::NewLine + '$script:ConfigureActiveDirectory = $false; function Write-Host {}' + [Environment]::NewLine +
+    $installerText.Substring($adoptStart, $adoptEnd - $adoptStart) + [Environment]::NewLine +
+    '"$ActiveDirectoryForestDomain|$ADServiceAccount"')
+$script:ExistingAppSettings = @{}
+if ((& $adoptSettings) -ne '|') { throw 'A new installation must start without Active Directory settings.' }
+$script:ExistingAppSettings = @{ 'ActiveDirectory__Domain' = 'contoso.com'; 'ActiveDirectory__BindUsername' = 'svc@contoso.com'; 'ActiveDirectory__BindUserDistinguishedName' = '' }
+if ((& $adoptSettings) -ne 'contoso.com|svc@contoso.com') { throw 'Updates must keep the existing Active Directory settings.' }
+foreach ($name in 'Get-SubnetServiceEndpointWarning', 'Assert-Subnet') {
+    $definition = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+    }, $true)
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+$Location = 'westus2'
+$SubnetName = 'snet-fc1'
+$fc1Subnet = [pscustomobject]@{
+    addressPrefix = '10.0.2.0/27'
+    delegations = @([pscustomobject]@{ serviceName = 'Microsoft.App/environments' })
+    serviceEndpoints = @(
+        [pscustomobject]@{ service = 'Microsoft.Storage'; provisioningState = 'Succeeded'; locations = @('westus2', 'westcentralus') }
+        [pscustomobject]@{ service = 'Microsoft.KeyVault'; provisioningState = 'Updating'; locations = @('*') }
+        [pscustomobject]@{ service = 'Microsoft.Sql'; provisioningState = 'Succeeded'; locations = @('northeurope') }
+    )
+}
+$endpointWarnings = @(Get-SubnetServiceEndpointWarning -Subnet $fc1Subnet -SubnetLabel 'FC1 subnet')
+if ($endpointWarnings.Count -ne 3 -or
+    $endpointWarnings[0] -notlike "*'Microsoft.Storage'*" -or $endpointWarnings[0] -like '*Findings*' -or
+    $endpointWarnings[1] -notlike "*provisioning state is 'Updating'*" -or
+    $endpointWarnings[2] -notlike "*do not include 'westus2'*") {
+    throw 'Service endpoints must be reported with provisioning state and region coverage.'
+}
+$subnetWarnings = [Collections.Generic.List[string]]::new()
+function Write-Warning { param([string]$Message) $subnetWarnings.Add($Message) }
+Assert-Subnet -Subnet $fc1Subnet
+if ($subnetWarnings.Count -ne 3) { throw 'Service endpoints on the FC1 subnet must warn instead of failing.' }
+$fc1Subnet.serviceEndpoints = @()
+$subnetWarnings.Clear()
+Assert-Subnet -Subnet $fc1Subnet
+if ($subnetWarnings.Count -ne 0) { throw 'A subnet without service endpoints must not warn.' }
+Remove-Item Function:\Write-Warning
 
 $function = $ast.Find({
     param($node)
@@ -125,8 +181,11 @@ if (-not $DeferredActiveDirectoryValidation -or $ActiveDirectoryServerCandidates
 $localValidation = $ast.Find({
     param($node)
     $node -is [System.Management.Automation.Language.IfStatementAst] -and
-    $node.Clauses[0].Item1.Extent.Text -eq '-not $SkipActiveDirectoryDirectoryChecks -and -not $script:DeferredActiveDirectoryValidation'
+    $node.Clauses[0].Item1.Extent.Text -like '$script:ConfigureActiveDirectory -and $null -ne $ADServiceAccountCredential -and*-not $SkipActiveDirectoryDirectoryChecks -and -not $script:DeferredActiveDirectoryValidation'
 }, $true)
+if ($null -eq $localValidation) { throw 'The local service-account validation block was not found.' }
+$ConfigureActiveDirectory = $true
+$ADServiceAccountCredential = $testCredential
 $SkipActiveDirectoryDirectoryChecks = $false
 function Resolve-ADServiceAccountDistinguishedName { throw 'Local LDAP must not run when DNS was unavailable.' }
 . ([scriptblock]::Create($localValidation.Extent.Text))
@@ -277,14 +336,15 @@ $Messages.Clear()
 $Warnings.Clear()
 $Queries.Clear()
 Assert-PrivateEndpointDnsResolution
-if ($PromptCount -ne 1 -or $Queries.Count -ne 6 -or
-    @($Warnings | Where-Object { $_ -like '*DNS server is unreachable*' }).Count -ne 3 -or
-    @($Warnings | Where-Object { $_ -like '*Continuing based on user-confirmed DNS*' }).Count -ne 1 -or
+if ($PromptCount -ne 0 -or $Queries.Count -ne 6 -or
+    @($Warnings | Where-Object { $_ -like '*cannot be queried from this computer*' }).Count -ne 1 -or
+    $Messages -notcontains 'teststorage.privatelink.blob.core.windows.net. 300 IN A 10.0.3.8' -or
     @($Messages | Where-Object { $_ -like 'Private endpoint DNS resolution validated*' }).Count -ne 0) {
-    throw 'Enter must also continue without rechecking when the DNS server is unreachable from the PC.'
+    throw 'DNS servers unreachable from the PC must warn with record guidance, defer to the VNet check, and not prompt.'
 }
 
 $DnsRepaired = $false
+$FailureMode = 'publicAddress'
 $ConfirmationAction = 'A'
 $Messages.Clear()
 Assert-DnsFailure -Expected 'Installation aborted because private endpoint DNS*'
@@ -296,10 +356,16 @@ $NonInteractive = $true
 $FailureMode = 'unreachable'
 $PromptCount = 0
 $Warnings.Clear()
+Assert-PrivateEndpointDnsResolution
+if ($PromptCount -ne 0 -or @($Warnings | Where-Object { $_ -like '*cannot be queried from this computer*' }).Count -ne 1) {
+    throw 'Unattended installations from outside the VNet must continue and let the code deployment verify DNS.'
+}
+$FailureMode = 'publicAddress'
+$Warnings.Clear()
 Assert-DnsFailure -Expected 'Private endpoint DNS validation failed*'
 if ($PromptCount -ne 0 -or
-    @($Warnings | Where-Object { $_ -like '*DNS server is unreachable*' }).Count -ne 3) {
-    throw 'Unattended failures must report DNS errors without prompting or silently passing.'
+    @($Warnings | Where-Object { $_ -like '*Returned addresses: 52.0.0.1*' }).Count -ne 3) {
+    throw 'Unattended runs must still fail without prompting when a reachable DNS server returns public addresses.'
 }
 
 $NonInteractive = $false

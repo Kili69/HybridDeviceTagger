@@ -1,5 +1,4 @@
 #Requires -Version 7.2
-#Requires -Modules ActiveDirectory
 # Project-Version: source
 # Author: andreas.lucas@outlook.com (aka Kili)
 
@@ -9,16 +8,23 @@ Validates and deploys HybridDeviceTagger to an Azure Functions Flex Consumption 
 
 .DESCRIPTION
 Validates local prerequisites, the selected Azure account, existing networking, the selected Key
-Vault mode, Active Directory connectivity, tagging rules, and the Bicep deployment. Depending on
-the selected switches, the script can prepare the Active Directory service account, run a
+Vault mode, and the Bicep deployment. Depending on the selected switches, the script can run a
 read-only validation, show Azure What-If output, deploy infrastructure, assign Microsoft Graph
 application roles, and publish the .NET Function App.
 
+Installation and configuration are separated. The installer deploys only Azure infrastructure,
+permissions, and code; it never prompts for Active Directory settings. After installation, configure
+the forest domain, the LDAP trust certificate, and the service account with its password in the
+configuration portal or with the HybridDeviceTagger.Management module. Until then, scheduled tagging
+and password rotation are skipped. The Active Directory parameters remain available for unattended
+pre-seeding; when supplied, they are validated and deployed as before. Updates without these
+parameters keep the forest domain and service account of the existing Function App.
+
 The installer references existing virtual networks and subnets without modifying those shared
 resources. It can reference an existing Key Vault or create a private vault in the deployment
-resource group. It uses the supplied Active Directory credentials only in the
-local PowerShell process and never sends the password to Azure Resource Manager. Restricted
-management administrative-unit role assignments require separate explicit approval.
+resource group. Optional Active Directory credentials are used only in the local PowerShell process
+and are never sent to Azure Resource Manager. Restricted management administrative-unit role
+assignments require separate explicit approval.
 
 Before any Azure resource, permission, Active Directory account, Key Vault secret, or application
 code is changed, the installer displays a complete action summary and requests standard PowerShell
@@ -29,7 +35,9 @@ directory. The transcript records the complete console workflow and is closed on
 validation failure, cancellation, or an early operational return.
 
 An empty required value or an unsuitable FC1 integration subnet entered interactively is requested
-again. A missing parameter-selected VNet resource group, VNet, or subnet, an unsuitable
+again. Service endpoints on the FC1 integration subnet are reported as a warning together with
+their provisioning state and regions; they are not required because all app-owned services are
+reached through private endpoints. A missing parameter-selected VNet resource group, VNet, or subnet, an unsuitable
 parameter-selected integration subnet, or a VNet region mismatch displays only the actionable
 exception message by default. Use -Verbose to include the full PowerShell error record with source
 location and stack information. Unexpected operational and deployment failures remain terminating
@@ -83,8 +91,11 @@ Creates a private Key Vault in the Function App resource group and subscription.
 interactive runs ask whether to create a vault; noninteractive runs use an existing vault.
 
 .PARAMETER ActiveDirectoryForestDomain
-DNS name of the Active Directory forest. Interactive runs propose the forest of the logged-on
-Active Directory user when it can be detected. Workgroup systems have no default.
+Optional DNS name of the Active Directory forest for unattended pre-seeding; never prompted. When
+omitted, new installations start unconfigured and updates keep the existing forest domain.
+Configure it after installation in the portal or with
+Set-HybridDeviceTaggerActiveDirectoryConfiguration. Required when any other Active Directory
+account parameter is supplied.
 
 .PARAMETER ActiveDirectoryServer
 Optional DNS name of a domain controller used only for installer validation. When omitted, the
@@ -99,23 +110,26 @@ never performs an unencrypted LDAP bind.
 LDAP fallback port. The default is 389.
 
 .PARAMETER ActiveDirectoryTrustedCertificatePath
-Required path to a public root CA or self-signed lab DC certificate used as the LDAPS and StartTLS trust anchor.
-The certificate is imported into the Azure Function package; importing it into the installation PC store alone is insufficient.
-Private keys are rejected and never packaged.
+Optional path to a public root CA or self-signed lab DC certificate packaged as the LDAPS and
+StartTLS trust anchor; never prompted. Required together with ADServiceAccountCredential. Otherwise
+add trust certificates after installation in the portal or with
+Add-HybridDeviceTaggerTrustedCertificate. Private keys are rejected and never packaged.
 
 .PARAMETER ADServiceAccount
-UPN used by the Function App to bind to Active Directory. This parameter cannot be combined with
-ADServiceAccountCredential. Interactive runs without either value default to
-HybridDeviceTagger@ActiveDirectoryForestDomain and request the password separately.
+Optional service-account UPN for unattended pre-seeding; never prompted. This parameter cannot be
+combined with ADServiceAccountCredential. Configure the account after installation in the portal or
+with Set-HybridDeviceTaggerServiceAccount.
 
 .PARAMETER ActiveDirectoryBindUserDistinguishedName
 Optional distinguished name of the AD service account used for password changes. When omitted, the
-installer resolves it from ADServiceAccount and stops if the account cannot be resolved uniquely.
+installer resolves it from ADServiceAccount when a credential is supplied; otherwise the Function
+resolves it from the UPN.
 
 .PARAMETER ADServiceAccountCredential
-Credential used locally to validate directory bind and read access. Interactive runs request the
-AD service-account password when the credential is omitted and directory checks are enabled. Its
-UserName supplies the service-account UPN. This parameter cannot be combined with ADServiceAccount.
+Optional credential for unattended pre-seeding; never prompted. Its UserName supplies the
+service-account UPN. When supplied, the installer validates directory bind and read access locally
+and the Function initializes the Key Vault secret. This parameter cannot be combined with
+ADServiceAccount.
 
 .PARAMETER ManagementApiClientId
 Application ID of the single-tenant Entra registration that protects the management API. When
@@ -187,8 +201,8 @@ Runs without interactive input or installation confirmation. Every required valu
 consent switch must be supplied; missing information terminates the run with a parameter error.
 
 .PARAMETER SkipActiveDirectoryDirectoryChecks
-Skips repeated forest, OU, and service-account directory checks for an existing installation.
-Strict endpoint and certificate validation still runs.
+Applies only when Active Directory values are pre-seeded. Skips repeated forest and service-account
+directory checks for an existing installation; strict endpoint and certificate validation still runs.
 
 .PARAMETER ValidateOnly
 Runs all supported prerequisite and configuration validation without changing resources.
@@ -202,18 +216,24 @@ function/HybridDeviceTagger.zip next to this installer. Build it with
 scripts/Build-InstallationPackage.ps1 when installing from a repository checkout.
 
 .EXAMPLE
-$credential = Get-Credential 'svc-HybridDeviceTagger@contoso.com'
-./installationspackage/Install-HybridDeviceTagger.ps1 @parameters `
-    -ADServiceAccountCredential $credential `
-    -ValidateOnly
+./installationspackage/Install-HybridDeviceTagger.ps1 @parameters -ValidateOnly
 
-Runs the complete read-only preflight using values collected in the parameters splat.
+Runs the complete read-only infrastructure preflight using values collected in the parameters splat.
 
 .EXAMPLE
 ./installationspackage/Install-HybridDeviceTagger.ps1 @parameters -Force
 
-Deploys the validated infrastructure and Function package without interactive prompts. Run
-ValidateOnly and WhatIf first.
+Deploys the validated infrastructure and Function package without interactive prompts. Configure
+Active Directory afterwards in the configuration portal or with the management module.
+
+.EXAMPLE
+$credential = Get-Credential 'svc-HybridDeviceTagger@contoso.com'
+./installationspackage/Install-HybridDeviceTagger.ps1 @parameters -Force `
+    -ActiveDirectoryForestDomain 'contoso.com' `
+    -ActiveDirectoryTrustedCertificatePath '.\Contoso-Root-CA.cer' `
+    -ADServiceAccountCredential $credential
+
+Pre-seeds and validates the Active Directory configuration during an unattended installation.
 
 .NOTES
 Author: Andreas Lucas (aka Kili) <andreas.lucas@outlook.com>
@@ -713,7 +733,9 @@ function Write-InstallationSummary {
     else {
         Write-Host '  - Deploy the prebuilt Function App code package'
     }
-    Write-Host '  - Initialize the AD credential through the Function managed identity'
+    if ($null -ne $ADServiceAccountCredential) {
+        Write-Host '  - Initialize the AD credential through the Function managed identity'
+    }
 
     Write-Host 'Existing shared resources referenced without creation:'
     Write-Host "  - Virtual network: $VirtualNetworkSubscriptionId/$VirtualNetworkResourceGroupName/$VirtualNetworkName"
@@ -723,6 +745,16 @@ function Write-InstallationSummary {
         Write-Host "  - Key Vault: $KeyVaultSubscriptionId/$KeyVaultResourceGroupName/$KeyVaultName"
     }
     Write-Host '  - The Active Directory service account is not changed during normal deployment.'
+
+    Write-Host 'Active Directory configuration:'
+    if ([string]::IsNullOrWhiteSpace($ActiveDirectoryForestDomain)) {
+        Write-Host '  - Not configured by the installer. Configure the forest domain, trust certificate, and service account after installation.'
+    }
+    else {
+        $accountText = if ([string]::IsNullOrWhiteSpace($ADServiceAccount)) { 'configure after installation' } else { $ADServiceAccount }
+        Write-Host "  - Forest domain: $ActiveDirectoryForestDomain"
+        Write-Host "  - Service account: $accountText"
+    }
 }
 
 <#
@@ -1135,27 +1167,6 @@ function Read-InstallerValueWithDefault {
     }
 
     $enteredValue.Trim()
-}
-
-<#
-.SYNOPSIS
-Returns the Active Directory forest DNS name of the logged-on user.
-
-.OUTPUTS
-System.String, or $null when no forest can be detected, for example on a workgroup computer.
-#>
-function Get-LoggedOnUserForestDomain {
-    try {
-        $forest = Get-ADForest -Current LoggedOnUser -ErrorAction Stop
-        if (-not [string]::IsNullOrWhiteSpace([string]$forest.Name)) {
-            return ([string]$forest.Name).Trim()
-        }
-    }
-    catch {
-        Write-Verbose "No Active Directory forest default was detected for the logged-on user: $($_.Exception.Message)"
-    }
-
-    $null
 }
 
 <#
@@ -1856,7 +1867,8 @@ Validates that a subnet meets the Flex Consumption (FC1) VNet integration requir
 
 .DESCRIPTION
 Requires a subnet name without underscores, at least one IPv4 prefix of /27 or larger, an
-exclusive delegation to Microsoft.App/environments, and no service endpoints.
+exclusive delegation to Microsoft.App/environments. Existing service endpoints are reported as
+warnings by Get-SubnetServiceEndpointWarning.
 
 .PARAMETER Subnet
 Subnet object returned by 'az network vnet subnet show'.
@@ -1893,8 +1905,60 @@ function Assert-Subnet {
     if (@($delegations | Where-Object { $_ -ne 'Microsoft.App/environments' }).Count -gt 0) {
         throw "Subnet '$SubnetName' has unsupported additional delegations: $($delegations -join ', ')."
     }
-    if (@($Subnet.serviceEndpoints).Count -gt 0) {
-        throw "FC1 integration subnet '$SubnetName' must not contain service endpoints."
+    foreach ($warning in @(Get-SubnetServiceEndpointWarning -Subnet $Subnet -SubnetLabel "FC1 integration subnet '$SubnetName'")) {
+        Write-Warning $warning
+    }
+}
+
+<#
+.SYNOPSIS
+Describes the service endpoints of a subnet as installer warnings.
+
+.DESCRIPTION
+HybridDeviceTagger reaches Storage and Key Vault through private endpoints, so the Function needs no
+service endpoint. Microsoft documents FC1 integration subnets without service endpoints; existing
+endpoints are therefore reported instead of blocking the installation. Each warning names the
+service, its provisioning state, and whether its locations cover the deployment region.
+
+.PARAMETER Subnet
+Subnet object returned by 'az network vnet subnet show'.
+
+.PARAMETER SubnetLabel
+Subnet description used in the warnings.
+
+.OUTPUTS
+System.String[]. One warning per service endpoint; empty when the subnet has none.
+#>
+function Get-SubnetServiceEndpointWarning {
+    param(
+        [Parameter(Mandatory)]$Subnet,
+        [Parameter(Mandatory)][string]$SubnetLabel
+    )
+
+    $serviceEndpoints = @(if ($null -ne $Subnet.PSObject.Properties['serviceEndpoints']) {
+        $Subnet.serviceEndpoints | Where-Object { $null -ne $_ }
+    })
+    $normalizedLocation = ([string]$Location -replace '\s', '').ToLowerInvariant()
+    foreach ($endpoint in $serviceEndpoints) {
+        $service = [string]$endpoint.service
+        $state = if ($null -ne $endpoint.PSObject.Properties['provisioningState'] -and $endpoint.provisioningState) {
+            [string]$endpoint.provisioningState
+        }
+        else {
+            'Unknown'
+        }
+        $locations = @(if ($null -ne $endpoint.PSObject.Properties['locations']) {
+            $endpoint.locations | ForEach-Object { ([string]$_ -replace '\s', '').ToLowerInvariant() }
+        })
+        $findings = [Collections.Generic.List[string]]::new()
+        if ($state -ne 'Succeeded') {
+            $findings.Add("provisioning state is '$state'")
+        }
+        if ($locations.Count -gt 0 -and $locations -notcontains '*' -and $locations -notcontains $normalizedLocation) {
+            $findings.Add("locations '$($locations -join ', ')' do not include '$Location'")
+        }
+        $detail = if ($findings.Count -gt 0) { " Findings: $($findings -join '; ')." } else { '' }
+        "$SubnetLabel has the service endpoint '$service'. HybridDeviceTagger uses only private endpoints and does not need it; Microsoft recommends FC1 integration subnets without service endpoints. If VNet integration or deployment fails, remove the endpoint or use another subnet.$detail"
     }
 }
 
@@ -2932,7 +2996,10 @@ Deploys the prebuilt Function package to the Function App.
 .DESCRIPTION
 Extracts the package to a temporary directory, verifies the required Functions host files, adds the
 public trust-anchor certificate as PEM when one was supplied, repackages the content, and deploys it
-with 'az functionapp deployment source config-zip'. The temporary directory is always removed.
+with 'az functionapp deployment source config-zip'. The upload runs through the Function virtual
+network and therefore verifies private endpoint DNS independently of the installation computer.
+Network errors are retried three times after 60 seconds; afterwards interactive runs can retry after
+DNS is fixed, and unattended runs fail with DNS guidance. The temporary directory is always removed.
 #>
 function Publish-FunctionApp {
     $temporaryRoot = Join-Path ([System.IO.Path]::GetTempPath()) "HybridDeviceTagger-$([guid]::NewGuid())"
@@ -2965,14 +3032,48 @@ function Publish-FunctionApp {
             -DestinationPath $zipPath `
             -CompressionLevel Optimal `
             -Confirm:$false
-        $null = Invoke-AzureCli -Arguments @(
-            'functionapp', 'deployment', 'source', 'config-zip',
-            '--subscription', $SubscriptionId,
-            '--resource-group', $ResourceGroupName,
-            '--name', $FunctionAppName,
-            '--src', $zipPath,
-            '--only-show-errors'
-        )
+        # Flex Consumption uploads the package through the Function VNet to the private storage
+        # endpoint. This is the authoritative DNS check when the installation PC is outside the VNet;
+        # new private endpoints and DNS forwarding can need a few minutes, so network errors retry.
+        $networkErrorPattern = '(?i)BlobUploadFailed|temporarily unavailable|Name or service not known|No such host'
+        $maximumAutomaticAttempts = 4
+        $attempt = 0
+        while ($true) {
+            $attempt++
+            $deploymentResult = Invoke-AzureCli -Arguments @(
+                'functionapp', 'deployment', 'source', 'config-zip',
+                '--subscription', $SubscriptionId,
+                '--resource-group', $ResourceGroupName,
+                '--name', $FunctionAppName,
+                '--src', $zipPath,
+                '--only-show-errors'
+            ) -AllowFailure
+            if ($deploymentResult.ExitCode -eq 0) {
+                break
+            }
+            if ($deploymentResult.Output -notmatch $networkErrorPattern) {
+                throw "Function code deployment failed:`n$($deploymentResult.Output)"
+            }
+            if ($attempt -lt $maximumAutomaticAttempts) {
+                Write-Warning "The Function could not reach its private storage endpoint yet; retrying the code deployment in 60 seconds ($attempt/$($maximumAutomaticAttempts - 1))."
+                Start-Sleep -Seconds 60
+                continue
+            }
+
+            $hint = "The Function could not reach '$StorageAccountName.blob.core.windows.net' from its virtual network. This is usually DNS: the VNet DNS server(s) $(@($virtualNetwork.dhcpOptions.dnsServers) -join ', ') must resolve the name to the storage private endpoint, for example by forwarding to Azure DNS 168.63.129.16 or through conditional forwarders for privatelink.blob.core.windows.net, privatelink.queue.core.windows.net, and privatelink.vaultcore.azure.net."
+            if ($script:NonInteractive) {
+                throw "Function code deployment failed:`n$($deploymentResult.Output)`n$hint Fix DNS and run the installation again; existing resources are reused."
+            }
+            Write-Host $deploymentResult.Output -ForegroundColor Red
+            Write-Warning $hint
+            $answer = ''
+            do {
+                $answer = (Read-Host 'Fix the VNet DNS, then press ENTER to retry the code deployment, or enter A to abort').Trim()
+            } while ($answer -notin '', 'A')
+            if ($answer -eq 'A') {
+                throw "Function code deployment aborted. $hint Fix DNS and run the installation again; existing resources are reused."
+            }
+        }
     }
     finally {
         if (Test-Path $temporaryRoot) {
@@ -3051,7 +3152,8 @@ Private IP addresses of the private endpoint.
 Service label used in error messages.
 
 .OUTPUTS
-System.Boolean. True only when every configured DNS server returns an expected private address.
+System.Boolean. True when no reachable DNS server returned a wrong or missing address. Servers that
+cannot be queried from this computer are added to $script:UnreachableDnsServers instead of failing.
 #>
 function Test-CustomDnsPrivateEndpointResolution {
     param(
@@ -3078,6 +3180,14 @@ function Test-CustomDnsPrivateEndpointResolution {
         )
 
         if (@($resolvedAddresses | Where-Object { $ExpectedAddresses -contains $_ }).Count -eq 0) {
+            # The installation PC is often outside the VNet; an unanswered query proves nothing.
+            if ($resolvedAddresses.Count -eq 0 -and $dnsErrors.Count -gt 0 -and
+                [string]$dnsErrors[0].Exception.Message -match '(?i)timeout|timed out|unreachable|not reachable|no response|could not be contacted') {
+                if ($script:UnreachableDnsServers -notcontains $dnsServer) {
+                    $script:UnreachableDnsServers += $dnsServer
+                }
+                continue
+            }
             $allResolved = $false
             $observed = if ($resolvedAddresses.Count -gt 0) {
                 "Returned addresses: $($resolvedAddresses -join ', ')."
@@ -3138,10 +3248,12 @@ Validates private endpoint DNS resolution through the custom DNS servers of the 
 
 .DESCRIPTION
 Checks the Blob and Queue Storage endpoints and, for a vault created by the installer, the Key
-Vault endpoint once per DNS server. On failure, prints the required zone records and waits for
-interactive confirmation, or terminates without prompting in unattended mode. Confirmation resumes
-installation without rechecking DNS and warns that the configuration was not independently verified.
-Returns without checks when the VNet uses Azure-provided DNS.
+Vault endpoint once per DNS server. When a reachable server returns a wrong or missing address,
+prints the required zone records and waits for interactive confirmation, or terminates without
+prompting in unattended mode. Confirmation resumes installation without rechecking DNS. DNS servers
+that cannot be queried from this computer only produce a warning and the record guidance, because
+the code deployment verifies DNS from the Function virtual network. Returns without checks when the
+VNet uses Azure-provided DNS.
 #>
 function Assert-PrivateEndpointDnsResolution {
     $customDnsServers = @($virtualNetwork.dhcpOptions.dnsServers)
@@ -3191,14 +3303,20 @@ function Assert-PrivateEndpointDnsResolution {
         }
     }
 
+    $script:UnreachableDnsServers = @()
     $allResolved = $true
     foreach ($endpoint in $endpoints) {
         if (-not (Test-CustomDnsPrivateEndpointResolution -DnsServers $customDnsServers @endpoint)) {
             $allResolved = $false
         }
     }
-    if ($allResolved) {
+    if ($allResolved -and $script:UnreachableDnsServers.Count -eq 0) {
         Write-Host "Private endpoint DNS resolution validated through custom DNS server(s): $($customDnsServers -join ', ')." -ForegroundColor Green
+        return
+    }
+    if ($allResolved) {
+        Write-Warning "DNS server(s) $($script:UnreachableDnsServers -join ', ') cannot be queried from this computer, for example because it is outside the virtual network. Private endpoint DNS is therefore verified from the Function virtual network during code deployment. The VNet DNS servers must resolve the following names to the private endpoints."
+        Write-PrivateEndpointDnsGuidance -Endpoints $endpoints -DnsServers $customDnsServers
         return
     }
 
@@ -3229,8 +3347,20 @@ try {
     $transcriptStarted = $true
     Write-Host "Installer log: $installerLogPath"
 
-if ([string]::IsNullOrWhiteSpace($ActiveDirectoryTrustedCertificatePath)) {
-    throw 'A public root CA certificate (.cer/.pem) is REQUIRED for installation, validation, and updates. Supply -ActiveDirectoryTrustedCertificatePath. The certificate is imported into the Azure Function package for LDAPS and StartTLS; importing it into the installation PC certificate store alone is insufficient.'
+# Active Directory values are optional pre-seeding only; they are never prompted.
+$script:ConfigureActiveDirectory = -not [string]::IsNullOrWhiteSpace($ActiveDirectoryForestDomain)
+if (-not $script:ConfigureActiveDirectory) {
+    $dependentParameters = @(
+        'ADServiceAccount', 'ADServiceAccountCredential', 'ActiveDirectoryBindUserDistinguishedName',
+        'ActiveDirectoryServer', 'SkipActiveDirectoryDirectoryChecks'
+    ) | Where-Object { $PSBoundParameters.ContainsKey($_) }
+    if (@($dependentParameters).Count -gt 0) {
+        throw "$($dependentParameters -join ', ') require -ActiveDirectoryForestDomain. Omit all Active Directory parameters to configure Active Directory after installation in the configuration portal or with the management module."
+    }
+}
+if ($null -ne $ADServiceAccountCredential -and
+    [string]::IsNullOrWhiteSpace($ActiveDirectoryTrustedCertificatePath)) {
+    throw 'ADServiceAccountCredential requires -ActiveDirectoryTrustedCertificatePath, because the Function validates the credential through LDAPS or StartTLS during installation. Alternatively omit the credential and configure the certificate and service account after installation.'
 }
 
 # Phase 1: select the Azure subscription, then collect missing target values in installation order.
@@ -3518,93 +3648,42 @@ if ($script:StorageQueuePrivateDnsZoneResourceId) {
     Write-Host "Reusing Queue Storage private DNS zone '$($script:StorageQueuePrivateDnsZoneResourceId)'."
 }
 
-# Phase 3: collect the Active Directory forest, domain controller candidates, and service account.
-if ([string]::IsNullOrWhiteSpace($ActiveDirectoryForestDomain)) {
-    $defaultActiveDirectoryForestDomain = Get-LoggedOnUserForestDomain
-    if ([string]::IsNullOrWhiteSpace($defaultActiveDirectoryForestDomain)) {
-        $ActiveDirectoryForestDomain = Read-RequiredInstallerValue `
-            -Name 'ActiveDirectoryForestDomain' `
-            -Prompt 'Active Directory forest DNS name'
-    }
-    elseif (-not $script:NonInteractive) {
-        $enteredActiveDirectoryForestDomain = Read-Host (
-            "Active Directory forest DNS name [$defaultActiveDirectoryForestDomain]"
+# Phase 3: resolve optional pre-seeded Active Directory values. Nothing is prompted; without a forest
+# domain the Function starts unconfigured and Active Directory is configured after installation.
+$script:DeferredActiveDirectoryValidation = $false
+$script:ActiveDirectoryServerCandidates = @()
+if ($script:ConfigureActiveDirectory) {
+    if ([string]::IsNullOrWhiteSpace($ActiveDirectoryServer)) {
+        $script:ActiveDirectoryServerCandidates = @(
+            Get-ActiveDirectoryDomainControllerList -Domain $ActiveDirectoryForestDomain -AllowUnavailable
         )
-        $ActiveDirectoryForestDomain = if (
-            [string]::IsNullOrWhiteSpace($enteredActiveDirectoryForestDomain)
-        ) {
-            $defaultActiveDirectoryForestDomain
-        }
-        else {
-            $enteredActiveDirectoryForestDomain.Trim()
+        $script:DeferredActiveDirectoryValidation = $script:ActiveDirectoryServerCandidates.Count -eq 0
+        if (-not $script:DeferredActiveDirectoryValidation) {
+            $ActiveDirectoryServer = $script:ActiveDirectoryServerCandidates[0]
+            Write-Host (
+                "Discovered Active Directory domain controllers through DNS SRV: {0}" -f
+                ($script:ActiveDirectoryServerCandidates -join ', ')
+            )
         }
     }
     else {
-        $ActiveDirectoryForestDomain = $defaultActiveDirectoryForestDomain
+        $script:ActiveDirectoryServerCandidates = @($ActiveDirectoryServer)
     }
-}
 
-$script:DeferredActiveDirectoryValidation = $false
-if ([string]::IsNullOrWhiteSpace($ActiveDirectoryServer)) {
-    $script:ActiveDirectoryServerCandidates = @(
-        Get-ActiveDirectoryDomainControllerList -Domain $ActiveDirectoryForestDomain -AllowUnavailable
-    )
-    $script:DeferredActiveDirectoryValidation = $script:ActiveDirectoryServerCandidates.Count -eq 0
-    if (-not $script:DeferredActiveDirectoryValidation) {
-        $ActiveDirectoryServer = $script:ActiveDirectoryServerCandidates[0]
-        Write-Host (
-            "Discovered Active Directory domain controllers through DNS SRV: {0}" -f
-            ($script:ActiveDirectoryServerCandidates -join ', ')
-        )
+    if ([string]::IsNullOrWhiteSpace($ADServiceAccount) -and $null -ne $ADServiceAccountCredential) {
+        $ADServiceAccount = $ADServiceAccountCredential.UserName.Trim()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ADServiceAccount) -and
+        $ADServiceAccount -notmatch '^[^@\s]+@[^@\s]+$') {
+        throw 'ADServiceAccount must be a user principal name such as service-account@contoso.com.'
+    }
+    if ($SkipActiveDirectoryDirectoryChecks -and [string]::IsNullOrWhiteSpace($ADServiceAccount)) {
+        throw 'SkipActiveDirectoryDirectoryChecks requires ADServiceAccount or ADServiceAccountCredential.'
     }
 }
 else {
-    $script:ActiveDirectoryServerCandidates = @($ActiveDirectoryServer)
+    Write-Host 'Active Directory is not configured by the installer. Configure the forest domain, trust certificate, and service account after installation.' -ForegroundColor Yellow
 }
-
-if ([string]::IsNullOrWhiteSpace($ADServiceAccount)) {
-    if ($null -ne $ADServiceAccountCredential) {
-        $ADServiceAccount = $ADServiceAccountCredential.UserName.Trim()
-    }
-    elseif ($script:NonInteractive) {
-        throw 'ADServiceAccountCredential or ADServiceAccount must be supplied explicitly for noninteractive execution.'
-    }
-    else {
-        $defaultADServiceAccount = "HybridDeviceTagger@$ActiveDirectoryForestDomain"
-        $enteredADServiceAccount = Read-Host (
-            "Service Account [$defaultADServiceAccount]"
-        )
-        $ADServiceAccount = if (
-            [string]::IsNullOrWhiteSpace($enteredADServiceAccount)
-        ) {
-            $defaultADServiceAccount
-        }
-        else {
-            $enteredADServiceAccount.Trim()
-        }
-    }
-}
-if ($ADServiceAccount -notmatch '^[^@\s]+@[^@\s]+$') {
-    throw 'ADServiceAccount must be a user principal name such as service-account@contoso.com.'
-}
-
-if (-not $SkipActiveDirectoryDirectoryChecks -and
-    $null -eq $ADServiceAccountCredential) {
-    if ($script:NonInteractive) {
-        throw 'ADServiceAccountCredential must be supplied explicitly for noninteractive execution.'
-    }
-    $ADServiceAccountCredential = Get-Credential `
-        -UserName $ADServiceAccount `
-        -Message 'Enter the Active Directory service-account password for bind validation'
-    if ($null -eq $ADServiceAccountCredential) {
-        throw 'Active Directory service-account credential entry was canceled.'
-    }
-}
-if ($null -ne $ADServiceAccountCredential -and
-    $ADServiceAccountCredential.UserName -ine $ADServiceAccount) {
-    throw 'The credential user name must match the selected AD service-account UPN.'
-}
-
 # Phase 4: select the Key Vault mode. A new vault always uses the Function App subscription and
 # resource group.
 if (-not $createKeyVaultWasSupplied -and
@@ -3625,9 +3704,6 @@ if (-not $createKeyVaultWasSupplied -and
 }
 
 if ($CreateKeyVault) {
-    if ($SkipActiveDirectoryDirectoryChecks) {
-        throw 'Creating a Key Vault requires Active Directory credential validation so the current secret can be initialized.'
-    }
     $KeyVaultSubscriptionId = $SubscriptionId
     $KeyVaultResourceGroupName = $ResourceGroupName
     $script:KeyVaultPrivateDnsZoneResourceId = Get-PrivateDnsZoneResourceId `
@@ -3692,6 +3768,42 @@ $targetFunctionResult = Invoke-AzureCli -Arguments @(
     '--only-show-errors', '--output', 'none'
 ) -AllowFailure
 $targetFunctionExists = $targetFunctionResult.ExitCode -eq 0
+$script:ExistingAppSettings = @{}
+if ($targetFunctionExists) {
+    $appSettingsResult = Invoke-AzureCli -Arguments @(
+        'functionapp', 'config', 'appsettings', 'list',
+        '--subscription', $SubscriptionId,
+        '--resource-group', $ResourceGroupName,
+        '--name', $FunctionAppName,
+        '--only-show-errors', '--output', 'json'
+    ) -AllowFailure
+    if ($appSettingsResult.ExitCode -eq 0) {
+        foreach ($setting in @($appSettingsResult.Output | ConvertFrom-Json -Depth 100)) {
+            $script:ExistingAppSettings[[string]$setting.name] = [string]$setting.value
+        }
+    }
+}
+
+# Updates without pre-seeded values keep the directory settings of the existing Function App, so
+# an infrastructure update never removes the forest or service account configured earlier.
+if (-not $script:ConfigureActiveDirectory) {
+    # The parameters keep their validation attributes, so only nonempty values may be assigned.
+    $existingDomain = [string]$script:ExistingAppSettings['ActiveDirectory__Domain']
+    $existingUsername = [string]$script:ExistingAppSettings['ActiveDirectory__BindUsername']
+    $existingDistinguishedName = [string]$script:ExistingAppSettings['ActiveDirectory__BindUserDistinguishedName']
+    if (-not [string]::IsNullOrWhiteSpace($existingDomain)) { $ActiveDirectoryForestDomain = $existingDomain }
+    if (-not [string]::IsNullOrWhiteSpace($existingUsername)) { $ADServiceAccount = $existingUsername }
+    if (-not [string]::IsNullOrWhiteSpace($existingDistinguishedName)) {
+        $ActiveDirectoryBindUserDistinguishedName = $existingDistinguishedName
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ActiveDirectoryForestDomain)) {
+        Write-Host "Keeping the Active Directory settings of the existing Function App (forest '$ActiveDirectoryForestDomain')."
+    }
+}
+$script:DroppedPackagedCertificate = [string]::IsNullOrWhiteSpace($ActiveDirectoryTrustedCertificatePath) -and
+    -not $SkipCodeDeployment -and
+    -not [string]::IsNullOrWhiteSpace([string]$script:ExistingAppSettings['ActiveDirectory__TrustedCertificatePath'])
+
 if ([string]::IsNullOrWhiteSpace($ManagementApiClientId)) {
     if (-not $targetFunctionExists) {
         $script:CreateManagementApiApplication = $true
@@ -3699,21 +3811,9 @@ if ([string]::IsNullOrWhiteSpace($ManagementApiClientId)) {
         Write-Host 'A new management API Entra application will be created automatically after installation approval.' -ForegroundColor Green
     }
     else {
-        $appSettingsResult = Invoke-AzureCli -Arguments @(
-            'functionapp', 'config', 'appsettings', 'list',
-            '--subscription', $SubscriptionId,
-            '--resource-group', $ResourceGroupName,
-            '--name', $FunctionAppName,
-            '--only-show-errors', '--output', 'json'
-        ) -AllowFailure
-        if ($appSettingsResult.ExitCode -eq 0) {
-            $appSettings = @($appSettingsResult.Output | ConvertFrom-Json -Depth 100)
-            $managementApiClientIdSetting = $appSettings |
-                Where-Object { $_.name -eq 'ManagementApi__ClientId' } |
-                Select-Object -First 1
-            if ($managementApiClientIdSetting) {
-                $ManagementApiClientId = [string]$managementApiClientIdSetting.value
-            }
+        $existingClientId = [string]$script:ExistingAppSettings['ManagementApi__ClientId']
+        if (-not [string]::IsNullOrWhiteSpace($existingClientId)) {
+            $ManagementApiClientId = $existingClientId
         }
         if (-not [string]::IsNullOrWhiteSpace($ManagementApiClientId)) {
             Write-Host "Reusing management API Entra application '$ManagementApiClientId' from the existing Function App configuration." -ForegroundColor Green
@@ -3755,8 +3855,7 @@ $requiredInputValidation = @(
     @{ Name = 'SubnetName'; Value = $SubnetName; MaximumLength = 80 },
     @{ Name = 'PrivateEndpointSubnetName'; Value = $PrivateEndpointSubnetName; MaximumLength = 80 },
     @{ Name = 'VirtualNetworkResourceGroupName'; Value = $VirtualNetworkResourceGroupName; MaximumLength = 90 },
-    @{ Name = 'KeyVaultResourceGroupName'; Value = $KeyVaultResourceGroupName; MaximumLength = 90 },
-    @{ Name = 'ADServiceAccount'; Value = $ADServiceAccount; MaximumLength = 256 }
+    @{ Name = 'KeyVaultResourceGroupName'; Value = $KeyVaultResourceGroupName; MaximumLength = 90 }
 )
 foreach ($validation in $requiredInputValidation) {
     if ([string]::IsNullOrWhiteSpace([string]$validation.Value) -or
@@ -3764,11 +3863,15 @@ foreach ($validation in $requiredInputValidation) {
         throw "$($validation.Name) must contain 1-$($validation.MaximumLength) characters."
     }
 }
-if (-not $script:DeferredActiveDirectoryValidation -and
+if (-not [string]::IsNullOrWhiteSpace($ADServiceAccount) -and $ADServiceAccount.Length -gt 256) {
+    throw 'ADServiceAccount cannot exceed 256 characters.'
+}
+if ($script:ConfigureActiveDirectory -and -not $script:DeferredActiveDirectoryValidation -and
     ([string]::IsNullOrWhiteSpace($ActiveDirectoryServer) -or $ActiveDirectoryServer.Length -gt 253)) {
     throw 'ActiveDirectoryServer must contain 1-253 characters.'
 }
-if ($SkipActiveDirectoryDirectoryChecks -and -not $script:DeferredActiveDirectoryValidation -and
+if ($script:ConfigureActiveDirectory -and $SkipActiveDirectoryDirectoryChecks -and
+    -not $script:DeferredActiveDirectoryValidation -and
     [string]::IsNullOrWhiteSpace($ActiveDirectoryBindUserDistinguishedName)) {
     throw 'ActiveDirectoryBindUserDistinguishedName must be supplied when Active Directory directory checks are skipped.'
 }
@@ -3785,7 +3888,8 @@ if ($StorageAccountName -notmatch '^[a-z0-9]{3,24}$') {
 if ($KeyVaultName -notmatch '^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$') {
     throw 'KeyVaultName must contain 3-24 letters, numbers, or hyphens and must start with a letter and end with a letter or number.'
 }
-if ($ActiveDirectoryForestDomain -notmatch '^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$') {
+if (-not [string]::IsNullOrWhiteSpace($ActiveDirectoryForestDomain) -and
+    $ActiveDirectoryForestDomain -notmatch '^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$') {
     throw 'ActiveDirectoryForestDomain must be a valid DNS domain name.'
 }
 foreach ($tag in $Tags.GetEnumerator()) {
@@ -3808,7 +3912,9 @@ if (-not (Test-Path $templatePath)) { throw "Bicep template not found: $template
 if (-not (Test-Path -LiteralPath $FunctionPackagePath -PathType Leaf)) {
     throw "Prebuilt Function package not found: $FunctionPackagePath. Use a release package or run scripts/Build-InstallationPackage.ps1 first."
 }
-Import-InstallerLdapClient -PackagePath $FunctionPackagePath
+if ($script:ConfigureActiveDirectory) {
+    Import-InstallerLdapClient -PackagePath $FunctionPackagePath
+}
 if ($ActiveDirectoryTrustedCertificatePath -and -not (Test-Path -LiteralPath $ActiveDirectoryTrustedCertificatePath -PathType Leaf)) {
     throw "Active Directory trusted certificate not found: $ActiveDirectoryTrustedCertificatePath"
 }
@@ -3827,7 +3933,8 @@ if ($ActiveDirectoryTrustedCertificatePath) {
 }
 $script:EffectiveAllowLdapFallback = $script:DeferredActiveDirectoryValidation
 
-if (-not $SkipActiveDirectoryDirectoryChecks -and -not $script:DeferredActiveDirectoryValidation) {
+if ($script:ConfigureActiveDirectory -and $null -ne $ADServiceAccountCredential -and
+    -not $SkipActiveDirectoryDirectoryChecks -and -not $script:DeferredActiveDirectoryValidation) {
     Write-Step 'Validating existing Active Directory service account through secure LDAP'
     $resolvedServiceAccountDn = Resolve-ADServiceAccountDistinguishedName
     if ([string]::IsNullOrWhiteSpace($resolvedServiceAccountDn)) {
@@ -3907,18 +4014,23 @@ $resourceGroupResult = Invoke-AzureCli -Arguments @(
     'group', 'show', '--subscription', $SubscriptionId,
     '--name', $ResourceGroupName, '--only-show-errors', '--output', 'json'
 ) -AllowFailure
+$script:ResourceGroupPending = $false
 if ($resourceGroupResult.ExitCode -ne 0) {
     if (-not $CreateResourceGroup) {
         throw "Resource group '$ResourceGroupName' does not exist. Use -CreateResourceGroup for installation."
     }
     if ($ValidateOnly -or $WhatIfPreference) {
-        throw "Resource group '$ResourceGroupName' must exist before validation or What-if can run."
+        # ARM validation and What-If require an existing resource group; read-only runs must not create it.
+        $script:ResourceGroupPending = $true
+        Write-Warning "Resource group '$ResourceGroupName' does not exist yet and will be created during installation. Every app-owned resource will be new; the ARM validation and What-If steps that require the resource group are skipped."
     }
-    $null = Invoke-AzureCli -Arguments @(
-        'group', 'create', '--subscription', $SubscriptionId,
-        '--name', $ResourceGroupName, '--location', $Location,
-        '--only-show-errors'
-    )
+    else {
+        $null = Invoke-AzureCli -Arguments @(
+            'group', 'create', '--subscription', $SubscriptionId,
+            '--name', $ResourceGroupName, '--location', $Location,
+            '--only-show-errors'
+        )
+    }
 }
 $fc1Locations = Get-AzureJson -Arguments @('functionapp', 'list-flexconsumption-locations')
 if (@($fc1Locations | Where-Object { $_.name -ieq $Location }).Count -eq 0) {
@@ -3971,7 +4083,13 @@ Write-Step 'Validating existing app-owned resources and global names'
 Assert-ExistingOwnedResource
 
 Write-Step 'Validating Active Directory forest, account, read access, and LDAP TLS certificate'
-if ($script:DeferredActiveDirectoryValidation) {
+if (-not $script:ConfigureActiveDirectory) {
+    Write-Host 'Active Directory validation skipped; Active Directory is configured after installation.'
+    if ($script:DroppedPackagedCertificate) {
+        Write-Warning 'The existing Function App uses an LDAP trust certificate packaged by an earlier installer. The new package does not contain it. If the certificate is not yet managed in the configuration portal, add it again with Add-HybridDeviceTaggerTrustedCertificate or rerun with -ActiveDirectoryTrustedCertificatePath.'
+    }
+}
+elseif ($script:DeferredActiveDirectoryValidation) {
     Write-Warning 'Local forest, account, and LDAP TLS checks were not performed because AD DNS is unavailable on this computer. The Function must resolve and reach AD from its VNet and validate the credential before storing it. If needed, correct the forest domain with Set-HybridDeviceTaggerActiveDirectoryConfiguration and initialize the credential afterwards.'
 }
 elseif ($SkipActiveDirectoryDirectoryChecks) {
@@ -4024,8 +4142,11 @@ elseif ($SkipActiveDirectoryDirectoryChecks) {
     $script:EffectiveAllowLdapFallback = $validatedTransport -eq 'LDAP StartTLS'
     Write-Warning "Skipped repeated forest and account checks for the existing deployment; strict $validatedTransport endpoint validation succeeded."
 }
-else {
+elseif ($null -ne $ADServiceAccountCredential) {
     Test-LdapConfiguration
+}
+else {
+    Write-Host "Forest '$ActiveDirectoryForestDomain' is pre-seeded without a credential; directory checks run when the service account is configured after installation."
 }
 
 if ($script:CreateManagementApiApplication -and
@@ -4081,6 +4202,11 @@ try {
     }
 
     if ($ValidateOnly) {
+        if ($script:ResourceGroupPending) {
+            Write-Host 'Bicep compilation and deployment parameters validated. ARM template validation runs during installation after the resource group is created.' -ForegroundColor Yellow
+            Write-Host "Validation completed successfully. No resources were changed." -ForegroundColor Green
+            return
+        }
         Write-Step 'Validating ARM template'
         $null = Invoke-AzureCli -Arguments @(
             'deployment', 'group', 'validate', '--subscription', $SubscriptionId,
@@ -4093,6 +4219,10 @@ try {
     }
 
     if ($WhatIfPreference) {
+        if ($script:ResourceGroupPending) {
+            Write-Host "What-if skipped: resource group '$ResourceGroupName' does not exist, so every resource in the installation summary will be created. No resources were changed." -ForegroundColor Green
+            return
+        }
         Write-Step 'Running Azure Resource Manager What-if'
         $whatIfResult = Invoke-AzureCli -Arguments @(
             'deployment', 'group', 'what-if', '--subscription', $SubscriptionId,
@@ -4185,12 +4315,24 @@ try {
     Write-Host ''
     Write-Host "Configuration portal (Function App Owners and Contributors): $configurationPortalUrl" -ForegroundColor Cyan
     Write-Host ''
+    if ($null -eq $ADServiceAccountCredential) {
+        Write-Host 'Configure Active Directory next. Tagging and password rotation stay inactive until the forest domain and service account are configured.' -ForegroundColor Yellow
+        Write-Host "Use the configuration portal ($configurationPortalUrl) or the HybridDeviceTagger management module:"
+        Write-Host "  Import-Module '$scriptRoot\HybridDeviceTagger.Management'"
+        Write-Host "  Connect-HybridDeviceTagger -ApiBaseUri 'https://$FunctionAppName.azurewebsites.net/api/management' -ClientId '$ManagementApiClientId'"
+        Write-Host "  Set-HybridDeviceTaggerActiveDirectoryConfiguration -Domain 'contoso.com'"
+        Write-Host "  Add-HybridDeviceTaggerTrustedCertificate -Path '.\Contoso-Root-CA.cer'"
+        Write-Host "  Set-HybridDeviceTaggerServiceAccount -Credential (Get-Credential 'svc-tagger@contoso.com')"
+        Write-Host ''
+    }
     Write-Host 'No tagging rules were created during installation.' -ForegroundColor Yellow
     Write-Host "Add the first rule in the configuration portal ($configurationPortalUrl) or through the HybridDeviceTagger management module:"
     Write-Host "  Import-Module '$scriptRoot\HybridDeviceTagger.Management'"
     Write-Host "  Connect-HybridDeviceTagger -ApiBaseUri 'https://$FunctionAppName.azurewebsites.net/api/management' -ClientId '$ManagementApiClientId'"
     Write-Host '  Get-Help Add-HybridDeviceTaggerRule -Examples'
     Write-Host '  Add-HybridDeviceTaggerRule -Rule $rule'
+    Write-Host ''
+    Write-Host "Open the configuration portal to configure HybridDeviceTagger: $configurationPortalUrl" -ForegroundColor Cyan
 }
 finally {
     if ([System.IO.File]::Exists($parameterFile)) {

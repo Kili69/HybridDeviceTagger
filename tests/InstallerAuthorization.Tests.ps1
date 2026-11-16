@@ -39,17 +39,14 @@ foreach ($name in 'Get-SavedValue', 'Get-Answer', 'Get-NameSuffix',
 }
 
 function Write-Section {}
-function Get-LoggedOnForest { 'contoso.com' }
 function Read-YesNo { $true }
 function Read-Value {
     param($Prompt, $Default, $Pattern, $ValidationMessage, $Optional, $Help)
     if ($Prompt -like '*Object ID of the user or group*') {
         throw 'The guided installer must not prompt for bootstrap principals.'
     }
-    if ($Prompt -like '*root CA certificate*') {
-        if ($Optional) { throw 'The root CA certificate must not be optional.' }
-        $script:CertificatePromptCount++
-        return $script:CertificateInput
+    if ($Prompt -match '(?i)root CA|certificate|forest|service account|distinguished name|domain controller') {
+        throw "The guided installer must not prompt for Active Directory configuration: $Prompt"
     }
     if ($Default) { return $Default }
     if ($Optional) { return '' }
@@ -57,26 +54,21 @@ function Read-Value {
 }
 
 $guidPattern = '^[0-9a-fA-F-]{36}$'
-$dnsNamePattern = '.+'
-$ncrontabPattern = '.+'
 $AzureAccount = @{ id = '11111111-1111-1111-1111-111111111111' }
-$ActiveDirectoryCredential = [pscredential]::new(
-    'service@contoso.com', (ConvertTo-SecureString 'test-password' -AsPlainText -Force))
-$CertificateInput = $PSCommandPath
 
 foreach ($UseSavedSettings in $false, $true) {
-    foreach ($certificatePath in $null, '', $PSCommandPath) {
-    $CertificatePromptCount = 0
     $saved = @{
         ManagementApiAllowedPrincipalObjectId = '22222222-2222-2222-2222-222222222222'
         CreateKeyVault = $true
-        ActiveDirectoryTrustedCertificatePath = $certificatePath
+        ActiveDirectoryForestDomain = 'contoso.com'
+        ServiceAccountUpn = 'service@contoso.com'
+        ActiveDirectoryTrustedCertificatePath = $PSCommandPath
     }
     $settings = Read-InstallationSetting
-    $expectedPrompts = if ($UseSavedSettings -and $certificatePath) { 0 } else { 1 }
-    if ($CertificatePromptCount -ne $expectedPrompts -or
-        $settings.ActiveDirectoryTrustedCertificatePath -ne $PSCommandPath) {
-        throw 'Missing or empty saved root CA paths must prompt; valid saved paths must be preserved.'
+    foreach ($key in 'ActiveDirectoryForestDomain', 'ServiceAccountUpn', 'ActiveDirectoryTrustedCertificatePath', 'ActiveDirectoryServer', 'ActiveDirectoryBindUserDistinguishedName') {
+        if ($settings.Contains($key)) {
+            throw "Guided settings must not retain the Active Directory value '$key' from earlier versions."
+        }
     }
     if ($settings.Contains('ManagementApiAllowedPrincipalObjectId')) {
         throw 'Guided settings must not retain legacy bootstrap principals.'
@@ -90,39 +82,11 @@ foreach ($UseSavedSettings in $false, $true) {
     if ($parameters.ContainsKey('ManagementApiAllowedPrincipalObjectId')) {
         throw 'Parameter conversion must ignore legacy bootstrap settings.'
     }
-    if ($parameters.ADServiceAccountCredential -ne $ActiveDirectoryCredential -or
-        $parameters.ContainsKey('ServiceAccountUpn')) {
-        throw 'Parameter conversion must preserve the credential-only parameter set.'
+    if ($parameters.ContainsKey('ADServiceAccountCredential') -or
+        $parameters.ContainsKey('ActiveDirectoryTrustedCertificatePath') -or
+        $parameters.ContainsKey('ActiveDirectoryForestDomain')) {
+        throw 'The guided installer must not pass Active Directory configuration to the engine.'
     }
-    if ($parameters.ActiveDirectoryTrustedCertificatePath -ne $PSCommandPath) {
-        throw 'Parameter conversion must pass the required root CA path to the engine.'
-    }
-    }
-}
-
-$certificateFixture = Join-Path ([IO.Path]::GetTempPath()) "HybridDeviceTagger root $([guid]::NewGuid()).cer"
-$null = New-Item -ItemType File -Path $certificateFixture
-try {
-    foreach ($UseSavedSettings in $false, $true) {
-        foreach ($quote in '', '"', "'") {
-            $CertificateInput = "  $quote$certificateFixture$quote  "
-            $saved = @{
-                ActiveDirectoryTrustedCertificatePath = $CertificateInput
-                CreateKeyVault = $true
-            }
-            $settings = Read-InstallationSetting
-            if ($settings.ActiveDirectoryTrustedCertificatePath -cne $certificateFixture) {
-                throw 'Quoted and unquoted certificate paths containing spaces must resolve for new and saved answers.'
-            }
-            $parameters = ConvertTo-EngineParameter -Settings $settings
-            if ($parameters.ActiveDirectoryTrustedCertificatePath -cne $certificateFixture) {
-                throw 'The engine must receive the resolved certificate path without surrounding quotes.'
-            }
-        }
-    }
-}
-finally {
-    Remove-Item -LiteralPath $certificateFixture -Force
 }
 
 $roleAssignment = $engineAst.Find({

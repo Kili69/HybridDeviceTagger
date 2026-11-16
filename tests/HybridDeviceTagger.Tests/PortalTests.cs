@@ -339,6 +339,38 @@ public sealed class PortalTests
         Assert.Equal(expected, await function.IsDueAsync(CancellationToken.None));
     }
 
+    [Theory]
+    [InlineData("", "svc@example.com", false)]
+    [InlineData("example.com", "", false)]
+    [InlineData("example.com", "svc@example.com", true)]
+    public async Task TaggingTimer_SkipsUntilDirectoryIsConfigured(string domain, string username, bool expected)
+    {
+        var store = new Mock<IActiveDirectoryConfigurationStore>();
+        store.Setup(value => value.GetAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ActiveDirectoryConfigurationSnapshot(domain, null, null, "appSetting"));
+        var function = new DeviceTaggerFunction(
+            null!, Mock.Of<IRunTraceStore>(), Mock.Of<IOperationStatusStore>(), Mock.Of<IOperationLock>(),
+            NullLogger<DeviceTaggerFunction>.Instance,
+            directoryConfigurationStore: store.Object,
+            directoryOptions: Microsoft.Extensions.Options.Options.Create(new ActiveDirectoryOptions { BindUsername = username }));
+
+        Assert.Equal(expected, await function.IsDirectoryConfiguredAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public void RootRedirect_AlwaysTargetsTheFixedPortalPath()
+    {
+        var function = new PortalFunction(Microsoft.Extensions.Options.Options.Create(new ManagementApiOptions()));
+        var request = new DefaultHttpContext().Request;
+        request.QueryString = new QueryString("?returnUrl=https://attacker.example");
+
+        var result = Assert.IsType<RedirectResult>(function.RedirectRoot(request));
+
+        Assert.Equal("/api/portal", result.Url);
+        Assert.False(result.Permanent);
+        Assert.Equal("no-store", request.HttpContext.Response.Headers.CacheControl.ToString());
+    }
+
     [Fact]
     public async Task PortalFiles_AreEmbeddedAndServedWithStrictSecurityHeaders()
     {

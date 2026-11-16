@@ -18,9 +18,11 @@
  */
 
 using HybridDeviceTagger.Models;
+using HybridDeviceTagger.Options;
 using HybridDeviceTagger.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace HybridDeviceTagger;
 
@@ -57,6 +59,12 @@ public class DeviceTaggerFunction
     /// <summary>Supplies the current time for the interval check.</summary>
     private readonly TimeProvider _timeProvider;
 
+    /// <summary>Supplies the post-installation directory configuration; null always runs.</summary>
+    private readonly IActiveDirectoryConfigurationStore? _directoryConfigurationStore;
+
+    /// <summary>The initial directory application settings.</summary>
+    private readonly ActiveDirectoryOptions _directoryOptions;
+
     /// <summary>Initializes a new instance of the <see cref="DeviceTaggerFunction"/> class.</summary>
     /// <param name="deviceTaggingService">The device-tagging orchestrator.</param>
     /// <param name="runTraceStore">The latest-run diagnostic trace store.</param>
@@ -66,6 +74,10 @@ public class DeviceTaggerFunction
     /// <param name="activityLog">The optional activity log.</param>
     /// <param name="scheduleStore">The optional runtime interval store; without it every timer tick runs.</param>
     /// <param name="timeProvider">The optional time source.</param>
+    /// <param name="directoryConfigurationStore">
+    /// The optional directory configuration; scheduled runs are skipped while it is incomplete.
+    /// </param>
+    /// <param name="directoryOptions">The optional initial directory application settings.</param>
     public DeviceTaggerFunction(
         DeviceTaggingService deviceTaggingService,
         IRunTraceStore runTraceStore,
@@ -74,10 +86,14 @@ public class DeviceTaggerFunction
         ILogger<DeviceTaggerFunction> logger,
         IActivityLog? activityLog = null,
         IOperationScheduleStore? scheduleStore = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IActiveDirectoryConfigurationStore? directoryConfigurationStore = null,
+        IOptions<ActiveDirectoryOptions>? directoryOptions = null)
     {
         _scheduleStore = scheduleStore;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _directoryConfigurationStore = directoryConfigurationStore;
+        _directoryOptions = directoryOptions?.Value ?? new ActiveDirectoryOptions();
         _activityLog = activityLog ?? NullActivityLog.Instance;
         _deviceTaggingService = deviceTaggingService;
         _runTraceStore = runTraceStore;
@@ -89,6 +105,7 @@ public class DeviceTaggerFunction
     /// <summary>Tags eligible devices when the configured interval has elapsed.</summary>
     /// <remarks>
     /// The timer ticks every five minutes; the configurable interval decides whether a tick runs.
+    /// Ticks are skipped until the Active Directory forest and service account are configured.
     /// </remarks>
     /// <param name="timer">Information about the timer invocation.</param>
     /// <param name="context">The Functions invocation context used for log correlation.</param>
@@ -100,10 +117,33 @@ public class DeviceTaggerFunction
         FunctionContext context,
         CancellationToken cancellationToken)
     {
-        if (await IsDueAsync(cancellationToken))
+        if (await IsDirectoryConfiguredAsync(cancellationToken) && await IsDueAsync(cancellationToken))
         {
             await RunOperationAsync(context.InvocationId, timer.IsPastDue, false, cancellationToken);
         }
+    }
+
+    /// <summary>Returns whether AD access is configured and logs the missing setting otherwise.</summary>
+    /// <param name="cancellationToken">Cancels the storage read.</param>
+    /// <returns><see langword="true"/> when no configuration store is used or it is complete.</returns>
+    internal async Task<bool> IsDirectoryConfiguredAsync(CancellationToken cancellationToken)
+    {
+        if (_directoryConfigurationStore is null)
+        {
+            return true;
+        }
+
+        var missing = (await _directoryConfigurationStore.GetAsync(cancellationToken))
+            .GetMissingConfiguration(_directoryOptions);
+        if (missing is null)
+        {
+            return true;
+        }
+
+        _logger.LogInformation(
+            "Scheduled device tagging skipped because the Active Directory {MissingSetting} is not configured",
+            missing);
+        return false;
     }
 
     /// <summary>Returns whether the configured interval has elapsed since the last run started.</summary>

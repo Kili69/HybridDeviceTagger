@@ -79,6 +79,22 @@ public sealed class KeyVaultActiveDirectoryCredentialStoreTests
         Assert.Equal("renamed@example.com", current.Username);
     }
 
+    [Fact]
+    public async Task ReplaceCurrentAsync_StoresPasswordBeforeFirstServiceAccountIsConfigured()
+    {
+        var client = CreateClient(CurrentName, new KeyVaultSecret(CurrentName, "stored"));
+        client
+            .Setup(value => value.SetSecretAsync(It.IsAny<KeyVaultSecret>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((KeyVaultSecret secret, CancellationToken _) =>
+                Response.FromValue(secret, Mock.Of<Response>()));
+        var store = CreateStore(client, bindUsername: string.Empty);
+
+        var written = await store.ReplaceCurrentAsync("password", CancellationToken.None);
+
+        Assert.Equal("password", written.Password);
+        await Assert.ThrowsAsync<ActiveDirectoryNotConfiguredException>(() => store.GetCurrentAsync(CancellationToken.None));
+    }
+
     private static KeyVaultSecret Placeholder(string name)
     {
         var secret = new KeyVaultSecret(name, Guid.NewGuid().ToString());
@@ -97,7 +113,8 @@ public sealed class KeyVaultActiveDirectoryCredentialStoreTests
 
     private static KeyVaultActiveDirectoryCredentialStore CreateStore(
         Mock<SecretClient> client,
-        string? renamedAccount = null)
+        string? renamedAccount = null,
+        string bindUsername = "svc@example.com")
     {
         var configurationStore = new Mock<IActiveDirectoryConfigurationStore>();
         configurationStore.Setup(value => value.GetAsync(It.IsAny<CancellationToken>()))
@@ -107,7 +124,7 @@ public sealed class KeyVaultActiveDirectoryCredentialStoreTests
             client.Object,
             Microsoft.Extensions.Options.Options.Create(new ActiveDirectoryOptions
             {
-                BindUsername = "svc@example.com",
+                BindUsername = bindUsername,
                 BindUserDistinguishedName = "CN=svc,DC=example,DC=com"
             }),
             Microsoft.Extensions.Options.Options.Create(new KeyVaultOptions

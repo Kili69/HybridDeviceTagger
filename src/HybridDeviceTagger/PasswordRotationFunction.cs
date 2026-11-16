@@ -18,9 +18,11 @@
  */
 
 using HybridDeviceTagger.Models;
+using HybridDeviceTagger.Options;
 using HybridDeviceTagger.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace HybridDeviceTagger;
 
@@ -45,19 +47,33 @@ public sealed class PasswordRotationFunction
     /// <summary>The fixed hourly check; the configurable rotation interval decides whether a change is due.</summary>
     internal const string TimerSchedule = "0 0 * * * *";
 
+    /// <summary>Supplies the post-installation directory configuration; null always runs.</summary>
+    private readonly IActiveDirectoryConfigurationStore? _directoryConfigurationStore;
+
+    /// <summary>The initial directory application settings.</summary>
+    private readonly ActiveDirectoryOptions _directoryOptions;
+
     /// <summary>Initializes a new instance of the <see cref="PasswordRotationFunction"/> class.</summary>
     /// <param name="rotationService">The password-rotation orchestrator.</param>
     /// <param name="statusStore">The latest-run status store.</param>
     /// <param name="operationLock">The cross-instance operation lock.</param>
     /// <param name="logger">The structured logger.</param>
     /// <param name="activityLog">The optional activity log.</param>
+    /// <param name="directoryConfigurationStore">
+    /// The optional directory configuration; scheduled checks are skipped while it is incomplete.
+    /// </param>
+    /// <param name="directoryOptions">The optional initial directory application settings.</param>
     public PasswordRotationFunction(
         PasswordRotationService rotationService,
         IOperationStatusStore statusStore,
         IOperationLock operationLock,
         ILogger<PasswordRotationFunction> logger,
-        IActivityLog? activityLog = null)
+        IActivityLog? activityLog = null,
+        IActiveDirectoryConfigurationStore? directoryConfigurationStore = null,
+        IOptions<ActiveDirectoryOptions>? directoryOptions = null)
     {
+        _directoryConfigurationStore = directoryConfigurationStore;
+        _directoryOptions = directoryOptions?.Value ?? new ActiveDirectoryOptions();
         _activityLog = activityLog ?? NullActivityLog.Instance;
         _rotationService = rotationService;
         _statusStore = statusStore;
@@ -66,6 +82,7 @@ public sealed class PasswordRotationFunction
     }
 
     /// <summary>Rotates or recovers the service-account credential when required.</summary>
+    /// <remarks>Checks are skipped until the Active Directory forest and service account are configured.</remarks>
     /// <param name="timer">Information about the timer invocation.</param>
     /// <param name="context">The Functions invocation context used for log correlation.</param>
     /// <param name="cancellationToken">Cancels the invocation.</param>
@@ -75,7 +92,19 @@ public sealed class PasswordRotationFunction
         [TimerTrigger(TimerSchedule)] TimerInfo timer,
         FunctionContext context,
         CancellationToken cancellationToken)
-        => await RunOperationAsync(context.InvocationId, timer.IsPastDue, false, cancellationToken);
+    {
+        if (_directoryConfigurationStore is not null &&
+            (await _directoryConfigurationStore.GetAsync(cancellationToken))
+                .GetMissingConfiguration(_directoryOptions) is { } missing)
+        {
+            _logger.LogInformation(
+                "Scheduled password rotation skipped because the Active Directory {MissingSetting} is not configured",
+                missing);
+            return;
+        }
+
+        await RunOperationAsync(context.InvocationId, timer.IsPastDue, false, cancellationToken);
+    }
 
     /// <summary>Forces a password rotation requested through the management API.</summary>
     /// <param name="request">The queued run request.</param>

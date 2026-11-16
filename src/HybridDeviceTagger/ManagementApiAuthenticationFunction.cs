@@ -47,7 +47,7 @@ public sealed class ManagementApiAuthenticationFunction
     /// <returns>An HTTP 200 result with a <c>tokenScope</c> property.</returns>
     [Function("GetManagementApiAuthentication")]
     public IActionResult GetAuthentication(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/authentication")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/authentication")]
         HttpRequest request) =>
         new OkObjectResult(new { tokenScope = _options.TokenScope });
 }

@@ -1,8 +1,9 @@
 # HybridDeviceTagger.Management
 
 `HybridDeviceTagger.Management` ist der PowerShell-Client für die durch Microsoft Entra geschützte
-HybridDeviceTagger Management API. Das Modul verwaltet Tagging-Regeln,
-liest Betriebszustände und Traces und startet administrative Aktionen.
+HybridDeviceTagger Management API. Das Modul richtet nach der Installation die Active-Directory-Anbindung
+ein, verwaltet Tagging-Regeln und LDAP-Vertrauensanker, liest Betriebszustände und Traces und startet
+administrative Aktionen.
 
 ## Voraussetzungen
 
@@ -10,7 +11,8 @@ liest Betriebszustände und Traces und startet administrative Aktionen.
 - Azure CLI (`az`)
 - eine aktive Anmeldung über `az login`
 - Netzwerkzugriff auf die Function App
-- eine passende API-Anwendungsrolle oder eine wirksame Owner-/Contributor-Zuweisung
+- eine passende API-Anwendungsrolle oder eine wirksame Owner-/Contributor-Zuweisung; Forest-Domäne,
+  Servicekonto und Vertrauensanker erfordern immer Owner-/Contributor-Rechte an der Function App
 
 Das Modul benötigt keinen direkten Zugriff auf Active Directory, Key Vault, Blob Storage, Microsoft
 Graph oder Azure Resource Manager. Die Function App führt diese Operationen mit ihrer Managed Identity
@@ -71,15 +73,40 @@ zusätzlich Regel- und Kennwortverwaltung sowie das Starten von Tagging-Läufen.
 automatisch allgemeinen Lesezugriff. Die Forest-Domäne können ausschließlich Owner und Contributor ändern, weil
 sie bestimmt, welche Server beim Bind das Kennwort des Dienstkontos erhalten.
 
-Die frühere Rolle `HybridDeviceTagger.CertificateAdministrator` und die Befehle
-`Get-`, `Add-` und `Remove-HybridDeviceTaggerTrustedCertificate` wurden entfernt. LDAPS-Vertrauensanker,
-LDAP-Benutzer und Aktivitätsprotokoll verwalten Owner und Contributor der Function App im
-Konfigurationsportal unter `https://<function-app>.azurewebsites.net/api/portal`.
+Die frühere Rolle `HybridDeviceTagger.CertificateAdministrator` wurde entfernt. LDAPS-Vertrauensanker
+und LDAP-Servicekonto verwalten ausschließlich Owner und Contributor der Function App, entweder im
+Konfigurationsportal unter `https://<function-app>.azurewebsites.net/api/portal` oder mit
+`Get-`, `Add-` und `Remove-HybridDeviceTaggerTrustedCertificate` sowie
+`Set-HybridDeviceTaggerServiceAccount`. Anwendungsrollen der Management API genügen dafür nicht. Das
+Aktivitätsprotokoll steht nur im Konfigurationsportal zur Verfügung.
 
-## Forest-Domäne korrigieren
+## Active Directory nach der Installation konfigurieren
+
+Der Installer fragt keine AD-Einstellungen ab. Nach der Installation ist die Function daher
+unkonfiguriert: Die Timer für Tagging und Kennwortrotation werden übersprungen, Aktionen und
+API-Aufrufe, die Active Directory benötigen, antworten mit HTTP `409`, und
+`Get-HybridDeviceTaggerActiveDirectoryConfiguration` liefert die Quelle `notConfigured` mit leerer
+Domäne. Die Einrichtung erfolgt in dieser Reihenfolge:
+
+```powershell
+Connect-HybridDeviceTagger -ApiBaseUri 'https://<function-app>.azurewebsites.net/api/management' `
+    -ClientId '<management-api-client-id>' -SkipValidation
+
+# 1. Root-Zertifikat (Vertrauensanker für LDAPS/StartTLS)
+Add-HybridDeviceTaggerTrustedCertificate -Path '.\Contoso-Root-CA.cer'
+# 2. Forest-Domäne
+Set-HybridDeviceTaggerActiveDirectoryConfiguration -Domain 'contoso.com'
+# 3. Servicekonto und Kennwort (wird per LDAP geprüft, daher nach dem Zertifikat)
+Set-HybridDeviceTaggerServiceAccount -Credential (Get-Credential 'svc-tagger@contoso.com')
+```
+
+Danach (4.) die erste Regel mit `Add-HybridDeviceTaggerRule` anlegen. Dieselben Schritte stehen im
+Konfigurationsportal in den Bereichen **Zertifikate**, **LDAP** und **Regeln** zur Verfügung.
+
+## Forest-Domäne festlegen oder korrigieren
 
 Die Forest-Domäne kann auch ohne funktionierende AD-Verbindung und vor der initialen
-Kennwortspeicherung korrigiert werden. Der Client muss nur die Function App erreichen.
+Kennwortspeicherung festgelegt oder korrigiert werden. Der Client muss nur die Function App erreichen.
 `-SkipValidation` überspringt die Verbindungsprüfung, die die Tagging-Regeln liest und dafür
 die AD-Verbindung benötigen kann.
 
@@ -102,10 +129,11 @@ Das Kommando verwendet den zuletzt gelesenen ETag für den Schreibzugriff.
 ## Sicherheits- und Nebenläufigkeitsmodell
 
 - Zugriffstoken bleiben ausschließlich im Modulzustand des aktuellen Prozesses.
-- Kennwörter werden als `SecureString` angenommen und nur unmittelbar für den HTTPS-Request in
+- Kennwörter werden als `SecureString` oder `PSCredential` angenommen und nur unmittelbar für den HTTPS-Request in
   Klartext umgewandelt.
 - Schreibende Befehle unterstützen `-WhatIf`.
-- Lösch- und Kennwortoperationen besitzen `ConfirmImpact = High`.
+- Lösch- und Kennwortoperationen sowie das Setzen des Servicekontos und das Hinzufügen oder Entfernen
+  von Vertrauensankern besitzen `ConfirmImpact = High`.
 - Regeln werden mit `If-Match` und dem zuletzt gelesenen ETag geändert.
 - Eine parallele Änderung führt zu einem Konflikt, statt fremde Änderungen zu überschreiben.
 - REST-, Authentifizierungs- und Validierungsfehler sind terminierende PowerShell-Fehler.
@@ -121,7 +149,13 @@ Das Kommando verwendet den zuletzt gelesenen ETag für den Schreibzugriff.
 | `Get-HybridDeviceTaggerLastRunStatus` | letzten Geräte-Tagging-Status lesen | Statusobjekt |
 | `Get-HybridDeviceTaggerPasswordRotationStatus` | letzten Kennwortrotationsstatus lesen | Statusobjekt |
 | `Get-HybridDeviceTaggerTrace` | letzten JSONL-Trace strukturiert lesen | `HybridDeviceTagger.TraceEvent`-Objekte |
-| `Initialize-HybridDeviceTaggerActiveDirectoryCredential` | initiales AD-Kennwort validieren und speichern | Bestätigung |
+| `Get-HybridDeviceTaggerActiveDirectoryConfiguration` | wirksame Forest-Domäne mit ETag und Quelle lesen | Konfigurationsobjekt |
+| `Set-HybridDeviceTaggerActiveDirectoryConfiguration` | Forest-Domäne festlegen oder korrigieren | gespeicherte Konfiguration |
+| `Get-HybridDeviceTaggerTrustedCertificate` | LDAP-Vertrauensanker lesen | Objekt mit `certificates`, `eTag` und `source` |
+| `Add-HybridDeviceTaggerTrustedCertificate` | öffentliches Zertifikat als LDAP-Vertrauensanker hinzufügen | gespeicherte Vertrauensanker |
+| `Remove-HybridDeviceTaggerTrustedCertificate` | Vertrauensanker anhand des SHA-1-Fingerabdrucks entfernen | verbleibende Vertrauensanker |
+| `Set-HybridDeviceTaggerServiceAccount` | Servicekonto und Kennwort validieren und speichern oder ersetzen | Objekt mit `username`, `distinguishedName` und `eTag` |
+| `Initialize-HybridDeviceTaggerActiveDirectoryCredential` | initiales Kennwort eines bereits konfigurierten Servicekontos validieren und speichern | Bestätigung |
 | `Invoke-HybridDeviceTagging` | Geräte-Tagging sofort in die Warteschlange stellen | Invocation-ID, Status `Queued` und Status-URI; mit `-Wait` finaler Status |
 | `Invoke-HybridDeviceTaggerPasswordRotation` | Kennwortrotation sofort in die Warteschlange stellen | Invocation-ID, Status `Queued` und Status-URI; mit `-Wait` finaler Status |
 
@@ -208,7 +242,41 @@ Get-HybridDeviceTaggerTrace |
     Export-Csv ./device-tagging-trace.csv -NoTypeInformation
 ```
 
+## LDAP-Vertrauensanker verwalten
+
+```powershell
+(Get-HybridDeviceTaggerTrustedCertificate).certificates |
+    Format-Table thumbprint, subject, notAfterUtc
+Add-HybridDeviceTaggerTrustedCertificate -Path '.\Contoso-Root-CA.cer' -Confirm
+Remove-HybridDeviceTaggerTrustedCertificate -Thumbprint '<SHA-1-Fingerabdruck>' -Confirm
+```
+
+`Add-HybridDeviceTaggerTrustedCertificate` lädt eine DER- (`.cer`/`.crt`) oder PEM-Datei lokal,
+lehnt Dateien mit privatem Schlüssel und abgelaufene Zertifikate bereits vor dem Request ab und sendet
+nur das öffentliche PEM an die Function. Neue LDAP-Verbindungen verwenden die Vertrauensanker sofort.
+Der letzte Vertrauensanker kann nicht entfernt werden. Die Befehle verwenden die Portal-Route
+`management/portal/certificates` und erfordern wirksame Owner-/Contributor-Rechte an der Function App.
+
+## AD-Servicekonto festlegen
+
+```powershell
+Set-HybridDeviceTaggerServiceAccount `
+    -Credential (Get-Credential 'svc-tagger@contoso.com') `
+    -DistinguishedName 'CN=svc-tagger,OU=Service Accounts,DC=contoso,DC=com' `
+    -Confirm
+```
+
+Forest-Domäne und Vertrauenszertifikat müssen vorher konfiguriert sein. Die Function prüft den Bind
+mit UPN und Kennwort über LDAPS beziehungsweise StartTLS, speichert das Kennwort mit ihrer Managed
+Identity im Key Vault und danach das Konto. Ohne `-DistinguishedName` ermittelt sie den DN aus dem
+UPN. Ein vorhandenes Konto oder Kennwort wird ersetzt. Der Befehl verwendet die Portal-Route
+`management/portal/active-directory/account` und erfordert wirksame Owner-/Contributor-Rechte an der
+Function App.
+
 ## AD-Servicekonto initialisieren
+
+Ist das Servicekonto bereits konfiguriert, etwa durch Pre-Seeding mit `ADServiceAccount` bei der
+Installation, kann alternativ nur das initiale Kennwort gesetzt werden:
 
 ```powershell
 $password = Read-Host 'AD-Servicekonto-Kennwort' -AsSecureString
@@ -267,6 +335,7 @@ Get-Help Invoke-HybridDeviceTagging -Parameter Wait
 | HTTP `409` beim Schreiben | Sammlung wurde parallel geändert; Zustand neu lesen und Änderung wiederholen |
 | HTTP `409` bei einer Aktion | ein Vorgang desselben Typs läuft bereits |
 | HTTP `409` bei der Kennwortinitialisierung | im Key Vault liegt bereits ein echtes Kennwort |
+| HTTP `409` mit `not configured` | Forest-Domäne oder Servicekonto fehlen noch; siehe [Active Directory nach der Installation konfigurieren](#active-directory-nach-der-installation-konfigurieren) |
 | `did not finish within ... seconds` | `-TimeoutSeconds` erhöhen oder den Status später erneut abfragen |
 | `was superseded by invocation` | ein neuerer Lauf hat den Status überschrieben; Status prüfen und bei Bedarf erneut starten |
 

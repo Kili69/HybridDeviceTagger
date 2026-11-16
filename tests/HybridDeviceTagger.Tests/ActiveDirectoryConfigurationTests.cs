@@ -178,6 +178,41 @@ public sealed class ActiveDirectoryConfigurationTests
     }
 
     [Fact]
+    public async Task UnconfiguredDirectory_StartsAndRejectsLdapUntilConfigured()
+    {
+        var options = new ActiveDirectoryOptions();
+        Assert.True(Validator.TryValidateObject(options, new ValidationContext(options), new List<ValidationResult>(), true));
+        var client = new Mock<BlobClient>();
+        client.Setup(value => value.DownloadContentAsync(It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new RequestFailedException(404, "Not found"));
+        var store = new BlobActiveDirectoryConfigurationStore(
+            client.Object, Microsoft.Extensions.Options.Options.Create(options));
+
+        var snapshot = await store.GetAsync(CancellationToken.None);
+
+        Assert.Equal(string.Empty, snapshot.Domain);
+        Assert.Equal("notConfigured", snapshot.Source);
+        Assert.Equal(ActiveDirectoryNotConfiguredException.ForestDomain, snapshot.GetMissingConfiguration(options));
+        Assert.Equal(
+            ActiveDirectoryNotConfiguredException.ServiceAccount,
+            (snapshot with { Domain = "example.com" }).GetMissingConfiguration(options));
+        Assert.Null((snapshot with { Domain = "example.com", BindUsername = "svc@example.com" }).GetMissingConfiguration(options));
+        Assert.Throws<ActiveDirectoryNotConfiguredException>(() => snapshot.GetConfiguredServiceAccount(options));
+        await Assert.ThrowsAsync<ActiveDirectoryNotConfiguredException>(() =>
+            store.ReplaceServiceAccountAsync("svc@example.com", null, null, CancellationToken.None));
+
+        var resolver = new Mock<IActiveDirectoryServerResolver>(MockBehavior.Strict);
+        var factory = new ActiveDirectoryLdapConnectionFactory(
+            Microsoft.Extensions.Options.Options.Create(options),
+            resolver.Object,
+            NullLogger<ActiveDirectoryLdapConnectionFactory>.Instance,
+            store,
+            Mock.Of<ITrustedCertificateStore>());
+        await Assert.ThrowsAsync<ActiveDirectoryNotConfiguredException>(() => factory.CreateSecureBoundConnectionAsync(
+            new StoredDirectoryCredential("svc@example.com", "password", null), CancellationToken.None));
+    }
+
+    [Fact]
     public void DirectoryOptions_AllowDeferredAccountDnButStillRequireTls()
     {
         var options = new ActiveDirectoryOptions { Domain = "example.com", BindUsername = "svc@example.com" };

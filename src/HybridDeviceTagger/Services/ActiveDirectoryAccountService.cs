@@ -31,6 +31,7 @@ public interface IActiveDirectoryAccountService
     /// <param name="cancellationToken">Cancels the validation.</param>
     /// <returns>The validation result with every connection attempt.</returns>
     /// <exception cref="ActiveDirectoryCredentialNotInitializedException">No credential is stored yet.</exception>
+    /// <exception cref="ActiveDirectoryNotConfiguredException">The forest or service account is not configured.</exception>
     Task<ActiveDirectoryAccessValidationResult> ValidateCurrentAsync(CancellationToken cancellationToken);
 
     /// <summary>Switches to another service account after validating its password against Active Directory.</summary>
@@ -99,7 +100,8 @@ public sealed class ActiveDirectoryAccountService : IActiveDirectoryAccountServi
             credential = await _credentialStore.GetCurrentAsync(cancellationToken);
         }
         catch (Exception exception) when (
-            exception is InvalidOperationException or RequestFailedException { Status: 404 })
+            exception is InvalidOperationException and not ActiveDirectoryNotConfiguredException or
+            RequestFailedException { Status: 404 })
         {
             throw new ActiveDirectoryCredentialNotInitializedException();
         }

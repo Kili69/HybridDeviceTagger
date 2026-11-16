@@ -33,7 +33,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>HTTP 200 with the effective domain and version, or 401 or 403.</returns>
     [Function("GetActiveDirectoryConfiguration")]
     public async Task<IActionResult> GetActiveDirectoryConfigurationAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/active-directory")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/active-directory")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -60,7 +60,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>HTTP 200 with the stored configuration, or 400, 401, 403, 409, or 413.</returns>
     [Function("SetActiveDirectoryConfiguration")]
     public async Task<IActionResult> SetActiveDirectoryConfigurationAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "management/active-directory")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "api/management/active-directory")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {

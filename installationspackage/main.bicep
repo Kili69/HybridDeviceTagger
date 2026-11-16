@@ -69,8 +69,8 @@ param keyVaultPrivateDnsZoneResourceId string = ''
 @description('Password secrets that do not exist yet in an existing Key Vault. They are created as unusable placeholders so that the managed identity can be authorized on the two password secrets only. List only missing secrets.')
 param keyVaultPlaceholderSecretNames string[] = []
 
-@description('Active Directory forest DNS name used by the Function for DNS SRV domain-controller discovery.')
-param activeDirectoryDomain string
+@description('Initial Active Directory forest DNS name used by the Function for DNS SRV domain-controller discovery. Empty until Active Directory is configured after installation.')
+param activeDirectoryDomain string = ''
 
 @description('Allow LDAPS to fall back to LDAP upgraded with StartTLS.')
 param allowLdapFallback bool = true
@@ -83,8 +83,8 @@ param ldapFallbackPort int = 389
 @description('Optional path in the application package to a DER or PEM private LDAP trust anchor.')
 param activeDirectoryTrustedCertificatePath string = ''
 
-@description('UPN or DOMAIN\\user name used to bind to Active Directory.')
-param activeDirectoryBindUsername string
+@description('Initial UPN used to bind to Active Directory. Empty until the service account is configured after installation.')
+param activeDirectoryBindUsername string = ''
 
 @description('Optional service-account distinguished name. When empty, the Function resolves it from the configured UPN in the forest.')
 param activeDirectoryBindUserDistinguishedName string = ''
@@ -183,8 +183,9 @@ var readerRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/rol
 var monitoringMetricsPublisherRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '3913510d-42f4-4e42-8a64-420c390055eb')
 @description('Monitoring Reader role definition ID used to query the activity log.')
 var monitoringReaderRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '43d0d8ad-25c7-4714-9337-8ba259a9fe05')
-@description('Static configuration-portal paths that load before sign-in; they contain no data.')
+@description('Static configuration-portal paths that load before sign-in, plus the exact root path that redirects to the portal; they contain no data. App Service authentication matches excluded paths exactly.')
 var portalAnonymousPaths = [
+  '/'
   '/api/portal'
   '/api/portal/'
   '/api/portal/index.html'

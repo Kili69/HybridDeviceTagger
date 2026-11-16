@@ -9,22 +9,23 @@ Guides an operator through the complete HybridDeviceTagger installation.
 .DESCRIPTION
 Install.ps1 is the interactive entry point of the HybridDeviceTagger installation package. It:
 
-1. checks the local prerequisites (PowerShell 7.2, Azure CLI, the ActiveDirectory module, the
-   prebuilt Function package, and an Azure CLI sign-in);
+1. checks the local prerequisites (PowerShell 7.2, Azure CLI, the prebuilt Function package, and
+   an Azure CLI sign-in);
 2. asks for every installation parameter, proposing defaults and previously saved answers;
 3. validates the format of every answer and asks again when a value is invalid;
 4. stores the answers without any secret in installation-settings.json so that later runs, for
-   example an update or a certificate change, can reuse them;
+   example an update, can reuse them;
 5. runs Install-HybridDeviceTagger.ps1 in the selected mode. A full installation always runs the
    read-only validation first, optionally shows the Azure What-If result, and deploys only after
    confirmation.
 
-Passwords are never written to disk. The Active Directory service-account credential is requested
-once per run and passed to the installation engine in memory only. After deployment, the engine
-sends it once over HTTPS to the Function, which validates it against Active Directory and stores
-it in Key Vault through its managed identity.
+The installation does not ask for Active Directory settings. After deployment, configure the
+forest domain, the LDAP trust certificate, and the service account with its password in the
+configuration portal or with the HybridDeviceTagger.Management module. The Function validates the
+password against Active Directory and stores it in Key Vault through its managed identity.
 
-Use Install-HybridDeviceTagger.ps1 directly for unattended or pipeline installations.
+Use Install-HybridDeviceTagger.ps1 directly for unattended or pipeline installations, including
+optional pre-seeding of the Active Directory configuration.
 
 .PARAMETER SettingsPath
 Path of the JSON file that stores the answers. Defaults to installation-settings.json next to
@@ -85,7 +86,6 @@ $ErrorActionPreference = 'Stop'
 
 $enginePath = Join-Path $PSScriptRoot 'Install-HybridDeviceTagger.ps1'
 $guidPattern = '^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$'
-$dnsNamePattern = '^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$'
 
 <#
 .SYNOPSIS
@@ -255,20 +255,6 @@ function Get-NameSuffix {
 
 <#
 .SYNOPSIS
-Returns the DNS name of the forest of the signed-in Windows user, or an empty string.
-#>
-function Get-LoggedOnForest {
-    try {
-        Import-Module ActiveDirectory -ErrorAction Stop -Verbose:$false
-        [string](Get-ADForest -Current LoggedOnUser -ErrorAction Stop).Name
-    }
-    catch {
-        ''
-    }
-}
-
-<#
-.SYNOPSIS
 Verifies the local prerequisites and the Azure CLI sign-in.
 #>
 function Assert-Prerequisite {
@@ -278,9 +264,6 @@ function Assert-Prerequisite {
     }
     if (-not (Get-Command az -CommandType Application -ErrorAction SilentlyContinue)) {
         throw 'Azure CLI is required. Install Azure CLI 2.60.0 or newer and run this script again.'
-    }
-    if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
-        throw 'The ActiveDirectory PowerShell module is required. Install the RSAT Active Directory tools and run this script again.'
     }
     $functionPackage = Join-Path $PSScriptRoot 'function/HybridDeviceTagger.zip'
     if (-not (Test-Path -LiteralPath $functionPackage -PathType Leaf)) {
@@ -396,37 +379,6 @@ function Read-InstallationSetting {
         -Default "kv-$keyVaultSuffix" `
         -Pattern '^[a-zA-Z][a-zA-Z0-9-]{1,22}[a-zA-Z0-9]$' -ValidationMessage 'Use 3-24 letters, digits, or hyphens, starting with a letter.'
 
-    Write-Section 'Active Directory'
-    $settings.ActiveDirectoryForestDomain = Get-Answer -Name ActiveDirectoryForestDomain `
-        -Prompt 'Active Directory forest DNS name' `
-        -Default (Get-LoggedOnForest) `
-        -Pattern $dnsNamePattern -ValidationMessage 'Enter a DNS name, for example contoso.com.'
-    $settings.ActiveDirectoryServer = Get-Answer -Name ActiveDirectoryServer `
-        -Prompt 'Domain controller for installer validation' `
-        -Optional `
-        -Pattern $dnsNamePattern -ValidationMessage 'Enter a DNS name.' `
-        -Help 'Leave empty to discover a domain controller through DNS SRV records. The Function always uses DNS SRV discovery.'
-    $settings.ServiceAccountUpn = Get-Answer -Name ServiceAccountUpn `
-        -Prompt 'Service account UPN' `
-        -Default "HybridDeviceTagger@$($settings.ActiveDirectoryForestDomain)" `
-        -Pattern '^[^@\s]+@[^@\s]+$' -ValidationMessage 'Enter a user principal name, for example HybridDeviceTagger@contoso.com.' `
-        -Help 'The account must exist, must not have to change its password at next logon, and needs SELF / Change Password.'
-    $settings.ActiveDirectoryBindUserDistinguishedName = Get-Answer -Name ActiveDirectoryBindUserDistinguishedName `
-        -Prompt 'Service account distinguished name' `
-        -Optional `
-        -Help 'Leave empty to resolve it from the UPN.'
-    Write-Host '  REQUIRED: Supply the public root CA certificate (.cer/.pem) that issued the domain controller certificate.' -ForegroundColor Yellow
-    Write-Host '  The installer imports it into the Azure Function package for LDAPS and StartTLS validation.' -ForegroundColor Yellow
-    Write-Host '  Importing it into the installation PC certificate store alone is NOT sufficient. Do not supply a private key.' -ForegroundColor Yellow
-    $settings.ActiveDirectoryTrustedCertificatePath = Get-Answer -Name ActiveDirectoryTrustedCertificatePath `
-        -Prompt 'Path to the LDAPS root CA certificate (.cer/.pem) (required)' `
-        -Help 'Installation cannot continue without this certificate file. Export the public root CA certificate from your AD certification authority. Paths with spaces may be entered with or without surrounding quotes.'
-    $certificatePath = $settings.ActiveDirectoryTrustedCertificatePath.Trim()
-    if ($certificatePath -match '^([''"])(.*)\1$') {
-        $certificatePath = $Matches[2]
-    }
-    $settings.ActiveDirectoryTrustedCertificatePath = (Resolve-Path -LiteralPath $certificatePath).Path
-
     Write-Section 'Management API'
     $settings.ManagementApiClientId = Get-Answer -Name ManagementApiClientId `
         -Prompt 'Application (client) ID of the management API app registration' `
@@ -476,11 +428,9 @@ function ConvertTo-EngineParameter {
         [Parameter(Mandatory)][System.Collections.IDictionary]$Settings
     )
 
-    # ServiceAccountUpn is only the default user name of the credential prompt; the engine derives
-    # the UPN from ADServiceAccountCredential, which cannot be combined with ADServiceAccount.
     $parameters = @{}
     foreach ($entry in $Settings.GetEnumerator()) {
-        if ($entry.Key -in 'ServiceAccountUpn', 'ManagementApiAllowedPrincipalObjectId') {
+        if ($entry.Key -eq 'ManagementApiAllowedPrincipalObjectId') {
             continue
         }
         if ($entry.Value -is [bool]) {
@@ -493,7 +443,6 @@ function ConvertTo-EngineParameter {
         }
         $parameters[$entry.Key] = $entry.Value
     }
-    $parameters.ADServiceAccountCredential = $script:ActiveDirectoryCredential
     $parameters
 }
 
@@ -555,14 +504,6 @@ if (-not $Mode) {
     $Mode = Read-Mode
 }
 
-Write-Host "`nThe service-account password validates the LDAPS bind and is handed to the Function for Key Vault storage; it is never written to disk." -ForegroundColor DarkGray
-$script:ActiveDirectoryCredential = Get-Credential `
-    -UserName $settings.ServiceAccountUpn `
-    -Message 'Active Directory service-account password'
-if ($null -eq $script:ActiveDirectoryCredential) {
-    throw 'Credential entry was canceled.'
-}
-
 switch ($Mode) {
     'Validate' {
         $parameters = ConvertTo-EngineParameter -Settings $settings
@@ -588,7 +529,8 @@ switch ($Mode) {
         }
         # The engine displays its change summary and requests the final confirmation itself.
         if (Invoke-Engine -Parameters $parameters -Description 'Installation') {
-            Write-Host "`nNext step: add tagging rules with the HybridDeviceTagger.Management module as shown above." -ForegroundColor Green
+            Write-Host "`nNext step: configure Active Directory (forest domain, trust certificate, service account) and add tagging rules in the configuration portal or with the HybridDeviceTagger.Management module as shown above." -ForegroundColor Green
+            Write-Host "Configuration portal: https://$($settings.FunctionAppName).azurewebsites.net/api/portal" -ForegroundColor Cyan
         }
     }
 }

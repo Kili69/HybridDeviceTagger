@@ -742,6 +742,168 @@ function Set-HybridDeviceTaggerActiveDirectoryConfiguration {
 
 <#
 .SYNOPSIS
+Sets the Active Directory service account and its current password.
+
+.DESCRIPTION
+Sends the UPN, password, and optional distinguished name to the Function App. The Function binds to
+Active Directory with the credential through LDAPS or StartTLS, stores the password in Key Vault
+through its managed identity, and then stores the account. The forest domain and a trust
+certificate must be configured first. Replaces an existing account or password, so it also serves
+as the post-installation credential initialization. Requires effective Function App
+Owner/Contributor access.
+
+.PARAMETER Credential
+The service-account UPN and its current password.
+
+.PARAMETER DistinguishedName
+Optional distinguished name of the account. When omitted, the Function resolves it from the UPN.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject containing username, distinguishedName, and eTag.
+
+.EXAMPLE
+Set-HybridDeviceTaggerServiceAccount -Credential (Get-Credential 'svc-tagger@contoso.com') -Confirm
+#>
+function Set-HybridDeviceTaggerServiceAccount {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [pscredential]$Credential,
+
+        [ValidateNotNullOrEmpty()]
+        [ValidateLength(1, 1024)]
+        [string]$DistinguishedName
+    )
+
+    if ($Credential.UserName -notmatch '^[^@\s\\]+@[^@\s]+\.[^@\s]+$') {
+        throw 'Credential.UserName must be a user principal name such as svc-tagger@contoso.com.'
+    }
+    Assert-HybridDeviceTaggerConnection
+    if ($PSCmdlet.ShouldProcess(
+        $script:Connection.ApiBaseUri,
+        "Validate and store Active Directory service account '$($Credential.UserName)'")) {
+        $plainPassword = $Credential.GetNetworkCredential().Password
+        try {
+            Invoke-HybridDeviceTaggerRequest -Method Put -Path 'portal/active-directory/account' -Body @{
+                username = $Credential.UserName
+                password = $plainPassword
+                distinguishedName = $DistinguishedName
+            }
+        }
+        finally {
+            $plainPassword = $null
+        }
+    }
+}
+
+<#
+.SYNOPSIS
+Gets the LDAP trust certificates used by the Function.
+
+.DESCRIPTION
+Returns thumbprint, subject, issuer, validity, and origin of every trust anchor. Requires effective
+Function App Owner/Contributor access.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject containing certificates, eTag, and source.
+
+.EXAMPLE
+(Get-HybridDeviceTaggerTrustedCertificate).certificates | Format-Table thumbprint, subject, notAfterUtc
+#>
+function Get-HybridDeviceTaggerTrustedCertificate {
+    [CmdletBinding()]
+    param()
+
+    Invoke-HybridDeviceTaggerRequest -Method Get -Path 'portal/certificates'
+}
+
+<#
+.SYNOPSIS
+Adds a public root CA or self-signed domain-controller certificate as LDAP trust anchor.
+
+.DESCRIPTION
+Loads the certificate locally, rejects files containing a private key or expired certificates, and
+sends only the public PEM to the Function. New LDAP connections use the trust anchor immediately.
+Requires effective Function App Owner/Contributor access.
+
+.PARAMETER Path
+Path to a DER (.cer/.crt) or PEM certificate file.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject containing the stored trust anchors.
+
+.EXAMPLE
+Add-HybridDeviceTaggerTrustedCertificate -Path '.\Contoso-Root-CA.cer' -Confirm
+#>
+function Add-HybridDeviceTaggerTrustedCertificate {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path
+    )
+
+    $resolvedPath = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).Path
+    try {
+        $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($resolvedPath)
+    }
+    catch {
+        throw "'$Path' is not a valid X.509 certificate."
+    }
+    try {
+        if ($certificate.HasPrivateKey) {
+            throw "'$Path' contains a private key. Export only the public certificate."
+        }
+        if ($certificate.NotAfter -le [DateTime]::Now) {
+            throw "Certificate '$($certificate.Thumbprint)' expired on $($certificate.NotAfter)."
+        }
+        Assert-HybridDeviceTaggerConnection
+        if ($PSCmdlet.ShouldProcess(
+            $script:Connection.ApiBaseUri,
+            "Trust LDAP certificate '$($certificate.Subject)' ($($certificate.Thumbprint))")) {
+            Invoke-HybridDeviceTaggerRequest -Method Post -Path 'portal/certificates' `
+                -Body @{ certificate = $certificate.ExportCertificatePem() }
+        }
+    }
+    finally {
+        $certificate.Dispose()
+    }
+}
+
+<#
+.SYNOPSIS
+Removes an LDAP trust certificate.
+
+.DESCRIPTION
+Removes the trust anchor with the specified thumbprint. The last trust anchor cannot be removed.
+Requires effective Function App Owner/Contributor access.
+
+.PARAMETER Thumbprint
+SHA-1 thumbprint of the certificate to remove.
+
+.OUTPUTS
+System.Management.Automation.PSCustomObject containing the remaining trust anchors.
+
+.EXAMPLE
+Remove-HybridDeviceTaggerTrustedCertificate -Thumbprint 'A1B2...' -Confirm
+#>
+function Remove-HybridDeviceTaggerTrustedCertificate {
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[0-9a-fA-F]{40}$')]
+        [string]$Thumbprint
+    )
+
+    Assert-HybridDeviceTaggerConnection
+    if ($PSCmdlet.ShouldProcess($script:Connection.ApiBaseUri, "Remove LDAP trust certificate '$Thumbprint'")) {
+        Invoke-HybridDeviceTaggerRequest -Method Delete -Path "portal/certificates/$($Thumbprint.ToUpperInvariant())"
+    }
+}
+
+<#
+.SYNOPSIS
 Initializes the Active Directory service-account credential through the Function App.
 
 .DESCRIPTION

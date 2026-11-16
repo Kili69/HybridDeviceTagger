@@ -274,7 +274,7 @@ paths:
     post:
       operationId: initializeActiveDirectoryCredential
       summary: Validate and initialize the Active Directory service-account credential
-      description: Requires HybridDeviceTagger.PasswordRotationAdministrator. The current Key Vault secret must be missing or the unusable placeholder created by the installer; an existing password is never replaced.
+      description: Requires HybridDeviceTagger.PasswordRotationAdministrator. The current Key Vault secret must be missing or the unusable placeholder created by the installer; an existing password is never replaced. Returns 409 when the credential is already initialized or the forest domain or service account is not configured.
       requestBody:
         required: true
         content:
@@ -410,8 +410,8 @@ paths:
                   domain: { type: string }
                   username: { type: string }
                   distinguishedName: { type: string, description: Empty when resolved from the UPN }
-                  accountSource: { type: string, enum: [appSetting, blob] }
-                  source: { type: string, enum: [appSetting, blob] }
+                  accountSource: { type: string, enum: [appSetting, blob, notConfigured] }
+                  source: { type: string, enum: [appSetting, blob, notConfigured] }
                   eTag: { type: string, nullable: true }
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -434,7 +434,7 @@ paths:
         '403':
           $ref: '#/components/responses/AdministratorRequired'
         '409':
-          description: No credential has been stored yet
+          description: No credential has been stored yet, or the forest domain or service account is not configured
   /portal/active-directory/account:
     put:
       operationId: changePortalActiveDirectoryAccount
@@ -461,7 +461,7 @@ paths:
         '403':
           $ref: '#/components/responses/AdministratorRequired'
         '409':
-          description: A password rotation is running or the configuration changed concurrently
+          description: A password rotation is running, the configuration changed concurrently, or the forest domain is not configured yet
         '413':
           description: Request body exceeds 65,536 bytes
   /portal/certificates:
@@ -720,7 +720,7 @@ components:
       properties:
         domain:
           type: string
-          description: Effective forest DNS name
+          description: Effective forest DNS name; empty while Active Directory is not configured after installation
         eTag:
           type: string
           nullable: true
@@ -730,7 +730,7 @@ components:
           nullable: true
         source:
           type: string
-          enum: [appSetting, blob]
+          enum: [appSetting, blob, notConfigured]
     AuthenticationMetadata:
       type: object
       required:

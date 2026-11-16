@@ -236,7 +236,7 @@ public sealed class LdapActiveDirectoryPasswordClient : IActiveDirectoryPassword
     private async Task<string> GetDistinguishedNameAsync(CancellationToken cancellationToken)
     {
         var (username, configuredDistinguishedName) =
-            (await _configurationStore.GetAsync(cancellationToken)).GetServiceAccount(_options);
+            (await _configurationStore.GetAsync(cancellationToken)).GetConfiguredServiceAccount(_options);
         return string.IsNullOrWhiteSpace(configuredDistinguishedName)
             ? await _directorySource.ResolveServiceAccountDistinguishedNameAsync(username, cancellationToken)
             : configuredDistinguishedName;

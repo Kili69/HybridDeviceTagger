@@ -117,7 +117,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>HTTP 200 with the rules, ETag, last-modified time, and source; otherwise 401 or 403.</returns>
     [Function("GetTaggingConfiguration")]
     public async Task<IActionResult> GetTaggingConfigurationAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/tagging-rules")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/tagging-rules")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -145,7 +145,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>HTTP 200 with the stored configuration, or 400, 401, 403, 409, or 413.</returns>
     [Function("ReplaceTaggingConfiguration")]
     public async Task<IActionResult> ReplaceTaggingConfigurationAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "management/tagging-rules")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "api/management/tagging-rules")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -180,7 +180,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>HTTP 200 with the stored configuration, or 400, 401, 403, 409, or 413.</returns>
     [Function("UpsertTaggingRule")]
     public async Task<IActionResult> UpsertTaggingRuleAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "management/tagging-rules/{ruleName}")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "put", Route = "api/management/tagging-rules/{ruleName}")]
         HttpRequest request,
         string ruleName,
         CancellationToken cancellationToken)
@@ -219,7 +219,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>HTTP 200 with the stored configuration, or 400, 401, 403, 404, or 409.</returns>
     [Function("RemoveTaggingRule")]
     public async Task<IActionResult> RemoveTaggingRuleAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "management/tagging-rules/{ruleName}")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "delete", Route = "api/management/tagging-rules/{ruleName}")]
         HttpRequest request,
         string ruleName,
         CancellationToken cancellationToken)
@@ -253,7 +253,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>HTTP 200 with the status, 404 when no run was recorded, or 401 or 403.</returns>
     [Function("GetDeviceTaggingStatus")]
     public Task<IActionResult> GetDeviceTaggingStatusAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/status/device-tagging")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/status/device-tagging")]
         HttpRequest request,
         CancellationToken cancellationToken) =>
         GetStatusAsync(
@@ -270,7 +270,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>HTTP 200 with the status, 404 when no run was recorded, or 401 or 403.</returns>
     [Function("GetPasswordRotationStatus")]
     public Task<IActionResult> GetPasswordRotationStatusAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/status/password-rotation")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/status/password-rotation")]
         HttpRequest request,
         CancellationToken cancellationToken) =>
         GetStatusAsync(
@@ -287,7 +287,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>HTTP 202 with the invocation ID and status URI, or 401, 403, or 409.</returns>
     [Function("RunDeviceTagging")]
     public async Task<IActionResult> RunDeviceTaggingAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/actions/device-tagging")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "api/management/actions/device-tagging")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -314,7 +314,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>HTTP 202 with the invocation ID and status URI, or 401, 403, or 409.</returns>
     [Function("RunPasswordRotation")]
     public async Task<IActionResult> RunPasswordRotationAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/actions/password-rotation")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "api/management/actions/password-rotation")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -345,7 +345,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>HTTP 200 when initialized, 400 for invalid input or credentials, 409 when already initialized, 413, 401, or 403.</returns>
     [Function("InitializeActiveDirectoryCredential")]
     public async Task<IActionResult> InitializeActiveDirectoryCredentialAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "management/actions/initialize-ad-credential")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "api/management/actions/initialize-ad-credential")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -396,6 +396,10 @@ public sealed partial class ManagementApiFunction
         {
             return new ConflictObjectResult(new { error = exception.Message });
         }
+        catch (ActiveDirectoryNotConfiguredException exception)
+        {
+            return new ConflictObjectResult(new { error = exception.Message, notConfigured = exception.MissingSetting });
+        }
         catch (JsonException exception)
         {
             return new BadRequestObjectResult(new
@@ -420,7 +424,7 @@ public sealed partial class ManagementApiFunction
     /// <returns>The trace file stream, 404 when no trace exists, or 401 or 403.</returns>
     [Function("DownloadLatestDeviceTaggingTrace")]
     public async Task<IActionResult> DownloadLatestDeviceTaggingTraceAsync(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "management/traces/device-tagging/latest")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/management/traces/device-tagging/latest")]
         HttpRequest request,
         CancellationToken cancellationToken)
     {
@@ -562,6 +566,10 @@ public sealed partial class ManagementApiFunction
             };
         }
         catch (TaggingConfigurationConflictException exception)
+        {
+            return new ConflictObjectResult(new { error = exception.Message });
+        }
+        catch (ActiveDirectoryNotConfiguredException exception)
         {
             return new ConflictObjectResult(new { error = exception.Message });
         }

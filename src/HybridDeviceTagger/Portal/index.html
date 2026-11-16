@@ -161,16 +161,9 @@
           <div class="actions"><button type="submit" data-i18n="save">Speichern</button></div>
         </form>
 
-        <form id="initForm" class="card" autocomplete="off">
-          <h2 data-i18n="initTitle">Initiales Kennwort setzen</h2>
-          <p class="hint" data-i18n="initHint">Nur möglich, solange noch kein Kennwort gespeichert ist.</p>
-          <label><span data-i18n="password">Kennwort</span><input id="initPassword" type="password" required maxlength="256" autocomplete="new-password"></label>
-          <div class="actions"><button type="submit" data-i18n="save">Speichern</button></div>
-        </form>
-
         <form id="accountForm" class="card" autocomplete="off">
-          <h2 data-i18n="accountTitle">LDAP-Benutzer ändern</h2>
-          <p class="hint" data-i18n="accountHint">Das Kennwort des Kontos wird vor dem Speichern per LDAP geprüft. Mit demselben Namen wird nur das Kennwort ersetzt.</p>
+          <h2 id="accountTitle" data-i18n="accountTitle">LDAP-Benutzer ändern</h2>
+          <p class="hint" id="accountHint" data-i18n="accountHint">Das Kennwort des Kontos wird vor dem Speichern per LDAP geprüft. Mit demselben Namen wird nur das Kennwort ersetzt.</p>
           <label><span data-i18n="username">Benutzer (UPN)</span><input id="accountUsername" required maxlength="256" autocomplete="off"></label>
           <label><span data-i18n="password">Kennwort</span><input id="accountPassword" type="password" required maxlength="256" autocomplete="new-password"></label>
           <label><span data-i18n="distinguishedName">Distinguished Name (optional)</span><input id="accountDn" maxlength="1024" autocomplete="off"></label>

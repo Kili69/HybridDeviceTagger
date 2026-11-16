@@ -72,7 +72,7 @@ public sealed class ActiveDirectoryCredentialInitializer : IActiveDirectoryCrede
     {
         var configuration = await _configurationStore.GetAsync(cancellationToken);
         var credential = new StoredDirectoryCredential(
-            configuration.GetServiceAccount(_activeDirectoryOptions).Username,
+            configuration.GetConfiguredServiceAccount(_activeDirectoryOptions).Username,
             password,
             null);
         var validation = await _passwordClient.ValidateAccessAsync(credential, cancellationToken);

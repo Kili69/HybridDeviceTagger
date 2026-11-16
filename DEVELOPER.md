@@ -128,7 +128,7 @@ The two action endpoints do not execute the workflow inside the HTTP request. Th
 
 `BlobTaggingConfigurationStore` stores `tagging-configuration.json` in the private `run-traces` container. Before its first API mutation, `OptionsTaggingRuleProvider` supplies the validated `Tagging__RulesJson` startup fallback. Mutations normalize and validate the complete result and use Blob ETags. API clients can send the ETag returned by `GET` in `If-Match`; a stale write returns HTTP `409`.
 
-`BlobTrustedCertificateStore` provides the LDAP trust anchors for every new connection. Until the first management change, it returns the DER or PEM file packaged by the installer from `-ActiveDirectoryTrustedCertificatePath` (`ActiveDirectory__TrustedCertificatePath`); without a packaged file, the operating system trust store applies. The configuration portal adds, replaces, or removes anchors in `run-traces/active-directory-trust-anchors.json` with Blob ETags; the first change copies the packaged certificate. Only public, unexpired, non-duplicate certificates are accepted, at most 20, and the last anchor cannot be removed. Because a substituted anchor would let its author impersonate a domain controller and capture the service-account password, only Function App Owners and Contributors may manage anchors; those principals already control the Function code and settings, and the Storage account is private. `ActiveDirectoryLdapConnectionFactory` validates the DNS name against every subject alternative DNS name, the chain, the server-authentication EKU, and online revocation. A rejected certificate becomes an `ActiveDirectoryLdapException` with result code `-2` and a concrete reason (name mismatch, chain status, revocation failure), and the factory then tries the next domain controller instead of surfacing a raw `AuthenticationException`. Windows validates through `System.DirectoryServices.Protocols`. Linux LDAPS and StartTLS use `Novell.Directory.Ldap.NETStandard`, whose certificate callback runs on the same TLS session that carries the bind.
+`BlobTrustedCertificateStore` provides the LDAP trust anchors for every new connection. The installer no longer requires a certificate: normally the first anchor is added after installation through the configuration portal or `Add-HybridDeviceTaggerTrustedCertificate`. Until the first management change, the store returns the DER or PEM file packaged by the installer only when `-ActiveDirectoryTrustedCertificatePath` was supplied for pre-seeding (`ActiveDirectory__TrustedCertificatePath`); without a packaged or managed file, the operating system trust store applies. A certificate packaged by an earlier installer is not contained in a new package when the parameter is omitted; the installer warns, and unless the certificate is already managed in Blob it must be added again. The portal routes `management/portal/certificates` (used by the portal and the module) add, replace, or remove anchors in `run-traces/active-directory-trust-anchors.json` with Blob ETags; the first change copies the packaged certificate, if any. Only public, unexpired, non-duplicate certificates are accepted, at most 20, and the last anchor cannot be removed. Because a substituted anchor would let its author impersonate a domain controller and capture the service-account password, only Function App Owners and Contributors may manage anchors; those principals already control the Function code and settings, and the Storage account is private. `ActiveDirectoryLdapConnectionFactory` validates the DNS name against every subject alternative DNS name, the chain, the server-authentication EKU, and online revocation. A rejected certificate becomes an `ActiveDirectoryLdapException` with result code `-2` and a concrete reason (name mismatch, chain status, revocation failure), and the factory then tries the next domain controller instead of surfacing a raw `AuthenticationException`. Windows validates through `System.DirectoryServices.Protocols`. Linux LDAPS and StartTLS use `Novell.Directory.Ldap.NETStandard`, whose certificate callback runs on the same TLS session that carries the bind.
 
 ### Configuration portal and activity log
 
@@ -144,7 +144,7 @@ The two action endpoints do not execute the workflow inside the HTTP request. Th
 
 `BlobOperationStatusStore` writes separate JSON documents for device tagging and password rotation. Requested runs start as `Queued`; timer and queue entry points record `Running`, then `Succeeded` or a sanitized `Failed` state. Password status preserves the timestamp of the last actual password change across checks that do not rotate. Status persistence failures are warnings and do not fail the directory workflow.
 
-`installationspackage/HybridDeviceTagger.Management` owns the REST client. `Connect-HybridDeviceTagger` stores the API URI, audience, token, and expiry in module scope and refreshes the token from Azure CLI when required. Public cmdlets cover rules, both statuses, parsed trace events, credential initialization, queued immediate tagging, and queued forced password rotation. The two action cmdlets return the accepted request or, with `-Wait`, poll the status endpoint until that invocation finishes (`-TimeoutSeconds`, defaults 1,800 and 600 seconds). `Add-HybridDeviceTaggerRule` performs the named single-rule upsert. `Get-HybridDeviceTaggerTrace` prepends the `HybridDeviceTagger.TraceEvent` type name to each parsed event. The module format file renders that type as the concise six-field trace line by default without converting the pipeline value to text. Mutations use `ShouldProcess`, ETag-protected writes, and high confirmation impact for destructive rule replacement, removal, and password rotation. The complete command, security, data-flow, error, and internal implementation reference is maintained in [installationspackage/HybridDeviceTagger.Management/README.md](installationspackage/HybridDeviceTagger.Management/README.md). No standalone REST wrapper scripts are required.
+`installationspackage/HybridDeviceTagger.Management` owns the REST client. `Connect-HybridDeviceTagger` stores the API URI, audience, token, and expiry in module scope and refreshes the token from Azure CLI when required. Public cmdlets cover rules, both statuses, parsed trace events, the forest domain, LDAP trust anchors (`Get-`, `Add-`, `Remove-HybridDeviceTaggerTrustedCertificate`), the service account (`Set-HybridDeviceTaggerServiceAccount`), credential initialization, queued immediate tagging, and queued forced password rotation. The trust-anchor and service-account cmdlets call the portal routes `management/portal/certificates` and `management/portal/active-directory/account` and therefore require effective Function App Owner/Contributor access; `Add-HybridDeviceTaggerTrustedCertificate` rejects files with a private key and expired certificates locally. The two action cmdlets return the accepted request or, with `-Wait`, poll the status endpoint until that invocation finishes (`-TimeoutSeconds`, defaults 1,800 and 600 seconds). `Add-HybridDeviceTaggerRule` performs the named single-rule upsert. `Get-HybridDeviceTaggerTrace` prepends the `HybridDeviceTagger.TraceEvent` type name to each parsed event. The module format file renders that type as the concise six-field trace line by default without converting the pipeline value to text. Mutations use `ShouldProcess`, ETag-protected writes, and high confirmation impact for destructive rule replacement, removal, password rotation, service-account changes, and trust-anchor changes. The complete command, security, data-flow, error, and internal implementation reference is maintained in [installationspackage/HybridDeviceTagger.Management/README.md](installationspackage/HybridDeviceTagger.Management/README.md). No standalone REST wrapper scripts are required.
 
 The GitHub Actions workflow [`.github/workflows/publish-powershell-module.yml`](.github/workflows/publish-powershell-module.yml) publishes the module to PowerShell Gallery for non-prerelease GitHub Releases whose commit belongs to `main`. The release tag must be the `v<YYYY><MM>.<counter>` release tag of the checked-out commit. The workflow runs `scripts/Build-InstallationPackage.ps1`, verifies that the stamped manifest version matches the product version, and publishes the stamped module from `artifacts/HybridDeviceTagger-<version>/HybridDeviceTagger.Management` using the repository secret `HYBRIDDEVICETAGGER_PSMODUL`. Existing Gallery versions are detected and skipped, making workflow reruns idempotent.
 
@@ -332,7 +332,7 @@ All option classes are bound and validated during host startup. Invalid configur
 
 #### `ActiveDirectoryOptions`
 
-Holds the primary server, LDAPS port, fallback policy and port, bind username, service-account DN, and LDAP page size. `UseSsl` must remain enabled because credential and password operations require a secure primary channel. When fallback is enabled, its port must differ from the LDAPS port.
+Holds the forest domain, primary server, LDAPS port, fallback policy and port, bind username, service-account DN, and LDAP page size. `Domain` and `BindUsername` are optional because the installer deploys the Function without directory settings; both are configured after installation through the portal or the management module. `UseSsl` must remain enabled because credential and password operations require a secure primary channel. When fallback is enabled, its port must differ from the LDAPS port.
 
 The service-account DN is optional when installing without internal AD DNS. Before rotation,
 `LdapActiveDirectoryDeviceSource` resolves it from the UPN across the forest's advertised domains;
@@ -341,6 +341,15 @@ ETag-protected forest DNS override in `run-traces/active-directory-configuration
 application setting only until the first management write. Forest connections read it on demand,
 without process-local caching. Configuration reads and writes never require LDAP or a credential,
 so administrators can repair the domain before credential initialization.
+
+While the forest domain or the service account is missing, the Function is unconfigured.
+`ActiveDirectoryConfigurationSnapshot.GetMissingConfiguration` reports the missing setting, and
+`ActiveDirectoryNotConfiguredException` in `Services/BlobActiveDirectoryConfigurationStore.cs` is
+thrown when an LDAP connection or the effective service account is requested. The management and
+portal APIs map it to HTTP `409` with a "not configured" message; `GET management/active-directory`
+returns source `notConfigured` with an empty domain. `DeviceTaggerFunction` and
+`PasswordRotationFunction` skip scheduled runs with an information log entry until both values are
+configured.
 
 #### `TaggingOptions`
 
@@ -398,6 +407,7 @@ Combines `PasswordRotationOutcome` with the known current password age in days. 
 - Non-hybrid Entra devices are never patched.
 - Conflicting tagging rules fail explicitly instead of producing order-dependent updates.
 - Graph and LDAP transport errors propagate to the Functions runtime so failed invocations remain observable and retryable according to platform policy.
+- Unconfigured Active Directory settings skip timer runs and return HTTP `409` for requested runs instead of failing.
 - Timer entry points log aggregate results. Exceptional tagging cases may log computer names, device IDs, or trust types for diagnosis; passwords and directory credentials are never logged.
 
 ### Tests
@@ -430,7 +440,9 @@ Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unt
 | `POST /api/management/actions/password-rotation` | Eine sichere, altersunabhängige Rotation des AD-Servicekonto-Kennworts einreihen (HTTP `202`) | `PasswordRotationAdministrator` |
 | `POST /api/management/actions/initialize-ad-credential` | Initiales AD-Servicekonto-Kennwort validieren und über die Managed Identity im Key Vault speichern; ersetzt nur ein fehlendes Secret oder einen Platzhalter | `PasswordRotationAdministrator` |
 
-Die vollständigen Rollenwerte beginnen jeweils mit `HybridDeviceTagger.`, beispielsweise `HybridDeviceTagger.Reader`. Ohne explizite Engine-Parameter vergibt der Installer keine Bootstrap-Rollen; Owner-/Contributor-Zuweisungen berechtigen zur Administration. Eine explizite Bootstrap-Liste wird allen vier Rollen zugewiesen; für Least Privilege stehen vier rollenbezogene Principal-Parameter zur Verfügung. Sicherheitsgruppen sind für die laufende Administration vorzuziehen. Die frühere Rolle `HybridDeviceTagger.CertificateAdministrator` und die Endpunkte zur Laufzeitverwaltung von LDAPS-Vertrauenszertifikaten wurden entfernt.
+Die vollständigen Rollenwerte beginnen jeweils mit `HybridDeviceTagger.`, beispielsweise `HybridDeviceTagger.Reader`. Ohne explizite Engine-Parameter vergibt der Installer keine Bootstrap-Rollen; Owner-/Contributor-Zuweisungen berechtigen zur Administration. Eine explizite Bootstrap-Liste wird allen vier Rollen zugewiesen; für Least Privilege stehen vier rollenbezogene Principal-Parameter zur Verfügung. Sicherheitsgruppen sind für die laufende Administration vorzuziehen. Die frühere Rolle `HybridDeviceTagger.CertificateAdministrator` und ihre Endpunkte zur Laufzeitverwaltung von LDAPS-Vertrauenszertifikaten wurden entfernt; Vertrauensanker und Servicekonto werden ausschließlich über die Owner-/Contributor-geschützten Portal-Routen `management/portal/certificates` und `management/portal/active-directory/account` verwaltet.
+
+Solange Forest-Domäne oder Servicekonto nach der Installation noch nicht konfiguriert sind, antworten Aktionen und Endpunkte, die Active Directory benötigen, mit HTTP `409` und einer „not configured“-Meldung; `GET /api/management/active-directory` liefert dann die Quelle `notConfigured` und eine leere Domäne.
 
 ### API-Rollen nach der Installation verwalten
 
@@ -532,7 +544,7 @@ Get-HybridDeviceTaggerTrace
 
 `Get-HybridDeviceTaggerTrace` zeigt jedes Trace-Ereignis als eine logische Zeile im Format `<Zeit>,<Severity>,<Phase>,<Status>,<Action>,<Details>` an, liefert in der Pipeline aber vollständige `HybridDeviceTagger.TraceEvent`-Objekte. Dadurch funktionieren beispielsweise Zuweisung, `Where-Object`, `Select-Object`, `ConvertTo-Json` und `Export-Csv` ohne Informationsverlust.
 
-Der erste LDAPS-Vertrauensanker ist das bei der Installation mit `-ActiveDirectoryTrustedCertificatePath` paketierte Zertifikat. Owner und Contributor der Function App verwalten weitere Vertrauensanker im Konfigurationsportal unter `/api/portal`; ohne paketiertes oder verwaltetes Zertifikat gilt der Zertifikatsspeicher des Betriebssystems.
+LDAPS-Vertrauensanker werden nach der Installation von Owner und Contributor der Function App im Konfigurationsportal unter `/api/portal` oder mit `Add-`, `Get-` und `Remove-HybridDeviceTaggerTrustedCertificate` verwaltet. Nur beim optionalen Pre-Seeding mit `-ActiveDirectoryTrustedCertificatePath` paketiert der Installer ein erstes Zertifikat; ohne paketiertes oder verwaltetes Zertifikat gilt der Zertifikatsspeicher des Betriebssystems.
 
 Ein Bearer-Token muss als Audience die konfigurierte API-App-ID oder `api://<client-id>` besitzen:
 
@@ -568,13 +580,13 @@ Kennwortänderungen über `unicodePwd` und die anschließende Validierung bleibe
 | App Setting | Beschreibung | Vorgabe |
 | --- | --- | --- |
 | `Tagging__IntervalMinutes` | Startwert des Tagging-Intervalls in Minuten (5–1440); das Portal kann ihn zur Laufzeit überschreiben | `15` |
-| `ActiveDirectory__Domain` | AD-DNS-Domäne für die SRV-basierte Domain-Controller-Ermittlung | muss angepasst werden |
+| `ActiveDirectory__Domain` | AD-DNS-Domäne für die SRV-basierte Domain-Controller-Ermittlung; Startwert, den eine im Portal oder mit `Set-HybridDeviceTaggerActiveDirectoryConfiguration` gespeicherte Domäne überschreibt | optional; nach einer Neuinstallation leer |
 | `ActiveDirectory__Port` | LDAP-Port | `636` |
 | `ActiveDirectory__UseSsl` | LDAPS aktivieren | `true` |
 | `ActiveDirectory__AllowLdapFallback` | Bei nicht verfügbarem LDAPS LDAP mit StartTLS erlauben | `true` |
 | `ActiveDirectory__LdapFallbackPort` | Port für LDAP mit StartTLS | `389` |
-| `ActiveDirectory__TrustedCertificatePath` | Pfad zum paketierten Root-CA- oder selbstsignierten Lab-Zertifikat; Startwert der im Portal verwalteten Vertrauensanker | Installer paketiert das Zertifikat als PEM; leer verwendet den Zertifikatsspeicher des Betriebssystems |
-| `ActiveDirectory__BindUsername` | UPN des Servicekontos | `svc-HybridDeviceTagger@bloedgelaber.de` |
+| `ActiveDirectory__TrustedCertificatePath` | Pfad zum paketierten Root-CA- oder selbstsignierten Lab-Zertifikat; Startwert der im Portal verwalteten Vertrauensanker | nur beim Pre-Seeding paketiert der Installer das Zertifikat als PEM; leer verwendet die verwalteten Vertrauensanker beziehungsweise den Zertifikatsspeicher des Betriebssystems |
+| `ActiveDirectory__BindUsername` | UPN des Servicekontos; Startwert, den ein im Portal oder mit `Set-HybridDeviceTaggerServiceAccount` gespeichertes Konto überschreibt | optional; nach einer Neuinstallation leer |
 | `ActiveDirectory__BindUserDistinguishedName` | Optionaler DN des Servicekontos für `unicodePwd`; leer ermittelt die Function ihn aus der UPN im Forest | optional |
 | `ActiveDirectory__PageSize` | LDAP-Seitengröße | `500` |
 | `KeyVault__VaultUri` | URI des Key Vaults | muss angepasst werden |
@@ -598,7 +610,7 @@ Jede Regel benötigt mindestens eine Aktion aus diesen drei Zielarten. Die Mitgl
 
 Die Anwendung ermittelt Domain Controller über AD-DNS-SRV-Records. Primär verwendet das Servicekonto Basic Bind über LDAPS. Ist LDAPS wegen eines Verbindungs-, TLS- oder Verfügbarkeitsfehlers nicht erreichbar, wird LDAP auf Port 389 vor dem Bind mit StartTLS auf TLS hochgestuft. Ungültige Anmeldedaten lösen keinen Transportwechsel aus. Zertifikats- und DNS-Namensprüfung sind für beide Transportarten identisch; ein unverschlüsselter Basic Bind ist ausgeschlossen.
 
-Für private PKIs kann der Installer mit `-ActiveDirectoryTrustedCertificatePath` ein öffentliches Root-CA-Zertifikat im DER- oder PEM-Format übernehmen. Für einen Lab-DC darf dies auch dessen direkt selbstsigniertes Serverzertifikat sein. Das validierte Zertifikat wird ohne privaten Schlüssel als PEM in das Function-Paket geschrieben. Die Anwendung akzeptiert nur Zertifikate, die eine gültige Kette zu diesem Trust Anchor, die EKU Server Authentication und den DNS-Namen des LDAP-Ziels besitzen.
+Für private PKIs wird das öffentliche Root-CA-Zertifikat im DER- oder PEM-Format nach der Installation im Konfigurationsportal oder mit `Add-HybridDeviceTaggerTrustedCertificate` hinterlegt; beim optionalen Pre-Seeding kann der Installer es mit `-ActiveDirectoryTrustedCertificatePath` übernehmen. Für einen Lab-DC darf dies auch dessen direkt selbstsigniertes Serverzertifikat sein. Ein vom Installer übernommenes Zertifikat wird ohne privaten Schlüssel als PEM in das Function-Paket geschrieben. Die Anwendung akzeptiert nur Zertifikate, die eine gültige Kette zu diesem Trust Anchor, die EKU Server Authentication und den DNS-Namen des LDAP-Ziels besitzen.
 
 Beispiel für lokale App Settings:
 

@@ -112,6 +112,10 @@ public sealed class ActiveDirectoryLdapConnectionFactory
         ICollection<ActiveDirectoryLdapConnectionAttempt>? attempts = null)
     {
         var targetDomain = server ?? (await _configurationStore.GetAsync(cancellationToken)).Domain;
+        if (string.IsNullOrWhiteSpace(targetDomain))
+        {
+            throw new ActiveDirectoryNotConfiguredException(ActiveDirectoryNotConfiguredException.ForestDomain);
+        }
         var servers = string.IsNullOrWhiteSpace(_options.Server)
             ? await _serverResolver.ResolveAsync(targetDomain, cancellationToken)
             : [_options.Server!];

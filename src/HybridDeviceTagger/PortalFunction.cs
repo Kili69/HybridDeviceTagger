@@ -59,13 +59,34 @@ public sealed class PortalFunction
         _options = options.Value;
     }
 
+    /// <summary>The fixed portal address; the redirect never uses request input to avoid open redirects.</summary>
+    internal const string PortalPath = "/api/portal";
+
+    /// <summary>Redirects the Function App root address to the configuration portal.</summary>
+    /// <remarks>
+    /// Only the exact root path is excluded from App Service authentication. The response is a
+    /// fixed redirect without data; the portal then requires Entra sign-in, and every portal API
+    /// call still requires an Entra access token and Function App Owner or Contributor access.
+    /// </remarks>
+    /// <param name="request">The anonymous request for the root path.</param>
+    /// <returns>HTTP 302 to <see cref="PortalPath"/>.</returns>
+    [Function("RedirectRootToPortal")]
+    public IActionResult RedirectRoot(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "{ignored:maxlength(0)?}")]
+        HttpRequest request)
+    {
+        ApplySecurityHeaders(request.HttpContext.Response, _options.AuthorityHost);
+        request.HttpContext.Response.Headers.CacheControl = "no-store";
+        return new RedirectResult(PortalPath, permanent: false);
+    }
+
     /// <summary>Serves a portal file or the public sign-in configuration.</summary>
     /// <param name="request">The anonymous request.</param>
     /// <param name="file">The requested file name; empty serves the page.</param>
     /// <returns>The file, the JSON configuration, or HTTP 404.</returns>
     [Function("GetPortalFile")]
     public IActionResult GetFile(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "portal/{file?}")]
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "api/portal/{file?}")]
         HttpRequest request,
         string? file)
     {

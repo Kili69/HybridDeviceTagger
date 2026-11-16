@@ -29,10 +29,13 @@ using Microsoft.Extensions.Options;
 namespace HybridDeviceTagger.Services;
 
 /// <summary>Represents the effective, versioned Active Directory forest configuration.</summary>
-/// <param name="Domain">The forest DNS domain used for domain-controller discovery.</param>
+/// <param name="Domain">
+/// The forest DNS domain used for domain-controller discovery, or an empty string while the forest
+/// has not been configured after installation.
+/// </param>
 /// <param name="ETag">The stored version, or null until the first management change.</param>
 /// <param name="LastModifiedUtc">The last stored modification time.</param>
-/// <param name="Source">The source, either appSetting or blob.</param>
+/// <param name="Source">The source: appSetting, blob, or notConfigured.</param>
 /// <param name="BindUsername">The service-account UPN override, or null to use the application setting.</param>
 /// <param name="BindUserDistinguishedName">
 /// The service-account DN override; empty resolves it from the UPN. Only used with <paramref name="BindUsername"/>.
@@ -50,8 +53,55 @@ public sealed record ActiveDirectoryConfigurationSnapshot(
     /// <returns>The UPN and the DN, which is empty when it must be resolved from the UPN.</returns>
     public (string Username, string DistinguishedName) GetServiceAccount(ActiveDirectoryOptions options) =>
         string.IsNullOrWhiteSpace(BindUsername)
-            ? (options.BindUsername, options.BindUserDistinguishedName ?? string.Empty)
+            ? (options.BindUsername ?? string.Empty, options.BindUserDistinguishedName ?? string.Empty)
             : (BindUsername, BindUserDistinguishedName ?? string.Empty);
+
+    /// <summary>Returns the effective service account and requires that one is configured.</summary>
+    /// <param name="options">The initial application settings.</param>
+    /// <returns>The UPN and the DN, which is empty when it must be resolved from the UPN.</returns>
+    /// <exception cref="ActiveDirectoryNotConfiguredException">No service account is configured.</exception>
+    public (string Username, string DistinguishedName) GetConfiguredServiceAccount(ActiveDirectoryOptions options)
+    {
+        var account = GetServiceAccount(options);
+        return string.IsNullOrWhiteSpace(account.Username)
+            ? throw new ActiveDirectoryNotConfiguredException(ActiveDirectoryNotConfiguredException.ServiceAccount)
+            : account;
+    }
+
+    /// <summary>Returns the missing post-installation setting, or null when AD access is configured.</summary>
+    /// <param name="options">The initial application settings.</param>
+    /// <returns><c>forest domain</c>, <c>service account</c>, or null.</returns>
+    public string? GetMissingConfiguration(ActiveDirectoryOptions options) =>
+        string.IsNullOrWhiteSpace(Domain) ? ActiveDirectoryNotConfiguredException.ForestDomain
+        : string.IsNullOrWhiteSpace(GetServiceAccount(options).Username) ? ActiveDirectoryNotConfiguredException.ServiceAccount
+        : null;
+}
+
+/// <summary>Indicates that Active Directory access has not been configured after installation.</summary>
+/// <remarks>
+/// The installer deploys the Function without directory settings; the forest domain, trust anchor,
+/// and service account are configured afterwards through the portal or the management module.
+/// </remarks>
+public sealed class ActiveDirectoryNotConfiguredException : InvalidOperationException
+{
+    /// <summary>The name of the missing forest-domain setting.</summary>
+    public const string ForestDomain = "forest domain";
+
+    /// <summary>The name of the missing service-account setting.</summary>
+    public const string ServiceAccount = "service account";
+
+    /// <summary>Initializes the exception for one missing setting.</summary>
+    /// <param name="missingSetting">The missing setting, <see cref="ForestDomain"/> or <see cref="ServiceAccount"/>.</param>
+    public ActiveDirectoryNotConfiguredException(string missingSetting)
+        : base(missingSetting == ForestDomain
+            ? "The Active Directory forest domain is not configured. Save the forest DNS name on the LDAP tab of the configuration portal or run Set-HybridDeviceTaggerActiveDirectoryConfiguration."
+            : "No Active Directory service account is stored yet. Add the LDAP root certificate, then save the user (UPN) and password with 'Set LDAP user' in the configuration portal or run Set-HybridDeviceTaggerServiceAccount.")
+    {
+        MissingSetting = missingSetting;
+    }
+
+    /// <summary>Gets the missing setting.</summary>
+    public string MissingSetting { get; }
 }
 
 /// <summary>Reads and conditionally updates the forest domain independently of AD connectivity.</summary>
@@ -59,7 +109,7 @@ public interface IActiveDirectoryConfigurationStore
 {
     /// <summary>Gets the persisted forest domain or the initial application setting.</summary>
     /// <param name="cancellationToken">Cancels the storage request.</param>
-    /// <returns>The current configuration and version.</returns>
+    /// <returns>The current configuration and version; the domain is empty while unconfigured.</returns>
     Task<ActiveDirectoryConfigurationSnapshot> GetAsync(CancellationToken cancellationToken);
 
     /// <summary>Validates and stores a forest domain without requiring a working LDAP connection.</summary>
@@ -110,7 +160,11 @@ public sealed class BlobActiveDirectoryConfigurationStore : IActiveDirectoryConf
     /// <inheritdoc />
     public async Task<ActiveDirectoryConfigurationSnapshot> GetAsync(CancellationToken cancellationToken) =>
         await ReadAsync(cancellationToken) ??
-        new ActiveDirectoryConfigurationSnapshot(NormalizeDomain(_options.Domain), null, null, "appSetting");
+        new ActiveDirectoryConfigurationSnapshot(
+            string.IsNullOrWhiteSpace(_options.Domain) ? string.Empty : NormalizeDomain(_options.Domain),
+            null,
+            null,
+            string.IsNullOrWhiteSpace(_options.Domain) ? "notConfigured" : "appSetting");
 
     /// <inheritdoc />
     public async Task<ActiveDirectoryConfigurationSnapshot> ReplaceAsync(
@@ -125,12 +179,17 @@ public sealed class BlobActiveDirectoryConfigurationStore : IActiveDirectoryConf
     }
 
     /// <inheritdoc />
+    /// <exception cref="ActiveDirectoryNotConfiguredException">The forest domain is not configured yet.</exception>
     public async Task<ActiveDirectoryConfigurationSnapshot> ReplaceServiceAccountAsync(
         string username, string? distinguishedName, string? expectedETag, CancellationToken cancellationToken)
     {
         var normalizedUsername = NormalizeUsername(username);
         var normalizedDistinguishedName = NormalizeDistinguishedName(distinguishedName);
         var current = await GetAsync(cancellationToken);
+        if (string.IsNullOrEmpty(current.Domain))
+        {
+            throw new ActiveDirectoryNotConfiguredException(ActiveDirectoryNotConfiguredException.ForestDomain);
+        }
         return await WriteAsync(
             new ConfigurationDocument(current.Domain, normalizedUsername, normalizedDistinguishedName),
             expectedETag,
