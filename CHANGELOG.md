@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [202611.4] - 2026-11-17
+
 ### Added
 
 - The README explains what the Function uses the virtual network, its two subnets, and the three private endpoints for.
