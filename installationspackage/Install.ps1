@@ -334,19 +334,21 @@ function Read-InstallationSetting {
         -Pattern '^[a-z0-9]{3,24}$' -ValidationMessage 'Use 3-24 lowercase letters and digits.'
 
     Write-Section 'Existing network'
-    Write-Host '  The virtual network and both subnets must already exist. Private DNS must resolve the' -ForegroundColor DarkGray
-    Write-Host '  privatelink.blob and privatelink.queue zones from the virtual network.' -ForegroundColor DarkGray
+    Write-Host '  The Function uses ONE existing virtual network with two existing subnets.' -ForegroundColor DarkGray
+    Write-Host '  The first three questions only locate this virtual network (subscription, resource group, name);' -ForegroundColor DarkGray
+    Write-Host '  the next two select its subnets. Private DNS must resolve the privatelink.blob,' -ForegroundColor DarkGray
+    Write-Host '  privatelink.queue, and privatelink.vaultcore zones from the virtual network.' -ForegroundColor DarkGray
     $settings.VirtualNetworkSubscriptionId = Get-Answer -Name VirtualNetworkSubscriptionId `
-        -Prompt 'Virtual network subscription ID' `
+        -Prompt 'Virtual network: subscription ID' `
         -Default $settings.SubscriptionId `
         -Pattern $guidPattern -ValidationMessage 'Enter a subscription GUID.'
     $settings.VirtualNetworkResourceGroupName = Get-Answer -Name VirtualNetworkResourceGroupName `
-        -Prompt 'Virtual network resource group'
-    $settings.VirtualNetworkName = Get-Answer -Name VirtualNetworkName -Prompt 'Virtual network name'
+        -Prompt 'Virtual network: resource group'
+    $settings.VirtualNetworkName = Get-Answer -Name VirtualNetworkName -Prompt 'Virtual network: name'
     $settings.SubnetName = Get-Answer -Name SubnetName `
-        -Prompt 'Integration subnet (delegated to Microsoft.App/environments)'
+        -Prompt 'Subnet in this virtual network for the Function integration (delegated to Microsoft.App/environments)'
     $settings.PrivateEndpointSubnetName = Get-Answer -Name PrivateEndpointSubnetName `
-        -Prompt 'Private endpoint subnet'
+        -Prompt 'Subnet in this virtual network for the private endpoints'
 
     Write-Section 'Key Vault'
     $savedCreateKeyVault = [bool](Get-SavedValue -Name CreateKeyVault -Fallback $false)

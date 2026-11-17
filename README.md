@@ -2,7 +2,7 @@
 
 <p align="center"><img src="./assets/kili-logo.png" alt="HybridDeviceTagger logo" width="180"></p>
 <p align="center"><strong>OU-basierte Kennzeichnung hybrider Geräte in Microsoft Entra ID</strong></p>
-<p align="center"><a href="https://github.com/Kili69/HybridDeviceTagger/actions/workflows/ci.yml"><img src="https://github.com/Kili69/HybridDeviceTagger/actions/workflows/ci.yml/badge.svg" alt="CI"></a> <a href="#versionierung-und-release"><img src="https://img.shields.io/badge/version-202611.3-0A66C2" alt="Version 202611.3"></a> <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-2C3E50" alt="Apache License 2.0"></a> <img src="https://img.shields.io/badge/platform-Azure%20Functions-0078D4?logo=microsoftazure" alt="Azure Functions"> <img src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white" alt=".NET 8"> <img src="https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 7.2 or newer"></p>
+<p align="center"><a href="https://github.com/Kili69/HybridDeviceTagger/actions/workflows/ci.yml"><img src="https://github.com/Kili69/HybridDeviceTagger/actions/workflows/ci.yml/badge.svg" alt="CI"></a> <a href="#versionierung-und-release"><img src="https://img.shields.io/badge/version-202611.4-0A66C2" alt="Version 202611.4"></a> <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-2C3E50" alt="Apache License 2.0"></a> <img src="https://img.shields.io/badge/platform-Azure%20Functions-0078D4?logo=microsoftazure" alt="Azure Functions"> <img src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white" alt=".NET 8"> <img src="https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 7.2 or newer"></p>
 
 ---
 
@@ -99,6 +99,17 @@ Die geführte Installation eignet sich für die Erstbereitstellung, Updates, Tes
   - Domain Controller über LDAPS (Port 636) oder LDAP mit StartTLS (Port 389)
   - CRL- oder OCSP-Endpunkte der CA, die die DC-Zertifikate ausgestellt hat; ein nicht bestätigbarer Sperrstatus wird abgelehnt (bei AD-Pre-Seeding auch vom Installationsrechner)
 
+##### Wofür die Function das VNet benötigt
+
+- **Integrationssubnetz:** Über dieses Subnetz baut die Function ihre ausgehenden Verbindungen auf, vor allem zu den lokalen Domain Controllern. Ohne VNet-Integration könnte sie das interne Active Directory nicht erreichen.
+- **Private-Endpoint-Subnetz:** Hier liegen die privaten Netzwerkadressen der drei Azure-Dienste, die nur intern erreichbar sind:
+  - **Blob Storage:** Code-Paket der Function, Regeln, Konfiguration, Ablaufprotokolle und Sperren gegen parallele Läufe
+  - **Queue Storage:** Warteschlangen für sofort angeforderte Läufe („Tagging jetzt ausführen“, „Kennwortwechsel auslösen“)
+  - **Key Vault:** aktuelles und vorbereitetes Kennwort des AD-Servicekontos
+- **Private DNS-Zonen:** Sie sorgen dafür, dass die normalen Dienstnamen (zum Beispiel `<storage>.blob.core.windows.net`) innerhalb des VNet auf diese privaten Adressen zeigen statt auf das Internet.
+
+Storage und Key Vault sind dadurch aus dem Internet nicht erreichbar; die Function greift ausschließlich über das private Netzwerk auf sie zu.
+
 **Active Directory** (wird erst [nach der Installation](#active-directory-nach-der-installation-konfigurieren) konfiguriert, nicht während der Installation abgefragt)
 
 - Öffentliches Root-CA-Zertifikat (`.cer`/`.pem`) der Domain-Controller-Zertifikate
@@ -119,7 +130,10 @@ az login
 Fehlt die Azure-CLI-Anmeldung, bietet `Install.ps1` `az login` selbst an. Vor der ersten Frage prüft das Skript Azure CLI, das vorkompilierte Function-Paket und die Anmeldung. Anschließend fragt es alle benötigten Werte ab. Vorschläge stehen in eckigen Klammern und werden mit **Enter** übernommen; ungültige Eingaben, etwa eine falsch formatierte GUID, werden sofort gemeldet und erneut abgefragt. Bei optionalen Werten löscht die Eingabe `-` einen gespeicherten Wert.
 
 - **Azure-Ziel:** Subscription (Vorschlag: aktuelle `az login`-Subscription), Ressourcengruppe (`rg-HybridDeviceTagger`, wird bei Bedarf angelegt), Region (`westeurope`) sowie Namen für Function App (`func-hybriddevicetagger`) und Storage Account
-- **Netzwerk:** Subscription und Ressourcengruppe des vorhandenen VNet, VNet-Name, an `Microsoft.App/environments` delegiertes Function-Integrationssubnetz und separates Private-Endpoint-Subnetz
+- **Netzwerk:** fünf Fragen zu **einem** vorhandenen VNet ([wofür es benötigt wird](#wofür-die-function-das-vnet-benötigt)):
+  - Subscription, Ressourcengruppe und Name: Diese drei Angaben bestimmen nur, wo das eine VNet liegt.
+  - Integrationssubnetz in diesem VNet, delegiert an `Microsoft.App/environments`
+  - Private-Endpoint-Subnetz in diesem VNet
 - **Key Vault:** Auswahl zwischen einem neuen privaten Vault und einem vorhandenen Vault; bei einem vorhandenen Vault zusätzlich Subscription und Ressourcengruppe; in beiden Fällen der Name
 - **Management API:** optional die Client-ID der App-Registrierung. Bleibt der Wert leer, erstellt der Installer bei einer Erstinstallation die single-tenant Entra-App-Registrierung und Enterprise Application automatisch beziehungsweise verwendet bei einem Update die Registrierung der vorhandenen Installation. Außerdem die Objekt-ID des Benutzers oder der Gruppe, die alle Rollen der Management API erhält (Vorschlag: angemeldeter Benutzer)
 - **Betrieb:** Startwerte für das Tagging-Intervall in Minuten (5–1440, Vorschlag 15) und das Kennwortwechsel-Intervall in Tagen (1–29, Vorschlag 25) sowie ob fehlende Azure-Ressourcenanbieter automatisch registriert werden. Beide Intervalle lassen sich später im Konfigurationsportal (Bereich **Zeitpläne**) ohne Neustart ändern; die dort gespeicherten Werte bleiben bei einer erneuten Installation erhalten.

@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- The README explains what the Function uses the virtual network, its two subnets, and the three private endpoints for.
+
+### Changed
+
+- `Install.ps1` states that the three virtual-network questions (subscription, resource group, name) locate one virtual network and that both subnets belong to it.
+
 ## [202611.3] - 2026-11-16
 
 ### Fixed
