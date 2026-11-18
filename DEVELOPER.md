@@ -1,8 +1,8 @@
 # Developer information
 
-## Code-Dokumentation
+## Code Documentation
 
-Die folgende englischsprachige Referenz beschreibt Architektur, Abläufe sowie Verantwortlichkeiten und Zusammenarbeit der Klassen.
+The following reference describes the architecture, workflows, class responsibilities, and interactions between classes.
 
 ### Purpose
 
@@ -50,11 +50,7 @@ The application separates trigger, management API, orchestration, directory, Gra
 
 Installation assets live only in `installationspackage`. `Install.ps1` collects all parameters interactively and drives `Install-HybridDeviceTagger.ps1`, which validates prerequisites, deploys `main.bicep`, and publishes the prebuilt `function/HybridDeviceTagger.zip`. The engine no longer builds the Function from source; `scripts/Build-InstallationPackage.ps1` creates that package. `installationspackage/function`, `installationspackage/version.json`, and `installationspackage/installation-settings.json` are local or build output and are not tracked.
 
-Before code upload, custom VNet DNS servers must resolve the deployed private endpoints.
-Failed checks report observed answers or query errors and print the concrete private-zone
-A records for Blob, Queue, and a newly created Key Vault. Interactive installation pauses
-for user confirmation after checking each endpoint/server once. Enter resumes without
-rechecking and explicitly warns that DNS remains independently unverified; unattended failures
+Before code upload, custom VNet DNS servers must resolve the deployed private endpoints. Failed checks report observed answers or query errors and print the concrete private-zone. A records for Blob, Queue, and a newly created Key Vault. Interactive installation pauses for user confirmation after checking each endpoint/server once. Enter resumes without rechecking and explicitly warns that DNS remains independently unverified; unattended failures
 remain terminating errors. No DNS records are edited automatically.
 
 ### Versioning and Release Build
@@ -65,7 +61,7 @@ The product version has the format `<YYYY><MM>.<counter>` and is never stored in
 
 PowerShell sources carry `# Project-Version: source`, and the module manifest contains `ModuleVersion = '0.0'`. `scripts/Build-InstallationPackage.ps1` runs the tests (unless `-SkipTests`), publishes the Function with the product version to `installationspackage/function/HybridDeviceTagger.zip`, writes `version.json`, stages `artifacts/HybridDeviceTagger-<version>/` with the version stamped into the scripts and the manifest (plus a `Prerelease` label outside `main`) and `LICENSE`, and creates `artifacts/HybridDeviceTagger-<version>.zip`. `-Release` additionally requires `main`, a clean working tree, and a `## [<version>] - <yyyy-MM-dd>` section in `CHANGELOG.md`, and creates the annotated tag `v<version>`, which is then pushed with `git push origin v<version>`. The CI workflow checks out the full history (`fetch-depth: 0`), builds the package, and uploads the ZIP.
 
-`scripts/Assert-CommitMetadata.ps1`, run by the `.githooks/pre-commit` hook, requires a `CHANGELOG.md` entry below `## [Unreleased]` (or a release section) for every change, the version marker and author header in changed production files, and a README version badge that matches `Get-ProductVersion.ps1 -NextCommit`. The `pre-commit` and `pre-merge-commit` hooks first update the staged badge with `scripts/Update-ReadmeVersion.ps1 -Staged`; `-Release` verifies that the badge shows the release version.
+`scripts/Assert-CommitMetadata.ps1`, run by the `.githooks/pre-commit` hook, requires a `CHANGELOG.md` entry below `## [Unreleased]` (or a release section) for every change, the version marker and author header in changed production files, and version badges in both `README.md` and `README.de.md` that match `Get-ProductVersion.ps1 -NextCommit`. The `pre-commit` and `pre-merge-commit` hooks first update both staged badges with `scripts/Update-ReadmeVersion.ps1 -Staged`; `-Release` verifies that both badges show the release version. The commit guard also rejects one-sided README content changes.
 
 ### Runtime Architecture
 
@@ -422,46 +418,46 @@ These tests focus on orchestration and parsing behavior. Live LDAP, Key Vault, G
 
 ## Management REST API
 
-Die Function App stellt eine Single-Tenant-Entra-geschützte Verwaltungs-API unter `/api/management` bereit. App Service Easy Auth lehnt nicht authentifizierte Aufrufe mit HTTP `401` ab. Die Function validiert zusätzlich den Principal Header und antwortet mit HTTP `403`, wenn weder eine für den Endpunkt zugelassene Entra-Anwendungsrolle noch eine zulässige Azure-RBAC-Zuweisung vorhanden ist. **Assignment required** bleibt auf der Enterprise Application deaktiviert, damit Function-App-Owner und -Contributors ein API-Token erhalten können. Direkte, über Sicherheitsgruppen wirksame oder von übergeordneten Scopes geerbte Owner-/Contributor-Zuweisungen gewähren Regel- und Kennwortadministration sowie das Starten von Tagging-Läufen, jedoch keine Leserrolle. Es werden keine Function Keys oder Client Secrets benötigt. Nur `GET /api/management/authentication` ist von Easy Auth ausgenommen und liefert den nicht geheimen Token-Scope der Installation.
+The Function App exposes a single-tenant, Entra-protected management API at `/api/management`. App Service Easy Auth rejects unauthenticated requests with HTTP `401`. The Function also validates the principal header and returns HTTP `403` if neither an Entra application role accepted by the endpoint nor an eligible Azure RBAC assignment is present. **Assignment required** remains disabled on the enterprise application so that Function App Owners and Contributors can obtain an API token. Direct Owner/Contributor assignments, assignments effective through security groups, and assignments inherited from parent scopes grant rule and password administration and permission to start tagging runs, but not the Reader role. No Function keys or client secrets are required. Only `GET /api/management/authentication` is excluded from Easy Auth and returns the deployment's non-secret token scope.
 
-| Methode und Pfad | Funktion | Erforderliche Rolle |
+| Method and path | Function | Required role |
 | --- | --- | --- |
-| `GET /api/management/authentication` | Deployment-spezifischen Entra-Token-Scope lesen | keine |
-| `GET /api/management/active-directory` | Wirksame Forest-Domäne und Version ohne AD-Verbindung lesen | `Reader`, `RuleAdministrator` oder `PasswordRotationAdministrator` |
-| `PUT /api/management/active-directory` | Forest-Domäne syntaktisch validieren und versioniert speichern | nur wirksame Owner/Contributor der Function App |
-| `GET /api/management/tagging-rules` | Aktuelle Regeln, ETag, Änderungszeit und Quelle lesen | `Reader` oder `RuleAdministrator` |
-| `PUT /api/management/tagging-rules` | Den vollständigen validierten Regelsatz ersetzen | `RuleAdministrator` |
-| `PUT /api/management/tagging-rules/{ruleName}` | Eine vollständige Regel hinzufügen oder case-insensitiv ersetzen | `RuleAdministrator` |
-| `DELETE /api/management/tagging-rules/{ruleName}` | Eine Regel entfernen; mindestens eine Regel muss verbleiben | `RuleAdministrator` |
-| `GET /api/management/status/device-tagging` | Status und Ergebniszähler des letzten Tagging-Laufs lesen | `Reader` oder `TaggingOperator` |
-| `GET /api/management/status/password-rotation` | Status des letzten Checks und Zeitpunkt des letzten tatsächlichen Kennwortwechsels lesen | `Reader` oder `PasswordRotationAdministrator` |
-| `GET /api/management/traces/device-tagging/latest` | Letzten JSONL-Trace als Download abrufen | `Reader` oder `TaggingOperator` |
-| `POST /api/management/actions/device-tagging` | Einen Tagging-Lauf zur sofortigen Ausführung einreihen (HTTP `202`) | `TaggingOperator` |
-| `POST /api/management/actions/password-rotation` | Eine sichere, altersunabhängige Rotation des AD-Servicekonto-Kennworts einreihen (HTTP `202`) | `PasswordRotationAdministrator` |
-| `POST /api/management/actions/initialize-ad-credential` | Initiales AD-Servicekonto-Kennwort validieren und über die Managed Identity im Key Vault speichern; ersetzt nur ein fehlendes Secret oder einen Platzhalter | `PasswordRotationAdministrator` |
+| `GET /api/management/authentication` | Read the deployment-specific Entra token scope | none |
+| `GET /api/management/active-directory` | Read the effective forest domain and version without an AD connection | `Reader`, `RuleAdministrator`, or `PasswordRotationAdministrator` |
+| `PUT /api/management/active-directory` | Validate the forest domain syntax and save a versioned configuration | effective Function App Owners/Contributors only |
+| `GET /api/management/tagging-rules` | Read the current rules, ETag, modification time, and source | `Reader` or `RuleAdministrator` |
+| `PUT /api/management/tagging-rules` | Replace the complete validated rule set | `RuleAdministrator` |
+| `PUT /api/management/tagging-rules/{ruleName}` | Add a complete rule or replace it case-insensitively | `RuleAdministrator` |
+| `DELETE /api/management/tagging-rules/{ruleName}` | Remove a rule; at least one rule must remain | `RuleAdministrator` |
+| `GET /api/management/status/device-tagging` | Read the status and result counters of the latest tagging run | `Reader` or `TaggingOperator` |
+| `GET /api/management/status/password-rotation` | Read the status of the latest check and the timestamp of the last actual password change | `Reader` or `PasswordRotationAdministrator` |
+| `GET /api/management/traces/device-tagging/latest` | Download the latest JSONL trace | `Reader` or `TaggingOperator` |
+| `POST /api/management/actions/device-tagging` | Queue a tagging run for immediate execution (HTTP `202`) | `TaggingOperator` |
+| `POST /api/management/actions/password-rotation` | Queue a secure rotation of the AD service-account password regardless of its age (HTTP `202`) | `PasswordRotationAdministrator` |
+| `POST /api/management/actions/initialize-ad-credential` | Validate the initial AD service-account password and store it in Key Vault through the managed identity; replaces only a missing secret or a placeholder | `PasswordRotationAdministrator` |
 
-Die vollständigen Rollenwerte beginnen jeweils mit `HybridDeviceTagger.`, beispielsweise `HybridDeviceTagger.Reader`. Ohne explizite Engine-Parameter vergibt der Installer keine Bootstrap-Rollen; Owner-/Contributor-Zuweisungen berechtigen zur Administration. Eine explizite Bootstrap-Liste wird allen vier Rollen zugewiesen; für Least Privilege stehen vier rollenbezogene Principal-Parameter zur Verfügung. Sicherheitsgruppen sind für die laufende Administration vorzuziehen. Die frühere Rolle `HybridDeviceTagger.CertificateAdministrator` und ihre Endpunkte zur Laufzeitverwaltung von LDAPS-Vertrauenszertifikaten wurden entfernt; Vertrauensanker und Servicekonto werden ausschließlich über die Owner-/Contributor-geschützten Portal-Routen `management/portal/certificates` und `management/portal/active-directory/account` verwaltet.
+All full role values start with `HybridDeviceTagger.`, for example `HybridDeviceTagger.Reader`. Without explicit engine parameters, the installer assigns no bootstrap roles; Owner/Contributor assignments authorize administration. An explicit bootstrap list is assigned all four roles; four role-specific principal parameters are available for least-privilege assignments. Security groups are preferred for ongoing administration. The former `HybridDeviceTagger.CertificateAdministrator` role and its endpoints for runtime management of LDAPS trust certificates have been removed; trust anchors and the service account are managed exclusively through the Owner/Contributor-protected portal routes `management/portal/certificates` and `management/portal/active-directory/account`.
 
-Solange Forest-Domäne oder Servicekonto nach der Installation noch nicht konfiguriert sind, antworten Aktionen und Endpunkte, die Active Directory benötigen, mit HTTP `409` und einer „not configured“-Meldung; `GET /api/management/active-directory` liefert dann die Quelle `notConfigured` und eine leere Domäne.
+Until the forest domain and service account are configured after installation, actions and endpoints that require Active Directory return HTTP `409` with a "not configured" message; `GET /api/management/active-directory` returns the source `notConfigured` and an empty domain.
 
-### API-Rollen nach der Installation verwalten
+### Managing API Roles After Installation
 
-Für Benutzer und Sicherheitsgruppen können Rollen im Entra Admin Center zugewiesen werden:
+Roles can be assigned to users and security groups in the Entra admin center:
 
-1. **Identität** > **Anwendungen** > **Unternehmensanwendungen** öffnen.
-2. Die Enterprise Application der HybridDeviceTagger Management API auswählen.
-3. **Benutzer und Gruppen** > **Benutzer/Gruppe hinzufügen** wählen.
-4. Benutzer oder Sicherheitsgruppe und anschließend genau die benötigte Rolle auswählen.
-5. Die Zuweisung bestätigen. Mehrere Rollen werden als einzelne Zuweisungen angelegt.
+1. Open **Identity** > **Applications** > **Enterprise applications**.
+2. Select the enterprise application for the HybridDeviceTagger Management API.
+3. Select **Users and groups** > **Add user/group**.
+4. Select the user or security group, then select only the required role.
+5. Confirm the assignment. Multiple roles are added as separate assignments.
 
-Für skriptbare Verwaltung und Service Principals kann Microsoft Graph PowerShell verwendet werden. Die ausführende Entra-Identität benötigt eine Rolle wie `Privileged Role Administrator` und muss den angeforderten Graph-Berechtigungen zustimmen können:
+Microsoft Graph PowerShell can be used for scripted management and service principals. The executing Entra identity needs a role such as `Privileged Role Administrator` and must be able to consent to the requested Graph permissions:
 
 ```powershell
 Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
 Connect-MgGraph -Scopes 'Application.Read.All', 'AppRoleAssignment.ReadWrite.All'
 
 $apiClientId = '5e324803-5aed-4e5d-b49f-a4bfceddcda8'
-$principalObjectId = '<Objekt-ID des Benutzers, der Gruppe oder des Service Principals>'
+$principalObjectId = '<object ID of the user, group, or service principal>'
 $roleValue = 'HybridDeviceTagger.Reader'
 
 $api = Invoke-MgGraphRequest -Method GET -Uri (
@@ -485,7 +481,7 @@ if (-not $assignment) {
 }
 ```
 
-Vorhandene Zuweisungen anzeigen und eine konkrete Zuweisung wieder entfernen:
+List existing assignments and remove a specific assignment:
 
 ```powershell
 $assignments = @(Invoke-MgGraphRequest -Method GET -Uri $assignmentUri).value
@@ -506,7 +502,7 @@ Invoke-MgGraphRequest -Method DELETE -Uri (
 )
 ```
 
-Nach einer Rollenänderung muss ein bereits ausgestelltes Zugriffstoken erneuert werden. Für das Management-Modul dazu die Verbindung neu aufbauen; bei einem weiterhin zwischengespeicherten Azure-CLI-Token ist eine erneute Anmeldung erforderlich:
+After a role change, any previously issued access token must be refreshed. Reconnect the management module; if Azure CLI still returns a cached token, sign in again:
 
 ```powershell
 Disconnect-MgGraph
@@ -515,11 +511,11 @@ az login --tenant d89a354d-2bce-44ed-b802-8f8600689247
 Connect-HybridDeviceTagger
 ```
 
-`Assignment required` muss auf der Enterprise Application deaktiviert bleiben, damit die Function effektive Owner-/Contributor-Zuweisungen selbst prüfen kann. Alle anderen API-Berechtigungen erfordern weiterhin explizite Anwendungsrollen.
+`Assignment required` must remain disabled on the enterprise application so that the Function can check effective Owner/Contributor assignments itself. All other API permissions still require explicit application roles.
 
-Die API speichert dynamische Regeln als `tagging-configuration.json` im privaten Container `run-traces`. Solange die API noch keine Änderung gespeichert hat, verwendet sie `Tagging__RulesJson` als Fallback. Jeder Tagging-Lauf liest zu Beginn genau einen aktuellen Snapshot; ein Function-Restart ist nach Änderungen nicht erforderlich. ETags verhindern, dass parallele Änderungen unbemerkt überschrieben werden. Die vollständige OpenAPI-3.0-Spezifikation steht in [docs/management-api.openapi.yaml](docs/management-api.openapi.yaml).
+The API stores dynamic rules as `tagging-configuration.json` in the private `run-traces` container. Until the API saves its first change, it uses `Tagging__RulesJson` as a fallback. Each tagging run reads exactly one current snapshot at startup; configuration changes do not require a Function restart. ETags prevent concurrent changes from silently overwriting one another. The complete OpenAPI 3.0 specification is available in [docs/management-api.openapi.yaml](docs/management-api.openapi.yaml).
 
-Das Modul `installationspackage/HybridDeviceTagger.Management` hält die mit `Connect-HybridDeviceTagger` aufgebaute REST-Verbindung für nachfolgende Cmdlets. Es verwendet die bestehende Anmeldung von `az login`; Subscription, Resource Group und ARM-Abfragen sind nicht erforderlich:
+The `installationspackage/HybridDeviceTagger.Management` module retains the REST connection established by `Connect-HybridDeviceTagger` for subsequent cmdlets. It uses the existing `az login` session; no subscription, resource group, or ARM queries are required:
 
 ```powershell
 Import-Module ./installationspackage/HybridDeviceTagger.Management
@@ -531,9 +527,9 @@ Invoke-HybridDeviceTagging -Wait
 Invoke-HybridDeviceTaggerPasswordRotation -Wait -Confirm
 ```
 
-`Invoke-HybridDeviceTaggerPasswordRotation` umgeht ausschließlich die Altersprüfung. Aktueller Bind, LDAPS, Staging, Validierung und Promotion bleiben verpflichtend. Beide Aktionen antworten sofort mit HTTP `202`, `{ invocationId, state: Queued, statusUri }` und dem Status-URI im `Location`-Header. Eine Queue-getriggerte Function führt den Lauf aus und schreibt denselben Status wie der Timer (`Queued` → `Running` → `Succeeded`/`Failed`). Fehlgeschlagene angeforderte Läufe werden nicht automatisch wiederholt. Läuft die Operation bereits, antwortet die API mit HTTP `409`. Mit `-Wait` fragt das Modul den Status ab, bis genau dieser Lauf beendet ist; `-TimeoutSeconds` begrenzt die Wartezeit.
+`Invoke-HybridDeviceTaggerPasswordRotation` bypasses only the age check. Current-credential bind, LDAPS, staging, validation, and promotion remain mandatory. Both actions immediately return HTTP `202`, `{ invocationId, state: Queued, statusUri }`, and the status URI in the `Location` header. A queue-triggered Function executes the run and records the same status as the timer (`Queued` → `Running` → `Succeeded`/`Failed`). Failed requested runs are not retried automatically. If the operation is already running, the API returns HTTP `409`. With `-Wait`, the module polls the status until that specific run finishes; `-TimeoutSeconds` limits the wait time.
 
-Die Leseoperationen stehen direkt im Modul zur Verfügung:
+Read operations are available directly in the module:
 
 ```powershell
 Get-HybridDeviceTaggerRule
@@ -542,11 +538,11 @@ Get-HybridDeviceTaggerPasswordRotationStatus | Format-List
 Get-HybridDeviceTaggerTrace
 ```
 
-`Get-HybridDeviceTaggerTrace` zeigt jedes Trace-Ereignis als eine logische Zeile im Format `<Zeit>,<Severity>,<Phase>,<Status>,<Action>,<Details>` an, liefert in der Pipeline aber vollständige `HybridDeviceTagger.TraceEvent`-Objekte. Dadurch funktionieren beispielsweise Zuweisung, `Where-Object`, `Select-Object`, `ConvertTo-Json` und `Export-Csv` ohne Informationsverlust.
+`Get-HybridDeviceTaggerTrace` displays each trace event as one logical line in the format `<Time>,<Severity>,<Phase>,<Status>,<Action>,<Details>`, but returns complete `HybridDeviceTagger.TraceEvent` objects to the pipeline. This supports assignment, `Where-Object`, `Select-Object`, `ConvertTo-Json`, and `Export-Csv` without losing information.
 
-LDAPS-Vertrauensanker werden nach der Installation von Owner und Contributor der Function App im Konfigurationsportal unter `/api/portal` oder mit `Add-`, `Get-` und `Remove-HybridDeviceTaggerTrustedCertificate` verwaltet. Nur beim optionalen Pre-Seeding mit `-ActiveDirectoryTrustedCertificatePath` paketiert der Installer ein erstes Zertifikat; ohne paketiertes oder verwaltetes Zertifikat gilt der Zertifikatsspeicher des Betriebssystems.
+After installation, Function App Owners and Contributors manage LDAPS trust anchors in the configuration portal at `/api/portal` or with `Add-`, `Get-`, and `Remove-HybridDeviceTaggerTrustedCertificate`. The installer packages an initial certificate only when optional pre-seeding with `-ActiveDirectoryTrustedCertificatePath` is used; without a packaged or managed certificate, the operating system trust store applies.
 
-Ein Bearer-Token muss als Audience die konfigurierte API-App-ID oder `api://<client-id>` besitzen:
+A bearer token must have the configured API app ID or `api://<client-id>` as its audience:
 
 ```powershell
 $headers = @{ Authorization = "Bearer $accessToken" }
@@ -560,59 +556,59 @@ Invoke-WebRequest `
 	-OutFile '.\device-tagger-last-run.jsonl'
 ```
 
-## Rotationsablauf
+## Rotation Process
 
-Die Rotation prüft das aktuelle Secret täglich und rotiert regulär ab einem Alter von 25 Tagen:
+Rotation checks the current secret daily and normally rotates it once it is 25 days old:
 
-1. Neues zufälliges Kennwort als `next` in Key Vault speichern.
-2. Eigenes AD-Kennwort über LDAPS mit einer kombinierten `unicodePwd`-Delete/Add-Operation ändern.
-3. LDAP-Bind mit `next` validieren.
-4. Das validierte Kennwort als neue Version von `current` speichern.
+1. Store a new random password as `next` in Key Vault.
+2. Change the account's own AD password over LDAPS using a combined `unicodePwd` delete/add operation.
+3. Validate an LDAP bind with `next`.
+4. Store the validated password as a new version of `current`.
 
-Wenn `current` nach einem unterbrochenen Lauf nicht mehr funktioniert, testet die Function zuerst `next` und übernimmt es bei Erfolg als `current`. Auch die Geräteabfrage verwendet diesen Fallback. Vom Deployment angelegte Platzhalter-Secrets werden dabei nie als Kennwort verwendet.
+If `current` no longer works after an interrupted run, the Function first tests `next` and promotes it to `current` on success. Device discovery also uses this fallback. Placeholder secrets created by the deployment are never used as passwords.
 
-Jede Operation erwirbt vor dem Lauf eine erneuerbare Blob-Lease (`run-traces/locks/*.lock`). Dadurch laufen Tagging beziehungsweise Rotation über alle Instanzen hinweg nie doppelt; ein zweiter Rotationslauf kann insbesondere das gestagte `next`-Secret nicht überschreiben.
+Each operation acquires a renewable Blob lease (`run-traces/locks/*.lock`) before starting. This prevents duplicate concurrent tagging or rotation runs across all instances; in particular, a second rotation run cannot overwrite the staged `next` secret.
 
-Kennwortänderungen über `unicodePwd` und die anschließende Validierung bleiben immer LDAPS-pflichtig. Ist eine Rotation fällig, aber LDAPS nicht verfügbar, wird sie mit `DeferredNoSecureConnection` ohne neues `next`-Secret und ohne Änderung in AD zurückgestellt. Der nächste geplante Lauf versucht die Rotation erneut.
+Password changes through `unicodePwd` and subsequent validation always require LDAPS. If rotation is due but LDAPS is unavailable, it is deferred with `DeferredNoSecureConnection` without creating a new `next` secret or changing AD. The next scheduled run attempts rotation again.
 
-## Konfiguration
+## Configuration
 
-| App Setting | Beschreibung | Vorgabe |
+| App Setting | Description | Default |
 | --- | --- | --- |
-| `Tagging__IntervalMinutes` | Startwert des Tagging-Intervalls in Minuten (5–1440); das Portal kann ihn zur Laufzeit überschreiben | `15` |
-| `ActiveDirectory__Domain` | AD-DNS-Domäne für die SRV-basierte Domain-Controller-Ermittlung; Startwert, den eine im Portal oder mit `Set-HybridDeviceTaggerActiveDirectoryConfiguration` gespeicherte Domäne überschreibt | optional; nach einer Neuinstallation leer |
-| `ActiveDirectory__Port` | LDAP-Port | `636` |
-| `ActiveDirectory__UseSsl` | LDAPS aktivieren | `true` |
-| `ActiveDirectory__AllowLdapFallback` | Bei nicht verfügbarem LDAPS LDAP mit StartTLS erlauben | `true` |
-| `ActiveDirectory__LdapFallbackPort` | Port für LDAP mit StartTLS | `389` |
-| `ActiveDirectory__TrustedCertificatePath` | Pfad zum paketierten Root-CA- oder selbstsignierten Lab-Zertifikat; Startwert der im Portal verwalteten Vertrauensanker | nur beim Pre-Seeding paketiert der Installer das Zertifikat als PEM; leer verwendet die verwalteten Vertrauensanker beziehungsweise den Zertifikatsspeicher des Betriebssystems |
-| `ActiveDirectory__BindUsername` | UPN des Servicekontos; Startwert, den ein im Portal oder mit `Set-HybridDeviceTaggerServiceAccount` gespeichertes Konto überschreibt | optional; nach einer Neuinstallation leer |
-| `ActiveDirectory__BindUserDistinguishedName` | Optionaler DN des Servicekontos für `unicodePwd`; leer ermittelt die Function ihn aus der UPN im Forest | optional |
-| `ActiveDirectory__PageSize` | LDAP-Seitengröße | `500` |
-| `KeyVault__VaultUri` | URI des Key Vaults | muss angepasst werden |
-| `KeyVault__CurrentPasswordSecretName` | Aktuell verwendetes Kennwort | `hybrid-device-tagger-ad-password-current` |
-| `KeyVault__NextPasswordSecretName` | Staging- und Recovery-Kennwort | `hybrid-device-tagger-ad-password-next` |
-| `PasswordRotation__RotateAfterDays` | Startwert des Kennwortwechsel-Intervalls in Tagen (1–29); das Portal kann ihn zur Laufzeit überschreiben | `25` |
-| `PasswordRotation__PasswordLength` | Länge des generierten Kennworts | `40` |
-| `PasswordRotation__SecretExpiryDays` | Ablauf einer Secret-Version | `35` |
-| `ManagementAuthorization__FunctionAppResourceId` | Azure-Ressourcen-ID der Function App für die Laufzeitprüfung effektiver Owner-/Contributor-Zuweisungen | wird vom Bicep-Deployment gesetzt |
-| `ManagementApi__TenantId` | Entra-Mandant für die Anmeldung am Konfigurationsportal | wird vom Bicep-Deployment gesetzt |
-| `ManagementApi__AuthorityHost` | Entra-Anmeldehost der Cloud-Umgebung | `https://login.microsoftonline.com` |
-| `Monitoring__ApplicationInsightsResourceId` | Application-Insights-Ressource, aus der das Portal das Aktivitätsprotokoll liest; leer deaktiviert die Abfrage | wird vom Bicep-Deployment gesetzt |
-| `Tagging__Rules__<n>__Name` | Eindeutiger, case-insensitiver Regelname für Verwaltung und Logs | erforderlich |
-| `Tagging__Rules__<n>__Description` | Lesbare Beschreibung des Zwecks | erforderlich |
-| `Tagging__Rules__<n>__BaseDn` | OU-only-Pfad für alle Forest-Domains oder vollständiger domainspezifischer DN | erforderlich |
-| `Tagging__Rules__<n>__ExtensionAttributes__extensionAttribute<m>` | Zielwert für Attribut 1 bis 15 | optional |
-| `Tagging__Rules__<n>__EntraGroupIds__<m>` | Object ID einer statischen Entra-Sicherheitsgruppe | optional, maximal 50 |
-| `Tagging__Rules__<n>__AdministrativeUnitIds__<m>` | Object ID einer normalen oder eingeschränkten administrativen Einheit | optional, maximal 50 |
+| `Tagging__IntervalMinutes` | Initial tagging interval in minutes (5–1440); the portal can override it at runtime | `15` |
+| `ActiveDirectory__Domain` | AD DNS domain for SRV-based domain-controller discovery; initial value overridden by a domain saved in the portal or with `Set-HybridDeviceTaggerActiveDirectoryConfiguration` | optional; empty after a fresh installation |
+| `ActiveDirectory__Port` | LDAP port | `636` |
+| `ActiveDirectory__UseSsl` | Enable LDAPS | `true` |
+| `ActiveDirectory__AllowLdapFallback` | Allow LDAP with StartTLS when LDAPS is unavailable | `true` |
+| `ActiveDirectory__LdapFallbackPort` | Port for LDAP with StartTLS | `389` |
+| `ActiveDirectory__TrustedCertificatePath` | Path to the packaged root-CA or self-signed lab certificate; initial value for trust anchors managed in the portal | the installer packages the certificate as PEM only during pre-seeding; when empty, managed trust anchors or the operating system trust store are used |
+| `ActiveDirectory__BindUsername` | Service-account UPN; initial value overridden by an account saved in the portal or with `Set-HybridDeviceTaggerServiceAccount` | optional; empty after a fresh installation |
+| `ActiveDirectory__BindUserDistinguishedName` | Optional service-account DN for `unicodePwd`; when empty, the Function resolves it from the UPN across the forest | optional |
+| `ActiveDirectory__PageSize` | LDAP page size | `500` |
+| `KeyVault__VaultUri` | Key Vault URI | must be configured |
+| `KeyVault__CurrentPasswordSecretName` | Currently used password | `hybrid-device-tagger-ad-password-current` |
+| `KeyVault__NextPasswordSecretName` | Staging and recovery password | `hybrid-device-tagger-ad-password-next` |
+| `PasswordRotation__RotateAfterDays` | Initial password-rotation interval in days (1–29); the portal can override it at runtime | `25` |
+| `PasswordRotation__PasswordLength` | Length of the generated password | `40` |
+| `PasswordRotation__SecretExpiryDays` | Secret-version expiry interval | `35` |
+| `ManagementAuthorization__FunctionAppResourceId` | Azure resource ID of the Function App for runtime checks of effective Owner/Contributor assignments | set by the Bicep deployment |
+| `ManagementApi__TenantId` | Entra tenant for configuration portal sign-in | set by the Bicep deployment |
+| `ManagementApi__AuthorityHost` | Entra sign-in host for the cloud environment | `https://login.microsoftonline.com` |
+| `Monitoring__ApplicationInsightsResourceId` | Application Insights resource from which the portal reads the activity log; an empty value disables the query | set by the Bicep deployment |
+| `Tagging__Rules__<n>__Name` | Unique, case-insensitive rule name for management and logging | required |
+| `Tagging__Rules__<n>__Description` | Human-readable description of the purpose | required |
+| `Tagging__Rules__<n>__BaseDn` | OU-only path for all forest domains or a full domain-specific DN | required |
+| `Tagging__Rules__<n>__ExtensionAttributes__extensionAttribute<m>` | Target value for attribute 1 through 15 | optional |
+| `Tagging__Rules__<n>__EntraGroupIds__<m>` | Object ID of a static Entra security group | optional, maximum 50 |
+| `Tagging__Rules__<n>__AdministrativeUnitIds__<m>` | Object ID of a regular or restricted management administrative unit | optional, maximum 50 |
 
-Jede Regel benötigt mindestens eine Aktion aus diesen drei Zielarten. Die Mitgliedschaftsziele aller passenden Regeln werden vereinigt. HybridDeviceTagger speichert verwaltete Extension-Attribute mit ihrem zuletzt gesetzten Wert sowie ausschließlich selbst erzeugte Mitgliedschaften im privaten Blob-Container `membership-ledger`. Verlässt ein Computer alle konfigurierten Ziel-OUs oder entfällt eine Aktion aus allen passenden Regeln, entfernt die Function die noch unveränderten verwalteten Attribute und ihre eigenen Gruppen-, AU- und RMAU-Mitgliedschaften. Zwischenzeitlich manuell geänderte Attribute sowie bereits vorher manuell oder durch andere Systeme vorhandene Mitgliedschaften werden nicht entfernt.
+Each rule requires at least one action from these three target types. Membership targets from all matching rules are combined. HybridDeviceTagger stores managed extension attributes with their last assigned values and only memberships it created itself in the private `membership-ledger` Blob container. If a computer leaves all configured target OUs or an action is removed from all matching rules, the Function removes managed attributes that still have their recorded values and its own group, AU, and RMAU memberships. Attributes manually changed in the meantime and memberships that already existed through manual assignment or other systems are not removed.
 
-Die Anwendung ermittelt Domain Controller über AD-DNS-SRV-Records. Primär verwendet das Servicekonto Basic Bind über LDAPS. Ist LDAPS wegen eines Verbindungs-, TLS- oder Verfügbarkeitsfehlers nicht erreichbar, wird LDAP auf Port 389 vor dem Bind mit StartTLS auf TLS hochgestuft. Ungültige Anmeldedaten lösen keinen Transportwechsel aus. Zertifikats- und DNS-Namensprüfung sind für beide Transportarten identisch; ein unverschlüsselter Basic Bind ist ausgeschlossen.
+The application discovers domain controllers through AD DNS SRV records. The service account primarily uses Basic bind over LDAPS. If LDAPS is unavailable because of a connection, TLS, or availability error, LDAP on port 389 is upgraded to TLS with StartTLS before binding. Invalid credentials do not trigger a transport switch. Certificate and DNS-name validation are identical for both transports; unencrypted Basic bind is never allowed.
 
-Für private PKIs wird das öffentliche Root-CA-Zertifikat im DER- oder PEM-Format nach der Installation im Konfigurationsportal oder mit `Add-HybridDeviceTaggerTrustedCertificate` hinterlegt; beim optionalen Pre-Seeding kann der Installer es mit `-ActiveDirectoryTrustedCertificatePath` übernehmen. Für einen Lab-DC darf dies auch dessen direkt selbstsigniertes Serverzertifikat sein. Ein vom Installer übernommenes Zertifikat wird ohne privaten Schlüssel als PEM in das Function-Paket geschrieben. Die Anwendung akzeptiert nur Zertifikate, die eine gültige Kette zu diesem Trust Anchor, die EKU Server Authentication und den DNS-Namen des LDAP-Ziels besitzen.
+For private PKIs, add the public root-CA certificate in DER or PEM format after installation through the configuration portal or `Add-HybridDeviceTaggerTrustedCertificate`; during optional pre-seeding, the installer can import it with `-ActiveDirectoryTrustedCertificatePath`. For a lab DC, its directly self-signed server certificate is also allowed. A certificate imported by the installer is written to the Function package as PEM without a private key. The application accepts only certificates with a valid chain to this trust anchor, the Server Authentication EKU, and the DNS name of the LDAP target.
 
-Beispiel für lokale App Settings:
+Example local app settings:
 
 ```text
 Tagging__Rules__0__Name=Tier 0 workstations
@@ -626,78 +622,125 @@ Tagging__Rules__1__BaseDn=OU=Server
 Tagging__Rules__1__ExtensionAttributes__extensionAttribute2=Tier1
 ```
 
-Enthält `BaseDn` nur OU-Komponenten, beispielsweise `OU=Tier0,OU=Admin`, liest die Function die Domain-CrossRefs aus der Forest-Konfigurationspartition und sucht diesen OU-Pfad in jeder Domain. Eine Domain, in der der Pfad nicht existiert, wird übersprungen; existiert er in keiner Domain, schlägt die Regel fehl. Ein vollständiger DN wie `OU=Tier0,OU=Admin,DC=child,DC=example,DC=com` begrenzt die Regel dagegen auf genau diese Domain. Die daraus abgeleitete DNS-Domain muss exakt als `dnsRoot` im Forest veröffentlicht sein; diese Prüfung erfolgt vor dem Speichern und erneut vor dem LDAP-Bind.
+If `BaseDn` contains only OU components, for example `OU=Tier0,OU=Admin`, the Function reads domain cross-references from the forest configuration partition and searches for that OU path in every domain. A domain without the path is skipped; if the path exists in no domain, the rule fails. A full DN such as `OU=Tier0,OU=Admin,DC=child,DC=example,DC=com` restricts the rule to that specific domain. Its derived DNS domain must exactly match a `dnsRoot` advertised in the forest; this check runs before saving and again before the LDAP bind.
 
-Jede konkrete OU wird mit LDAP `SearchScope.Subtree` durchsucht und erfasst damit Computer direkt in der Basis-OU und in allen darunterliegenden OUs. Regeln dürfen sich überlappen; Zuweisungen unterschiedlicher Attribute werden für ein Gerät zusammengeführt. Weisen überlappende Regeln demselben Attribut unterschiedliche Werte zu, wird der Lauf mit einem Konfigurationsfehler beendet, statt einen reihenfolgeabhängigen Wert zu schreiben.
+Each resolved OU is searched with LDAP `SearchScope.Subtree`, covering computers directly in the base OU and all descendant OUs. Rules may overlap; assignments for different attributes are merged for each device. If overlapping rules assign different values to the same attribute, the run fails with a configuration error instead of writing an order-dependent value.
 
-## Lokal ausführen
+## Running Locally
 
-1. `src/HybridDeviceTagger/local.settings.example.json` nach `src/HybridDeviceTagger/local.settings.json` übertragen und Domain Controller, Benutzer-DN sowie Vault-URI anpassen.
-2. Azurite starten oder `AzureWebJobsStorage` auf eine Entwicklungs-Storage-Verbindung setzen.
-3. Das bestehende AD-Kennwort als `current`-Secret im Key Vault anlegen.
-4. Eine lokale Azure-Anmeldung mit Secret-Lese- und Schreibrechten bereitstellen, die über `DefaultAzureCredential` verwendet werden kann.
-5. In `src/HybridDeviceTagger` den Befehl `func start` ausführen.
+1. Copy `src/HybridDeviceTagger/local.settings.example.json` to `src/HybridDeviceTagger/local.settings.json` and adjust the domain controller, user DN, and vault URI.
+2. Start Azurite or set `AzureWebJobsStorage` to a development storage connection.
+3. Store the existing AD password as the `current` secret in Key Vault.
+4. Provide a local Azure sign-in with secret read and write permissions that `DefaultAzureCredential` can use.
+5. Run `func start` in `src/HybridDeviceTagger`.
 
-`local.settings.json` ist von Git ausgeschlossen. Zugangsdaten dürfen nicht in die Beispielkonfiguration oder das Repository eingetragen werden.
+`local.settings.json` is excluded from Git. Never add credentials to the example configuration or the repository.
 
-## Build und Tests
+## Build and Tests
 
 ```powershell
 dotnet build HybridDeviceTagger.sln --configuration Release
 dotnet test HybridDeviceTagger.sln --configuration Release
 ```
 
-Die Unit-Tests prüfen Geräteabgleich, Fälligkeit, reguläre Rotation, Recovery und Kennwortzusammensetzung.
+The unit tests cover device matching, rotation due-date checks, normal rotation, recovery, and password composition.
 
-Der GitHub-Actions-Workflow `ci.yml` wird nur manuell über `workflow_dispatch` gestartet. Er checkt die vollständige Git-Historie aus (`fetch-depth: 0`), damit die Release-Tags zur Versionsberechnung verfügbar sind, baut, testet und paketiert mit `scripts/Build-InstallationPackage.ps1` und lädt das Installationsarchiv als Artefakt `installation-package` hoch. Automatische Läufe bei Pushes und Pull Requests sind deaktiviert, weil die Enterprise-Richtlinie dieses privaten Repositorys keine GitHub-hosted Runner zulässt. Für automatische CI muss ein freigegebener Self-hosted Runner eingerichtet und im Workflow als `runs-on` eingetragen werden.
+The GitHub Actions workflow `ci.yml` is started manually through `workflow_dispatch` only. It checks out the complete Git history (`fetch-depth: 0`) so that release tags are available for version calculation, builds, tests, and packages with `scripts/Build-InstallationPackage.ps1`, and uploads the installation archive as the `installation-package` artifact. Automatic runs on pushes and pull requests are disabled because the enterprise policy for this private repository does not allow GitHub-hosted runners. Automatic CI requires an approved self-hosted runner configured as `runs-on` in the workflow.
 
-## Versionierung und Autor
+## Troubleshooting
 
-Die Produktversion hat das Format `<YYYY><MM>.<counter>`, zum Beispiel `202611.3`. Sie wird nicht in Dateien gepflegt, sondern von `scripts/Get-ProductVersion.ps1` aus den Git-Release-Tags `v<YYYY><MM>.<counter>` berechnet. Ein getaggter Commit verwendet genau diese Version ohne Suffix; sonst ist der Zähler die höchste Release-Nummer des aktuellen Monats plus 1. Außerhalb von `main` wird der Branchname angehängt, zum Beispiel `202611.1-dev`. `Directory.Build.targets` übernimmt die Version in jeden Build; `Directory.Build.props` enthält keine Version mehr. `AssemblyVersion` und `FileVersion` lauten `<YYYY>.<M>.<counter>.0`, weil CLR-Versionen je Segment höchstens 65535 erlauben. Eine Version kann explizit gesetzt werden:
+### Latest Tagging Run Trace
+
+Starting any tagging run, whether scheduled or requested, replaces `device-tagger-last-run.jsonl` in the private `run-traces` Blob container. Each processing step is written immediately as a separate JSON line. This preserves the trace written so far if an exception occurs or the process terminates. The file includes the UTC timestamp, increasing sequence number, invocation ID, phase, action, outcome, device and target IDs, and, for errors, the exception type, message, and stack trace. Passwords, tokens, and extension-attribute values are not stored; attribute comparisons contain only SHA-256 fingerprints.
+
+The file deliberately uses JSON Lines. Copilot can analyze individual lines independently, filter by `invocationId`, `phase`, `action`, `outcome`, `deviceId`, or `targetId`, and identify the last successful step immediately before an error. Because the file contains device and Entra object IDs and infrastructure paths, it must be treated as confidential even though it contains no secrets.
+
+### Exporting the Trace and Opening It in VS Code
+
+Downloading requires the signed-in account to have `Storage Blob Data Reader` or a higher data role and network access to the private Blob endpoint:
+
+```powershell
+az storage blob download `
+	--account-name '<storage-account>' `
+	--container-name 'run-traces' `
+	--name 'device-tagger-last-run.jsonl' `
+	--file '.\device-tagger-last-run.jsonl' `
+	--auth-mode login
+
+code '.\device-tagger-last-run.jsonl'
+```
+
+The exported trace can then be opened directly in VS Code and provided to Copilot for troubleshooting.
+
+## Versioning and Author
+
+The product version uses the format `<YYYY><MM>.<counter>`, for example `202611.3`. It is not maintained in files; `scripts/Get-ProductVersion.ps1` calculates it from Git release tags named `v<YYYY><MM>.<counter>`. A tagged commit uses that exact version without a suffix; otherwise, the counter is the highest release counter of the current month plus one. Outside `main`, the branch name is appended, for example `202611.1-dev`. `Directory.Build.targets` applies the version to every build; `Directory.Build.props` no longer contains a version. `AssemblyVersion` and `FileVersion` use `<YYYY>.<M>.<counter>.0` because CLR version segments cannot exceed 65535. A version can be set explicitly:
 
 ```powershell
 ./scripts/Get-ProductVersion.ps1 -Detailed
 dotnet build HybridDeviceTagger.sln --configuration Release -p:ProductVersion=202611.3
 ```
 
-PowerShell-Quellen tragen `# Project-Version: source`, das Modul-Manifest `ModuleVersion = '0.0'`. Beides ersetzt erst der Paket-Build; außerhalb von `main` erhält das Modul zusätzlich ein Prerelease-Label.
+PowerShell sources carry `# Project-Version: source`, and the module manifest contains `ModuleVersion = '0.0'`. Both are replaced only during the package build; outside `main`, the module also receives a prerelease label.
 
-Vor jedem Commit muss die Änderung unter `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) beschrieben werden. Das eingecheckte Prüfskript validiert den Changelog-Eintrag, Versionsmarkierung und Autorzeile geänderter Produktionsdateien sowie das Versions-Badge der README, das die Hooks vorher automatisch auf die Version des neuen Commits setzen. Die Repository-Hooks werden einmalig pro Clone aktiviert:
+The author and contact is Andreas Lucas (aka Kili), `andreas.lucas@outlook.com`.
+
+### Building the Installation Package
+
+```powershell
+./scripts/Build-InstallationPackage.ps1
+```
+
+The script runs the tests, publishes the Function with the calculated version as `installationspackage/function/HybridDeviceTagger.zip`, creates `version.json`, assembles `artifacts/HybridDeviceTagger-<Version>/` with version-stamped scripts and module manifest plus `LICENSE`, and creates the release archive `artifacts/HybridDeviceTagger-<Version>.zip`. Use `-SkipTests` to skip the tests. The CI workflow ([.github/workflows/ci.yml](.github/workflows/ci.yml)) checks out the complete history, builds the package, and uploads the ZIP as an artifact.
+
+### Creating a Release
+
+1. On `main`, move the entries under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) to a section named `## [<Version>] - <yyyy-MM-dd>`. Run `./scripts/Get-ProductVersion.ps1 -Branch main` to display the next version.
+2. Commit the change.
+3. Build and tag the release:
+
+   ```powershell
+   ./scripts/Build-InstallationPackage.ps1 -Release
+   git push origin v<Version>
+   ```
+
+`-Release` requires the `main` branch, a clean working tree, version badges in both README languages matching the release version, and the corresponding changelog section, then creates the annotated tag `v<Version>`.
+
+When a GitHub Release that is not marked as a prerelease is published for this tag, the [.github/workflows/publish-powershell-module.yml](.github/workflows/publish-powershell-module.yml) workflow builds the package and publishes the stamped module from `artifacts` to PowerShell Gallery. The release tag must match the checked-out commit's `v<YYYY><MM>.<counter>` tag.
+
+### Commit Conventions
+
+Every commit describes its changes under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Changed PowerShell files must contain the version marker and author line; changed C# and Bicep files must contain the author line. The version badges in both README languages always show the version of the corresponding commit, for example `202611.2-dev` on `dev` and `202611.2` for the release commit on `main`. The `pre-commit` and `pre-merge-commit` hooks update them automatically in the staged content through [scripts/Update-ReadmeVersion.ps1](scripts/Update-ReadmeVersion.ps1), using the version from `Get-ProductVersion.ps1 -NextCommit`; the commit guard rejects mismatched badges, and `-Release` requires the release version. If the hook is not enabled, run `./scripts/Update-ReadmeVersion.ps1 -Staged` before committing. After a fast-forward merge, `main` still shows the source branch's version until the next commit.
+
+[README.md](README.md) is the English version and [README.de.md](README.de.md) is the German version. Before every commit, translate content changes from either file into the other language, including headings, navigation, diagrams, examples, and language-specific heading links. Copilot follows this rule through the repository instructions. Stage both translations together. The commit guard compares staged content with `HEAD`, ignoring generated badge values, and rejects a content change in only one language. It does not generate translations or verify semantic equivalence; contributors remain responsible for accurate translations. Unstaged translation edits do not satisfy the staged check.
+
+Enable the repository hooks once per clone:
 
 ```powershell
 git config core.hooksPath .githooks
 ```
 
-Nach dem Staging kann dieselbe Prüfung manuell ausgeführt werden:
+After staging, the same check can be run manually:
 
 ```powershell
 pwsh -NoProfile -File scripts/Assert-CommitMetadata.ps1 -Staged
 ```
 
-Ein Release entsteht auf `main`: Einträge unter `## [Unreleased]` in einen Abschnitt `## [<Version>] - <yyyy-MM-dd>` verschieben, committen, anschließend:
+## Development Prerequisites
 
-```powershell
-./scripts/Build-InstallationPackage.ps1 -Release
-git push origin v<Version>
-```
+- .NET 8 SDK for building, testing, and creating the installation package
+- PowerShell 7.2 or later and Git with release tags for version calculation
+- Azure Functions Core Tools v4 for running the Function App locally
+- Azure Storage or local Azurite for timer and queue triggers
 
-Autor und Ansprechpartner ist Andreas Lucas (aka Kili), `andreas.lucas@outlook.com`.
-
-## Entwicklungsvoraussetzungen
-
-- .NET 8 SDK zum Bauen, Testen und Erzeugen des Installationspakets
-- PowerShell 7.2 oder neuer und Git mit den Release-Tags für die Versionsberechnung
-- Azure Functions Core Tools v4 zum lokalen Starten der Function App
-- Azure Storage oder lokal Azurite für Timer- und Queue-Trigger
-
-Das vollständige Installationspaket wird mit folgendem Befehl unter `artifacts` erzeugt:
+Create the complete installation package under `artifacts` with:
 
 ```powershell
 pwsh -NoProfile -File scripts/Build-InstallationPackage.ps1
 ```
 
-Vorkonfiguriert sind:
+Preconfigured defaults:
 
-- Regeln: mehrere OU-Teilbäume mit jeweils einem oder mehreren Extension-Attributen
-- Geräteabgleich: alle 15 Minuten
-- Kennwortprüfung: täglich; Rotation nach 25 Tagen
+- Rules: multiple OU subtrees, each with one or more extension attributes
+- Device matching: every 15 minutes
+- Password check: daily; rotation after 25 days

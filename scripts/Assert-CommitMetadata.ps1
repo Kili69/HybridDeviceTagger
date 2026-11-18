@@ -17,8 +17,10 @@ commit no longer changes a version number. Instead, this check enforces:
   "# Project-Version: source" and the author line, which the package build replaces with the
   product version;
 - every changed production C# and Bicep file carries the author line;
-- the version badge in README.md shows the version of the new commit
-  (Update-ReadmeVersion.ps1, called by the pre-commit hook, updates it).
+- the version badges in README.md and README.de.md show the version of the new commit
+  (Update-ReadmeVersion.ps1, called by the pre-commit hook, updates them);
+- content changes to either README are accompanied by changes to the other language, ignoring
+  generated version-badge values. This checks paired edits, not translation quality.
 
 .PARAMETER Staged
 Checks the staged changes instead of the working tree.
@@ -104,6 +106,44 @@ try {
     }
     catch {
         $failures.Add($_.Exception.Message)
+    }
+
+    $readmePaths = @('README.md', 'README.de.md')
+    $headReadmes = @(& git ls-tree --name-only HEAD -- @readmePaths)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to inspect the committed README languages.'
+    }
+    $readmeContentChanges = @{}
+    $badgePattern = 'https://img\.shields\.io/badge/version-[^"]+-0A66C2" alt="Version [^"]+"'
+    foreach ($readmePath in $readmePaths) {
+        $before = if ($readmePath -in $headReadmes) {
+            $content = & git show "HEAD:$readmePath"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Unable to read the committed $readmePath."
+            }
+            $content -join "`n"
+        }
+        else { '' }
+
+        $after = if ($Staged) {
+            $content = & git show ":$readmePath"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Both README.md and README.de.md must exist in the index. Stage $readmePath."
+            }
+            $content -join "`n"
+        }
+        else {
+            if (-not (Test-Path -LiteralPath $readmePath -PathType Leaf)) {
+                throw "Both README.md and README.de.md must exist. Restore $readmePath."
+            }
+            (Get-Content -LiteralPath $readmePath) -join "`n"
+        }
+        $readmeContentChanges[$readmePath] =
+            ($before -replace $badgePattern, 'VERSION_BADGE') -cne
+            ($after -replace $badgePattern, 'VERSION_BADGE')
+    }
+    if ($readmeContentChanges['README.md'] -ne $readmeContentChanges['README.de.md']) {
+        $failures.Add('README.md (English) and README.de.md (German) must be updated together. Translate the content change into the other language and stage both files; version-badge-only changes do not count as a translation.')
     }
 
     foreach ($file in $changedFiles) {

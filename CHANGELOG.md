@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Moved the installation-package build, release creation, and commit convention chapters from the README to `DEVELOPER.md`, with links from the README.
+- Moved the last tagging-run trace and VS Code trace export chapters from the README to `DEVELOPER.md`, with links from the README.
+- Removed the CI status badge from the README header.
+- Updated the README navigation and added a linked Troubleshooting chapter covering mismatched service-account passwords and LDAPS root-CA or AIA certificate-chain failures.
+- Translated all remaining German content in `DEVELOPER.md` into English and updated README links to the translated headings.
+- Added `README.de.md` as the German version and translated `README.md` into English, with links between languages.
+- Added bidirectional README translation instructions and a commit guard for paired content changes; both language badges are updated and verified without staging unrelated edits.
+
 ## [202611.4] - 2026-11-17
 
 ### Added
