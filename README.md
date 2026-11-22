@@ -4,7 +4,7 @@
 
 <p align="center"><img src="./assets/kili-logo.png" alt="HybridDeviceTagger logo" width="180"></p>
 <p align="center"><strong>OU-based tagging of hybrid devices in Microsoft Entra ID</strong></p>
-<p align="center"><a href="#versioning-and-release"><img src="https://img.shields.io/badge/version-202611.5-0A66C2" alt="Version 202611.5"></a> <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-2C3E50" alt="Apache License 2.0"></a> <img src="https://img.shields.io/badge/platform-Azure%20Functions-0078D4?logo=microsoftazure" alt="Azure Functions"> <img src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white" alt=".NET 8"> <img src="https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 7.2 or newer"></p>
+<p align="center"><a href="#versioning-and-release"><img src="https://img.shields.io/badge/version-202611.5--dev-0A66C2" alt="Version 202611.5-dev"></a> <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-2C3E50" alt="Apache License 2.0"></a> <img src="https://img.shields.io/badge/platform-Azure%20Functions-0078D4?logo=microsoftazure" alt="Azure Functions"> <img src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white" alt=".NET 8"> <img src="https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 7.2 or newer"></p>
 
 ---
 
@@ -54,6 +54,8 @@ HybridDeviceTagger can be installed:
 ### The Installation Package
 
 All files needed for installation are in the [installationspackage](installationspackage) directory. A release package named `HybridDeviceTagger-<Version>.zip` contains this directory plus the precompiled Function, `version.json`, and the license:
+
+Download the installation ZIP and its `.sha256` checksum from [GitHub Releases](https://github.com/Kili69/HybridDeviceTagger/releases/latest), not the automatically generated source archive. Releases are built and tested after a prepared `dev` pull request is merged into protected `main`; see [Creating a Release](DEVELOPER.md#creating-a-release).
 
 | File | Purpose |
 | --- | --- |
