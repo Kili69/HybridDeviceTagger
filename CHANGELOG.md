@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added `README.de.md` as the German version and translated `README.md` into English, with links between languages.
 - Added bidirectional README translation instructions and a commit guard for paired content changes; both language badges are updated and verified without staging unrelated edits.
 - Enabled automatic pull-request package validation and documented the GitHub Actions exception for main release metadata only.
+- Configured a dedicated release deploy key in an Actions secret because GitHub does not allow the built-in Actions app as a ruleset bypass actor; metadata pushes do not recursively start another release.
 
 ## [202611.4] - 2026-11-17
 

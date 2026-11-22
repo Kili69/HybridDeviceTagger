@@ -16,16 +16,27 @@ permissions:
 
 jobs:
   release:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'release: finalize '))
     runs-on: windows-latest
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - name: Require release deploy key
+        shell: pwsh
+        env:
+          RELEASE_DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_DEPLOY_KEY)) {
+              throw 'Repository secret RELEASE_DEPLOY_KEY is required for the metadata-only branch-rule exception.'
+          }
       - uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
@@ -72,7 +83,7 @@ jobs:
               git commit -m "release: finalize $version" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
               if ($LASTEXITCODE -ne 0) { throw 'Unable to commit release metadata.' }
               git push origin HEAD:main
-              if ($LASTEXITCODE -ne 0) { throw 'Unable to push release metadata. Check the Actions branch-rule exception.' }
+              if ($LASTEXITCODE -ne 0) { throw 'Unable to push release metadata. Check the release deploy-key branch-rule exception.' }
           } elseif ($LASTEXITCODE -ne 0) { throw 'Unable to inspect staged metadata.' }
           "core=$version" >> $env:GITHUB_OUTPUT
           "tag=v$version" >> $env:GITHUB_OUTPUT
