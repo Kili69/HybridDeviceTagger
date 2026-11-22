@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- Finalized the main version badges for the tested release installation package.
+
 - Moved the installation-package build, release creation, and commit convention chapters from the README to `DEVELOPER.md`, with links from the README.
 - Moved the last tagging-run trace and VS Code trace export chapters from the README to `DEVELOPER.md`, with links from the README.
 - Removed the CI status badge from the README header.
