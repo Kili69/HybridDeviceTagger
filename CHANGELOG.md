@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [202611.5] - 2026-11-22
+
+### Added
+
+- Protected dev-to-main promotion with a trusted source-branch and prepared-changelog check plus a required installation-package build.
+- Added `scripts/Prepare-Release.ps1` to move Unreleased entries to the next Git-derived release section on dev and finalize version badges on main.
+- Added automatic stable GitHub Releases after dev promotion, including tested precompiled installation archives, SHA-256 checksums, and explicit PowerShell Gallery publication.
+
 ### Changed
 
 - Moved the installation-package build, release creation, and commit convention chapters from the README to `DEVELOPER.md`, with links from the README.
@@ -15,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Translated all remaining German content in `DEVELOPER.md` into English and updated README links to the translated headings.
 - Added `README.de.md` as the German version and translated `README.md` into English, with links between languages.
 - Added bidirectional README translation instructions and a commit guard for paired content changes; both language badges are updated and verified without staging unrelated edits.
+- Enabled automatic pull-request package validation and documented the GitHub Actions exception for main release metadata only.
 
 ## [202611.4] - 2026-11-17
 

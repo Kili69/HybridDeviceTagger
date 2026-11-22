@@ -170,7 +170,7 @@ try {
 
     if (-not $SkipTests) {
         Write-Step 'Running unit tests'
-        foreach ($testScript in 'InstallerAuthorization.Tests.ps1', 'InstallerDirectory.Tests.ps1', 'ManagementModule.Tests.ps1', 'ReadmeVersion.Tests.ps1') {
+        foreach ($testScript in 'InstallerAuthorization.Tests.ps1', 'InstallerDirectory.Tests.ps1', 'ManagementModule.Tests.ps1', 'ReadmeVersion.Tests.ps1', 'ReleasePreparation.Tests.ps1') {
             Invoke-Checked -FilePath 'pwsh' -Arguments @(
                 '-NoProfile', '-File', (Join-Path $repositoryRoot "tests\$testScript"))
         }

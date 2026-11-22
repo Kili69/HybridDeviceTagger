@@ -1,0 +1,110 @@
+name: Release installation package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: read
+  actions: write
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Verify promotion provenance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -cne $env:GITHUB_SHA) {
+              throw 'main changed after this run was queued. Run the release workflow on current main.'
+          }
+          $promotion = $head
+          $subject = (git log -1 --format=%s).Trim()
+          $author = (git log -1 --format=%ae).Trim()
+          if ($subject -match '^release: finalize \d{6}\.\d+$' -and $author -eq '41898282+github-actions[bot]@users.noreply.github.com') {
+              $files = @(git diff-tree --no-commit-id --name-only -r HEAD)
+              if ($files | Where-Object { $_ -notin @('README.md', 'README.de.md', 'CHANGELOG.md') }) {
+                  throw 'Release metadata commit changes files outside its allowlist.'
+              }
+              $promotion = (git rev-parse HEAD^).Trim()
+          }
+          $json = gh api "repos/$env:GH_REPO/commits/$promotion/pulls"
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to verify the merged dev PR.' }
+          $pulls = @($json | ConvertFrom-Json)
+          $approved = @($pulls | Where-Object {
+              $_.merged_at -and $_.base.ref -ceq 'main' -and $_.head.ref -ceq 'dev' -and
+              $_.head.repo.full_name -ceq $env:GH_REPO -and $_.merge_commit_sha -ceq $promotion
+          })
+          if ($approved.Count -ne 1) { throw 'Release source must be a merged dev-to-main PR.' }
+          ./scripts/Prepare-Release.ps1 -Verify | Out-Null
+      - name: Finalize main metadata
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          $version = ./scripts/Prepare-Release.ps1 -Finalize
+          git add -- README.md README.de.md CHANGELOG.md
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to stage release metadata.' }
+          git diff --cached --quiet
+          if ($LASTEXITCODE -eq 1) {
+              ./scripts/Assert-CommitMetadata.ps1 -Staged
+              git commit -m "release: finalize $version" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+              if ($LASTEXITCODE -ne 0) { throw 'Unable to commit release metadata.' }
+              git push origin HEAD:main
+              if ($LASTEXITCODE -ne 0) { throw 'Unable to push release metadata. Check the Actions branch-rule exception.' }
+          } elseif ($LASTEXITCODE -ne 0) { throw 'Unable to inspect staged metadata.' }
+          "core=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+      - name: Build and test official installation package
+        shell: pwsh
+        run: ./scripts/Build-InstallationPackage.ps1 -Release
+      - name: Publish release archive and checksum
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.core }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $PWD "artifacts/HybridDeviceTagger-$env:RELEASE_VERSION.zip"
+          $checksum = "$archive.sha256"
+          "$( (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() )  $(Split-Path $archive -Leaf)" |
+              Set-Content -LiteralPath $checksum -Encoding ascii
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          ./scripts/Prepare-Release.ps1 -Verify | Set-Content -LiteralPath $notes -Encoding utf8NoBOM
+          git push origin $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to push release tag.' }
+          # A draft is not published until both installation assets have been uploaded.
+          $releases = gh api "repos/$env:GH_REPO/releases?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect existing releases.' }
+          if (-not @($releases | Where-Object tag_name -CEQ $env:RELEASE_TAG).Count) {
+              gh release create $env:RELEASE_TAG --verify-tag --draft --title "HybridDeviceTagger $env:RELEASE_VERSION" --notes-file $notes
+              if ($LASTEXITCODE -ne 0) { throw 'Unable to create draft release.' }
+          }
+          gh release upload $env:RELEASE_TAG $archive $checksum --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to upload installation assets.' }
+          gh release edit $env:RELEASE_TAG --draft=false --latest --notes-file $notes
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to publish release.' }
+          # GITHUB_TOKEN-created releases do not emit another automatic workflow run.
+          gh workflow run publish-powershell-module.yml --ref main -f tag="$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Release published, but PowerShell Gallery workflow dispatch failed.' }

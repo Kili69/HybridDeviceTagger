@@ -2,6 +2,8 @@ name: CI
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
@@ -14,6 +16,7 @@ jobs:
         with:
           # The product version is derived from the release tags, so the full history is required.
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x

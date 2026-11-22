@@ -4,7 +4,7 @@
 
 <p align="center"><img src="./assets/kili-logo.png" alt="HybridDeviceTagger logo" width="180"></p>
 <p align="center"><strong>OU-basierte Kennzeichnung hybrider Geräte in Microsoft Entra ID</strong></p>
-<p align="center"><a href="#versionierung-und-release"><img src="https://img.shields.io/badge/version-202611.5-0A66C2" alt="Version 202611.5"></a> <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-2C3E50" alt="Apache License 2.0"></a> <img src="https://img.shields.io/badge/platform-Azure%20Functions-0078D4?logo=microsoftazure" alt="Azure Functions"> <img src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white" alt=".NET 8"> <img src="https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 7.2 or newer"></p>
+<p align="center"><a href="#versionierung-und-release"><img src="https://img.shields.io/badge/version-202611.5--dev-0A66C2" alt="Version 202611.5-dev"></a> <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-2C3E50" alt="Apache License 2.0"></a> <img src="https://img.shields.io/badge/platform-Azure%20Functions-0078D4?logo=microsoftazure" alt="Azure Functions"> <img src="https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white" alt=".NET 8"> <img src="https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white" alt="PowerShell 7.2 or newer"></p>
 
 ---
 
@@ -54,6 +54,8 @@ installiert werden.
 ### Das Installationspaket
 
 Alle für die Installation notwendigen Dateien liegen im Verzeichnis [installationspackage](installationspackage). Ein Release-Paket `HybridDeviceTagger-<Version>.zip` enthält genau dieses Verzeichnis zuzüglich der vorkompilierten Function, `version.json` und der Lizenz:
+
+Lade das Installations-ZIP und seine `.sha256`-Prüfsumme aus den [GitHub Releases](https://github.com/Kili69/HybridDeviceTagger/releases/latest) herunter, nicht das automatisch erzeugte Quellcodearchiv. Releases werden nach dem Merge eines vorbereiteten `dev`-Pull-Requests in die geschützte Branch `main` gebaut und getestet; siehe [Release erstellen](DEVELOPER.md#creating-a-release).
 
 | Datei | Zweck |
 | --- | --- |

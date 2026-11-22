@@ -1,0 +1,62 @@
+name: Dev promotion policy
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  policy:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_BRANCH: ${{ github.event.pull_request.head.ref || github.ref_name }}
+      SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Never execute PR code with the status-writing token.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref_name || 'main' }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Mark promotion validation pending
+        shell: pwsh
+        run: |
+          gh api "repos/$env:GH_REPO/statuses/$env:SOURCE_SHA" -f state=pending -f context=dev-promotion -f target_url="$env:STATUS_URL"
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to publish pending promotion status.' }
+      - name: Validate source and prepared changelog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:SOURCE_BRANCH -cne 'dev' -or $env:SOURCE_REPOSITORY -cne $env:GH_REPO) {
+              throw 'Only pull requests from dev in this repository may update main.'
+          }
+          git fetch origin $env:SOURCE_SHA --no-tags
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch promotion source.' }
+          $changed = @(git diff --name-only origin/main $env:SOURCE_SHA -- CHANGELOG.md)
+          if ($LASTEXITCODE -ne 0 -or 'CHANGELOG.md' -notin $changed) {
+              throw 'The promotion must include a changelog prepared on dev.'
+          }
+          $version = ./scripts/Get-ProductVersion.ps1 -Branch main -NextCommit
+          $path = Join-Path $env:RUNNER_TEMP 'promotion-changelog.md'
+          $changelog = git show "${env:SOURCE_SHA}:CHANGELOG.md"
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to read promotion changelog.' }
+          Set-Content -LiteralPath $path -Value $changelog -Encoding utf8NoBOM
+          ./scripts/Prepare-Release.ps1 -Verify -Version $version -ChangelogPath $path | Out-Null
+      - name: Publish promotion result
+        if: always()
+        shell: pwsh
+        env:
+          POLICY_RESULT: ${{ job.status }}
+        run: |
+          $state = if ($env:POLICY_RESULT -eq 'success') { 'success' } else { 'failure' }
+          gh api "repos/$env:GH_REPO/statuses/$env:SOURCE_SHA" -f state="$state" -f context=dev-promotion -f target_url="$env:STATUS_URL"
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to publish promotion result.' }
